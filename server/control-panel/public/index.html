@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>🎷 Premium Jazz Lounge — Control Panel</title>
+  <style>
+    :root {
+      --bg: #0d0d10;
+      --bg-card: #16161c;
+      --bg-card-hover: #1c1c24;
+      --border: #2a2a35;
+      --text: #e8e6df;
+      --text-dim: #8a8a98;
+      --gold: #d4af37;
+      --gold-dim: #8a7128;
+      --green: #4ade80;
+      --red: #f87171;
+      --yellow: #facc15;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    header {
+      padding: 28px 36px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    header h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    header .gold { color: var(--gold); }
+    header .phase {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding: 4px 10px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    main {
+      padding: 28px 36px;
+      max-width: 1100px;
+    }
+    .row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 18px 20px;
+      transition: background 0.15s;
+    }
+    .card:hover { background: var(--bg-card-hover); }
+    .card .label {
+      font-size: 11px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+    .card .value {
+      font-size: 22px;
+      font-weight: 600;
+      color: var(--gold);
+    }
+    .card .sub {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 6px;
+      word-break: break-all;
+    }
+    .status-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+    .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--text-dim);
+      flex-shrink: 0;
+    }
+    .dot.ok { background: var(--green); box-shadow: 0 0 8px rgba(74,222,128,0.6); }
+    .dot.fail { background: var(--red); box-shadow: 0 0 8px rgba(248,113,113,0.6); }
+    .dot.pending { background: var(--yellow); }
+    .notice {
+      background: var(--bg-card);
+      border: 1px dashed var(--gold-dim);
+      border-radius: 8px;
+      padding: 16px 20px;
+      color: var(--text-dim);
+      font-size: 13px;
+    }
+    .notice strong { color: var(--gold); }
+    button {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 16px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+    button:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--gold-dim);
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+    .err {
+      font-size: 12px;
+      color: var(--red);
+      margin-top: 4px;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="gold">🎷 Premium Jazz Lounge</span> — Control Panel</h1>
+    <span class="phase">Phase 2 · Bootstrap</span>
+  </header>
+
+  <main>
+    <div class="toolbar">
+      <button id="refresh">↻ 새로고침</button>
+      <button onclick="window.open('/api/health', '_blank')">/api/health</button>
+      <button onclick="window.open('/api/stats', '_blank')">/api/stats</button>
+    </div>
+
+    <div class="row">
+      <div class="card" id="card-db">
+        <div class="label">Supabase DB</div>
+        <div class="status-line">
+          <span class="dot pending"></span>
+          <span class="value" id="db-status" style="font-size:14px">확인 중…</span>
+        </div>
+        <div class="sub" id="db-sub"></div>
+      </div>
+      <div class="card" id="card-storage">
+        <div class="label">Storage Bucket</div>
+        <div class="status-line">
+          <span class="dot pending"></span>
+          <span class="value" id="storage-status" style="font-size:14px">확인 중…</span>
+        </div>
+        <div class="sub" id="storage-sub"></div>
+      </div>
+      <div class="card">
+        <div class="label">서버</div>
+        <div class="value" id="version">v?.?.?</div>
+        <div class="sub" id="port"></div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="card">
+        <div class="label">Tracks</div>
+        <div class="value" id="stat-tracks">—</div>
+      </div>
+      <div class="card">
+        <div class="label">Titles</div>
+        <div class="value" id="stat-titles">—</div>
+      </div>
+      <div class="card">
+        <div class="label">Prompts</div>
+        <div class="value" id="stat-prompts">—</div>
+      </div>
+      <div class="card">
+        <div class="label">Video Projects</div>
+        <div class="value" id="stat-videos">—</div>
+      </div>
+    </div>
+
+    <div class="notice">
+      📌 <strong>다음 단계:</strong> Phase 3 에서 Pool 탭이 추가됩니다 — Suno 곡 업로드, 자동 LLM 제목 생성, 길이/BPM/악기 분석.
+    </div>
+  </main>
+
+  <script>
+    function setStatus(prefix, ok, label, sub, err) {
+      const card = document.getElementById('card-' + prefix);
+      const dot = card.querySelector('.dot');
+      const status = document.getElementById(prefix + '-status');
+      const subEl = document.getElementById(prefix + '-sub');
+      dot.classList.remove('pending', 'ok', 'fail');
+      dot.classList.add(ok ? 'ok' : 'fail');
+      status.textContent = label;
+      status.style.color = ok ? 'var(--green)' : 'var(--red)';
+      subEl.innerHTML = sub || '';
+      if (err) subEl.innerHTML += `<div class="err">${err}</div>`;
+    }
+
+    async function refresh() {
+      // Health
+      try {
+        const r = await fetch('/api/health');
+        const j = await r.json();
+        document.getElementById('version').textContent = 'v' + (j.version || '?');
+        document.getElementById('port').textContent = location.host;
+        setStatus('db', !!j.db?.ok, j.db?.ok ? '연결됨' : '연결 실패',
+          j.db?.ok ? `테이블: <code>${j.db.table}</code>` : '', j.db?.error);
+        setStatus('storage', !!j.storage?.ok, j.storage?.ok ? '존재' : '없음',
+          `버킷: <code>${j.storage?.bucket || '-'}</code>${j.storage?.public ? ' (public)' : ''}`,
+          j.storage?.error);
+      } catch (e) {
+        setStatus('db', false, '서버 응답 없음', '', e.message);
+        setStatus('storage', false, '서버 응답 없음', '', e.message);
+      }
+
+      // Stats
+      try {
+        const r = await fetch('/api/stats');
+        const j = await r.json();
+        document.getElementById('stat-tracks').textContent = j.stats?.pjl_tracks ?? '—';
+        document.getElementById('stat-titles').textContent = j.stats?.pjl_titles ?? '—';
+        document.getElementById('stat-prompts').textContent = j.stats?.pjl_prompts ?? '—';
+        document.getElementById('stat-videos').textContent = j.stats?.pjl_video_projects ?? '—';
+      } catch (e) {
+        ['tracks','titles','prompts','videos'].forEach(k =>
+          document.getElementById('stat-' + k).textContent = '?'
+        );
+      }
+    }
+
+    document.getElementById('refresh').addEventListener('click', refresh);
+    refresh();
+  </script>
+</body>
+</html>
