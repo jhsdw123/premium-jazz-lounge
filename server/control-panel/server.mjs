@@ -17,6 +17,8 @@ import { controlPanelPublic } from '../../lib/paths.mjs';
 import { uploadTrack, deleteTrack, deleteTracks } from '../../lib/storage.mjs';
 import { computeFileHash, parsePrefixOrder } from '../../lib/track-utils.mjs';
 import { analyzeTrack } from '../../lib/track-meta.mjs';
+import { generateTitleCandidates } from '../../lib/llm.mjs';
+import { normalizeTitle, findCollision } from '../../lib/title-utils.mjs';
 
 const PORT = parseInt(process.env.PORT, 10) || 4001;
 const VERSION = '0.2.0';
@@ -490,6 +492,228 @@ app.post('/api/prompts', async (req, res) => {
       .single();
     if (error) throw error;
     res.json({ ok: true, prompt: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Titles: generate / reroll / bulk-generate (Phase 3-C-1) ─────────────
+//
+// 정책:
+//  - 새 제목은 Gemini Pro 가 5개 후보 생성 → 서버가 ≥2 의미단어 충돌 검사로 필터링
+//  - rejected 제목도 영구 보관 + 다음 generate 의 회피 목록에 포함 (학습용)
+//  - reroll 은 현재 title 을 status='rejected' 로 표시 후 새로 generate
+//  - bulk-generate 는 곡 사이 sleep 4500ms (Gemini free tier 15 RPM 안전)
+
+const BULK_SLEEP_MS = 4500;
+const MAX_GEN_ROUNDS = 3;
+
+async function generateTitleForTrack(trackId) {
+  // 1) track + prompt 조회
+  const { data: track, error: terr } = await supabase
+    .from('pjl_tracks')
+    .select('id, title_id, original_filename, prompt:pjl_prompts(prompt_text)')
+    .eq('id', trackId)
+    .single();
+  if (terr) throw new Error(`track 조회 실패: ${terr.message}`);
+  if (!track) throw new Error(`trackId=${trackId} 없음`);
+  if (track.title_id) {
+    const err = new Error(`이미 title_id=${track.title_id} 있음. /api/titles/reroll 사용`);
+    err.code = 'TITLE_ALREADY_SET';
+    throw err;
+  }
+
+  const promptText = track.prompt?.prompt_text || '';
+
+  // 2) 모든 기존 제목 (status 무관) 로드 — 회피 + 충돌 검사용
+  const { data: existing, error: eerr } = await supabase
+    .from('pjl_titles')
+    .select('id, title_en, normalized_words, status');
+  if (eerr) throw new Error(`titles 조회 실패: ${eerr.message}`);
+  const avoidList = (existing || []).map((t) => t.title_en);
+
+  // 3) Gemini 호출 + 충돌 필터, 최대 MAX_GEN_ROUNDS 회 시도
+  const allCandidates = [];
+  const rejections = [];
+  let chosen = null;
+
+  for (let round = 1; round <= MAX_GEN_ROUNDS; round++) {
+    let cands;
+    try {
+      cands = await generateTitleCandidates({
+        promptText, avoidList, count: 5, attempt: round,
+      });
+    } catch (e) {
+      throw new Error(`Gemini 호출 실패 (round ${round}): ${e.message}`);
+    }
+
+    for (const cand of cands) {
+      const trimmed = String(cand).trim();
+      if (!trimmed) continue;
+      allCandidates.push(trimmed);
+
+      // 정확히 일치 (대소문자 무시) → reject
+      if (avoidList.some((t) => t.toLowerCase() === trimmed.toLowerCase())) {
+        rejections.push({ candidate: trimmed, reason: 'exact-duplicate' });
+        continue;
+      }
+
+      const norm = normalizeTitle(trimmed);
+      if (!norm.length) {
+        rejections.push({ candidate: trimmed, reason: 'no-content-words' });
+        continue;
+      }
+
+      const col = findCollision(norm, existing || []);
+      if (col) {
+        rejections.push({
+          candidate: trimmed,
+          reason: 'pattern-collision',
+          existingTitle: col.existingTitle,
+          overlapWords: col.overlapWords,
+        });
+        continue;
+      }
+
+      chosen = { title: trimmed, normalized: norm };
+      break;
+    }
+    if (chosen) break;
+  }
+
+  if (!chosen) {
+    const err = new Error('모든 후보가 충돌/중복 — 패턴 회피 실패');
+    err.candidates = allCandidates;
+    err.rejections = rejections;
+    throw err;
+  }
+
+  // 4) titles insert
+  const { data: title, error: ierr } = await supabase
+    .from('pjl_titles')
+    .insert({
+      title_en: chosen.title,
+      normalized_words: chosen.normalized,
+      status: 'used',
+      use_count: 1,
+      last_used_at: new Date().toISOString(),
+    })
+    .select('id, title_en, normalized_words, status, use_count')
+    .single();
+  if (ierr) throw new Error(`title insert 실패: ${ierr.message}`);
+
+  // 5) tracks.title_id 연결
+  const { error: uerr } = await supabase
+    .from('pjl_tracks')
+    .update({ title_id: title.id })
+    .eq('id', trackId);
+  if (uerr) {
+    // 고아 title row 정리 (best-effort)
+    await supabase.from('pjl_titles').delete().eq('id', title.id);
+    throw new Error(`track 업데이트 실패: ${uerr.message}`);
+  }
+
+  return {
+    title,
+    track: { id: trackId, title_id: title.id },
+    candidatesConsidered: allCandidates.length,
+    rejections,
+  };
+}
+
+app.post('/api/titles/generate', async (req, res) => {
+  try {
+    const trackId = parseIntOrNull(req.body?.trackId);
+    if (!trackId) return res.status(400).json({ ok: false, error: 'trackId 필수' });
+    const result = await generateTitleForTrack(trackId);
+    res.json({ ok: true, ...result });
+  } catch (e) {
+    const payload = { ok: false, error: e.message };
+    if (e.code) payload.code = e.code;
+    if (e.candidates) payload.candidates = e.candidates;
+    if (e.rejections) payload.rejections = e.rejections;
+    const status = e.code === 'TITLE_ALREADY_SET' ? 409 : 500;
+    res.status(status).json(payload);
+  }
+});
+
+app.post('/api/titles/reroll', async (req, res) => {
+  try {
+    const trackId = parseIntOrNull(req.body?.trackId);
+    const reason = req.body?.reason || null;
+    if (!trackId) return res.status(400).json({ ok: false, error: 'trackId 필수' });
+
+    const { data: track, error: terr } = await supabase
+      .from('pjl_tracks')
+      .select('id, title_id')
+      .eq('id', trackId)
+      .single();
+    if (terr) throw terr;
+    if (!track) return res.status(404).json({ ok: false, error: 'track 없음' });
+
+    let previousTitleId = null;
+    if (track.title_id) {
+      previousTitleId = track.title_id;
+      // 영구 보관: status=rejected (삭제 X)
+      const { error: uerr } = await supabase
+        .from('pjl_titles')
+        .update({ status: 'rejected', rejected_reason: reason })
+        .eq('id', track.title_id);
+      if (uerr) throw uerr;
+      // track.title_id 분리 → generate 가 다시 돌 수 있게
+      const { error: nerr } = await supabase
+        .from('pjl_tracks')
+        .update({ title_id: null })
+        .eq('id', trackId);
+      if (nerr) throw nerr;
+    }
+
+    const result = await generateTitleForTrack(trackId);
+    res.json({ ok: true, ...result, previousTitleId });
+  } catch (e) {
+    const payload = { ok: false, error: e.message };
+    if (e.candidates) payload.candidates = e.candidates;
+    if (e.rejections) payload.rejections = e.rejections;
+    res.status(500).json(payload);
+  }
+});
+
+app.post('/api/titles/bulk-generate', async (req, res) => {
+  try {
+    const trackIds = Array.isArray(req.body?.trackIds)
+      ? req.body.trackIds.map(parseIntOrNull).filter((n) => n != null)
+      : null;
+    const lim = Math.min(Math.max(parseInt(req.body?.limit, 10) || 50, 1), 200);
+
+    let q = supabase
+      .from('pjl_tracks')
+      .select('id')
+      .is('title_id', null)
+      .eq('is_active', true);
+    if (trackIds && trackIds.length) q = q.in('id', trackIds);
+    const { data: tracks, error } = await q.limit(lim);
+    if (error) throw error;
+
+    const results = [];
+    let ok = 0, errs = 0;
+
+    // ⚠ 순차 처리 + sleep — Gemini free tier 15 RPM
+    for (let i = 0; i < tracks.length; i++) {
+      const t = tracks[i];
+      try {
+        const r = await generateTitleForTrack(t.id);
+        results.push({ trackId: t.id, status: 'ok', titleId: r.title.id, title: r.title.title_en });
+        ok++;
+      } catch (e) {
+        results.push({ trackId: t.id, status: 'error', error: e.message });
+        errs++;
+      }
+      if (i < tracks.length - 1) {
+        await new Promise((r) => setTimeout(r, BULK_SLEEP_MS));
+      }
+    }
+
+    res.json({ ok: true, total: tracks.length, summary: { ok, errs }, results });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
