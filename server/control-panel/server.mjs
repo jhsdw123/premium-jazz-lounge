@@ -83,9 +83,19 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024, files: 5 },
 });
 
+// 오디오 허용 검사: MIME 우선, 일부 클라이언트(브라우저/CLI)가 전달하는
+// application/octet-stream 또는 빈 MIME 도 확장자로 fallback 허용.
+const AUDIO_EXTS = ['.mp3', '.m4a', '.wav', '.flac', '.ogg', '.oga', '.aac', '.opus', '.mp4', '.aiff', '.wma'];
 function isAllowedAudio(file) {
   const mt = (file?.mimetype || '').toLowerCase();
-  return mt.startsWith('audio/') || mt === 'video/mp4';
+  if (mt.startsWith('audio/')) return true;
+  if (mt === 'video/mp4') return true;
+  // MIME 누락/일반 → 확장자로 판단
+  if (!mt || mt === 'application/octet-stream' || mt === 'application/x-empty') {
+    const name = (file?.originalname || '').toLowerCase();
+    return AUDIO_EXTS.some((ext) => name.endsWith(ext));
+  }
+  return false;
 }
 
 function parseIntOrNull(v) {
@@ -160,8 +170,19 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
           file.buffer, filename, file.mimetype
         );
 
-        // 분석 (Phase 3-A 는 stub: 모두 null)
-        const { bpm, durationRawSec, durationActualSec } = await analyzeTrack(file.buffer);
+        // 분석 — 격리된 try/catch.
+        // ffprobe/silencedetect 실패해도 DB row 는 null 로 적재 (backfill 로 회복).
+        let bpm = null, durationRawSec = null, durationActualSec = null;
+        let analyzeError = null;
+        try {
+          const meta = await analyzeTrack(file.buffer);
+          bpm = meta.bpm;
+          durationRawSec = meta.durationRawSec;
+          durationActualSec = meta.durationActualSec;
+        } catch (e) {
+          analyzeError = e.message;
+          console.warn(`[upload] analyzeTrack 실패 (${filename}): ${e.message}`);
+        }
         const prefixOrder = parsePrefixOrder(filename);
 
         // DB insert (실패 시 Storage rollback)
@@ -187,7 +208,15 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
           throw new Error(`DB insert 실패: ${insErr.message}`);
         }
 
-        results.push({ filename, status: 'uploaded', trackId: track.id, storagePath });
+        results.push({
+          filename,
+          status: 'uploaded',
+          trackId: track.id,
+          storagePath,
+          duration_raw_sec: durationRawSec,
+          duration_actual_sec: durationActualSec,
+          ...(analyzeError ? { analyzeWarning: analyzeError } : {}),
+        });
         uploaded++;
       } catch (e) {
         results.push({ filename, status: 'error', error: e.message });
@@ -208,7 +237,7 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
 app.get('/api/tracks', async (req, res) => {
   try {
     const {
-      search, promptId, hasVocals, instrument,
+      ids, search, promptId, hasVocals, instrument,
       usedFilter = 'all', prefixOrder = 'any',
       minDuration, maxDuration, fromDate, toDate,
       limit = 100, orderBy = 'newest',
@@ -225,6 +254,10 @@ app.get('/api/tracks', async (req, res) => {
       `)
       .eq('is_active', true);
 
+    if (ids) {
+      const idArr = String(ids).split(',').map((s) => parseIntOrNull(s.trim())).filter((n) => n != null);
+      if (idArr.length) q = q.in('id', idArr);
+    }
     if (search) q = q.ilike('original_filename', `%${search}%`);
     const pid = parseIntOrNull(promptId);
     if (pid) q = q.eq('prompt_id', pid);
@@ -296,6 +329,125 @@ app.post('/api/tracks/delete', async (req, res) => {
     if (delErr) throw delErr;
 
     res.json({ ok: true, deleted: tracks.length, removedFromStorage });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Tracks: backfill (Phase 3-B) ────────────────────────────────────────
+//   POST /api/tracks/backfill
+//   body: { ids?: number[], limit?: number }
+//   ids 가 있으면 해당 트랙만, 없으면 duration_actual_sec=null 인 트랙 일괄 처리.
+//   한 곡씩 순차 처리 (메모리/ffmpeg 프로세스 폭주 방지).
+//   Storage 다운로드 실패 / 분석 실패 / DB update 실패를 각 단계별로 분리 보고.
+app.post('/api/tracks/backfill', async (req, res) => {
+  try {
+    const explicitIds = Array.isArray(req.body?.ids)
+      ? req.body.ids.map(parseIntOrNull).filter((n) => n != null)
+      : null;
+    const lim = Math.min(Math.max(parseInt(req.body?.limit, 10) || 100, 1), 500);
+
+    let q = supabase
+      .from('pjl_tracks')
+      .select('id, storage_path, original_filename')
+      .eq('is_active', true);
+
+    if (explicitIds && explicitIds.length) {
+      q = q.in('id', explicitIds);
+    } else {
+      q = q.is('duration_actual_sec', null);
+    }
+    q = q.limit(lim);
+
+    const { data: tracks, error: selErr } = await q;
+    if (selErr) throw selErr;
+
+    const results = [];
+    let analyzed = 0, dlErrors = 0, anErrors = 0, updErrors = 0, skipped = 0;
+
+    // ⚠ 순차 처리: 동시 ffmpeg 프로세스 폭주 / 메모리 폭증 방지
+    for (const t of tracks) {
+      // 1) Storage 다운로드
+      let buf;
+      try {
+        const { data: blob, error: dlErr } = await supabase.storage
+          .from(SUPABASE_BUCKET)
+          .download(t.storage_path);
+        if (dlErr) throw dlErr;
+        if (!blob) throw new Error('빈 응답');
+        buf = Buffer.from(await blob.arrayBuffer());
+      } catch (e) {
+        results.push({
+          id: t.id,
+          filename: t.original_filename,
+          status: 'error',
+          step: 'download',
+          error: e.message,
+        });
+        dlErrors++;
+        continue;
+      }
+
+      // 2) 분석
+      let meta;
+      try {
+        meta = await analyzeTrack(buf);
+        if (meta._probeError) {
+          // ffprobe 자체가 실패 — 결과 모두 null. error 로 분류.
+          throw new Error(`ffprobe 실패: ${meta._probeError}`);
+        }
+      } catch (e) {
+        results.push({
+          id: t.id,
+          filename: t.original_filename,
+          status: 'error',
+          step: 'analyze',
+          error: e.message,
+        });
+        anErrors++;
+        continue;
+      }
+
+      // 3) DB update
+      try {
+        const { error: updErr } = await supabase
+          .from('pjl_tracks')
+          .update({
+            bpm: meta.bpm,
+            duration_raw_sec: meta.durationRawSec,
+            duration_actual_sec: meta.durationActualSec,
+          })
+          .eq('id', t.id);
+        if (updErr) throw updErr;
+      } catch (e) {
+        results.push({
+          id: t.id,
+          filename: t.original_filename,
+          status: 'error',
+          step: 'update',
+          error: e.message,
+        });
+        updErrors++;
+        continue;
+      }
+
+      results.push({
+        id: t.id,
+        filename: t.original_filename,
+        status: 'analyzed',
+        bpm: meta.bpm,
+        duration_raw_sec: meta.durationRawSec,
+        duration_actual_sec: meta.durationActualSec,
+      });
+      analyzed++;
+    }
+
+    res.json({
+      ok: true,
+      total: tracks.length,
+      summary: { analyzed, skipped, dlErrors, anErrors, updErrors },
+      results,
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
