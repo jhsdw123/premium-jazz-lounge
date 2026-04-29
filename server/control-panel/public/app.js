@@ -117,6 +117,25 @@ async function refreshPrompts() {
   }
 }
 
+async function refreshInstruments() {
+  try {
+    const j = await apiGet('/api/instruments');
+    const sel = $('#filterInstrument');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">전체</option>';
+    for (const it of j.instruments || []) {
+      const o = document.createElement('option');
+      o.value = it.name;
+      o.textContent = `${it.name} (${it.count})`;
+      sel.appendChild(o);
+    }
+    if (cur) sel.value = cur;
+  } catch (e) {
+    // 비치명적 — 필터 dropdown 만 비어있게 두고 진행
+    console.warn('instruments 로드 실패:', e.message);
+  }
+}
+
 $('#newPromptBtn').addEventListener('click', () => $('#newPromptDialog').showModal());
 $('#cancelPromptBtn').addEventListener('click', () => $('#newPromptDialog').close());
 
@@ -147,6 +166,7 @@ function readFiltersFromUrl() {
     hasVocals: p.get('vocals') || '',
     usedFilter: p.get('used') || 'all',
     prefixOrder: p.get('prefix') || 'any',
+    instrument: p.get('instrument') || '',
     minDuration: p.get('min') || '',
     maxDuration: p.get('max') || '',
     orderBy: p.get('sort') || 'newest',
@@ -160,6 +180,7 @@ function writeFiltersToUrl(f) {
   if (f.hasVocals) p.set('vocals', f.hasVocals);
   if (f.usedFilter && f.usedFilter !== 'all') p.set('used', f.usedFilter);
   if (f.prefixOrder && f.prefixOrder !== 'any') p.set('prefix', f.prefixOrder);
+  if (f.instrument) p.set('instrument', f.instrument);
   if (f.minDuration) p.set('min', f.minDuration);
   if (f.maxDuration) p.set('max', f.maxDuration);
   if (f.orderBy && f.orderBy !== 'newest') p.set('sort', f.orderBy);
@@ -173,6 +194,7 @@ function applyFiltersToForm(f) {
   $('#filterVocals').value = f.hasVocals;
   $('#filterUsed').value = f.usedFilter || 'all';
   $('#filterPrefix').value = f.prefixOrder || 'any';
+  $('#filterInstrument').value = f.instrument || '';
   $('#filterMinDur').value = f.minDuration;
   $('#filterMaxDur').value = f.maxDuration;
   $('#filterOrder').value = f.orderBy || 'newest';
@@ -185,6 +207,7 @@ function readFiltersFromForm() {
     hasVocals: $('#filterVocals').value,
     usedFilter: $('#filterUsed').value,
     prefixOrder: $('#filterPrefix').value,
+    instrument: $('#filterInstrument').value,
     minDuration: $('#filterMinDur').value,
     maxDuration: $('#filterMaxDur').value,
     orderBy: $('#filterOrder').value,
@@ -194,7 +217,7 @@ function readFiltersFromForm() {
 function clearFilters() {
   applyFiltersToForm({
     search: '', promptId: '', hasVocals: '',
-    usedFilter: 'all', prefixOrder: 'any',
+    usedFilter: 'all', prefixOrder: 'any', instrument: '',
     minDuration: '', maxDuration: '', orderBy: 'newest',
   });
 }
@@ -240,6 +263,7 @@ async function refreshTracks() {
   if (f.hasVocals) p.set('hasVocals', f.hasVocals);
   if (f.usedFilter) p.set('usedFilter', f.usedFilter);
   if (f.prefixOrder) p.set('prefixOrder', f.prefixOrder);
+  if (f.instrument) p.set('instrument', f.instrument);
   if (f.minDuration) p.set('minDuration', f.minDuration);
   if (f.maxDuration) p.set('maxDuration', f.maxDuration);
   if (f.orderBy) p.set('orderBy', f.orderBy);
@@ -266,7 +290,7 @@ function renderTracks() {
     const hasFilter = f.search || f.promptId || f.hasVocals
       || (f.usedFilter && f.usedFilter !== 'all')
       || (f.prefixOrder && f.prefixOrder !== 'any')
-      || f.minDuration || f.maxDuration;
+      || f.instrument || f.minDuration || f.maxDuration;
     tb.innerHTML = `<tr><td colspan="7" class="empty">${
       hasFilter ? '조건에 맞는 곡이 없습니다. 필터를 조정하세요.' : '아직 곡이 없습니다. mp3 파일을 드래그해서 추가하세요.'
     }</td></tr>`;
@@ -284,8 +308,24 @@ function renderTracks() {
       : '<span class="no-title">(no title)</span>';
     const prefixBadge = t.prefix_order ? `<span class="prefix-badge">${t.prefix_order}</span>` : '';
     const vocalIcon = t.has_vocals ? '<span class="vocal-icon" title="보컬 포함">🎤</span>' : '';
-    const promptName = t.prompt?.nickname
-      || (t.prompt?.prompt_text ? t.prompt.prompt_text.slice(0, 28) : '—');
+
+    // 프롬프트 표시: 닉네임 우선, 없으면 prompt_text 전체.
+    // 셀 자체는 CSS ellipsis 로 시각적 잘림 처리하고, title 속성으로 hover 시
+    // 풀텍스트 노출. (이전엔 JS 에서 slice(0,28) 했는데 그러면 풀텍스트 hover
+    // 도 못 봐서 사용자가 데이터 잘린 걸로 오해함.)
+    const promptShort = t.prompt?.nickname
+      || t.prompt?.prompt_text
+      || '—';
+    const promptFull = t.prompt?.prompt_text
+      ? (t.prompt?.nickname ? `[${t.prompt.nickname}] ${t.prompt.prompt_text}` : t.prompt.prompt_text)
+      : '';
+
+    // 악기 chips
+    const chipsHtml = (t.instruments && t.instruments.length)
+      ? `<div class="instrument-chips">${
+          t.instruments.map((i) => `<span class="instrument-chip">${escapeHtml(i)}</span>`).join('')
+        }</div>`
+      : '';
 
     // title_id 가 있으면 ♻ reroll, 없으면 ✨ generate
     const titleBtnIcon = t.title_id ? '♻' : '✨';
@@ -300,9 +340,10 @@ function renderTracks() {
       <td>
         <div>${prefixBadge}${titleHtml}${vocalIcon}</div>
         <div class="filename">${escapeHtml(t.original_filename || '')}</div>
+        ${chipsHtml}
       </td>
       <td class="col-duration">${fmtDuration(t.duration_actual_sec)}</td>
-      <td class="col-prompt">${escapeHtml(promptName)}</td>
+      <td class="col-prompt" title="${escapeHtml(promptFull)}">${escapeHtml(promptShort)}</td>
       <td class="col-action">
         <button class="row-btn reroll-btn" data-id="${t.id}" title="${titleBtnTitle}">${titleBtnIcon}</button>
       </td>
@@ -394,6 +435,7 @@ function updateBulkBar() {
   const enabled = n > 0 && !state.bulkInProgress;
   $('#bulkRetitleBtn').disabled = !enabled;
   $('#bulkBackfillBtn').disabled = !enabled;
+  $('#bulkExtractBtn').disabled = !enabled;
   $('#bulkDeleteBtn').disabled = !enabled;
 }
 
@@ -408,6 +450,7 @@ $('#clearSelBtn').addEventListener('click', () => {
 
 $('#bulkRetitleBtn').addEventListener('click', () => bulkRetitle());
 $('#bulkBackfillBtn').addEventListener('click', () => bulkBackfill());
+$('#bulkExtractBtn').addEventListener('click', () => bulkExtractInstruments());
 $('#bulkDeleteBtn').addEventListener('click', () => bulkDelete());
 
 // ─── Bulk progress UI (재사용) ─────────────────────────────────────
@@ -495,6 +538,40 @@ async function bulkBackfill() {
   state.bulkInProgress = false;
   await Promise.all([refreshTracks(), refreshStats()]);
   setTimeout(hideBulkProgress, 2200);
+}
+
+async function bulkExtractInstruments() {
+  const ids = Array.from(state.selected);
+  if (!ids.length) return;
+  const overwrite = confirm(
+    `${ids.length}개 트랙의 prompt_text 에서 악기를 재추출합니다.\n\n` +
+    `[확인]: 기존 instruments 있어도 덮어쓰기\n` +
+    `[취소]: 빈 instruments 만 채움 (안전)`
+  );
+  // confirm: OK = overwrite=true, Cancel = overwrite=false (작업 자체는 진행)
+  // 작업 취소하려면 ESC 가 아니라 그냥 다른 버튼 안 누르면 됨
+
+  state.bulkInProgress = true;
+  updateBulkBar();
+  showBulkProgress(`악기 추출 중… (${ids.length}곡)`);
+
+  try {
+    const j = await apiPost('/api/tracks/extract-instruments', { ids, overwrite });
+    setBulkProgress(100,
+      `완료: 갱신 ${j.summary.updated}, 스킵 ${j.summary.skipped}, 실패 ${j.summary.errors}`
+    );
+    if (j.summary.updated > 0) {
+      toast(`악기 추출 완료: ${j.summary.updated}곡 갱신`, 'success');
+    } else {
+      toast(`악기 추출: 갱신 없음 (${overwrite ? 'master 비어있음 또는 prompt 없음' : '이미 다 채워져 있음'})`, 'info');
+    }
+  } catch (e) {
+    toast(`악기 추출 실패: ${e.message}`, 'error');
+  }
+
+  state.bulkInProgress = false;
+  await Promise.all([refreshTracks(), refreshStats(), refreshInstruments()]);
+  setTimeout(hideBulkProgress, 1800);
 }
 
 async function bulkDelete() {
@@ -678,8 +755,8 @@ async function generateTitlesSequential(trackIds) {
 
 // ─── Init ───────────────────────────────────────────────────────────
 async function init() {
-  // 1) prompts 먼저 로드 (필터 dropdown 채우기 위해)
-  await Promise.all([refreshStats(), refreshPrompts()]);
+  // 1) prompts + instruments 먼저 로드 (필터 dropdown 옵션 채우기 위해)
+  await Promise.all([refreshStats(), refreshPrompts(), refreshInstruments()]);
   // 2) URL → form 적용
   applyFiltersToForm(readFiltersFromUrl());
   // 3) 트랙 로드

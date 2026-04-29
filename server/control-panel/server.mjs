@@ -618,6 +618,29 @@ app.post('/api/tracks/extract-instruments', async (req, res) => {
   }
 });
 
+// ─── Instruments: 사용 빈도순 집계 (필터 드롭다운용) ──────────────────────
+app.get('/api/instruments', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('pjl_tracks')
+      .select('instruments')
+      .eq('is_active', true);
+    if (error) throw error;
+    const counts = new Map();
+    for (const t of data || []) {
+      for (const ins of t.instruments || []) {
+        counts.set(ins, (counts.get(ins) || 0) + 1);
+      }
+    }
+    const sorted = Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([name, count]) => ({ name, count }));
+    res.json({ ok: true, instruments: sorted });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── Prompts CRUD ─────────────────────────────────────────────────────────
 
 app.get('/api/prompts', async (_req, res) => {

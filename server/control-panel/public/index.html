@@ -305,6 +305,23 @@
     }
     .vocal-icon { color: var(--jazz-gold); margin-left: 6px; font-size: 11px; opacity: 0.8; }
     .no-title { color: var(--text-muted); font-style: italic; }
+
+    /* Instrument chips */
+    .instrument-chips {
+      margin-top: 4px;
+      display: flex; flex-wrap: wrap; gap: 4px;
+    }
+    .instrument-chip {
+      display: inline-block;
+      padding: 1px 8px;
+      background: rgba(212, 175, 55, 0.10);
+      border: 1px solid rgba(212, 175, 55, 0.35);
+      border-radius: 10px;
+      font-size: 10px;
+      color: var(--jazz-gold);
+      letter-spacing: 0.02em;
+      line-height: 1.5;
+    }
     .filename {
       color: var(--text-muted); font-size: 11px;
       margin-top: 1px; font-family: 'SF Mono', Menlo, Consolas, monospace;
@@ -499,6 +516,12 @@
               <option value="no-prefix">prefix 없음</option>
             </select>
           </span>
+          <span class="filter-group">
+            <label>Instrument</label>
+            <select id="filterInstrument">
+              <option value="">전체</option>
+            </select>
+          </span>
         </div>
         <div class="filter-row">
           <span class="filter-group">
@@ -533,6 +556,7 @@
         <span class="bulk-divider"></span>
         <button class="bulk-btn warn" id="bulkRetitleBtn" type="button" disabled>♻ 일괄 retitle</button>
         <button class="bulk-btn" id="bulkBackfillBtn" type="button" disabled>🔍 일괄 backfill</button>
+        <button class="bulk-btn" id="bulkExtractBtn" type="button" disabled>🎷 악기 추출</button>
         <button class="bulk-btn danger" id="bulkDeleteBtn" type="button" disabled>🗑 선택 삭제</button>
       </div>
 
@@ -590,8 +614,8 @@
       <h3>새 Prompt 추가</h3>
       <label>
         Prompt 텍스트
-        <textarea id="newPromptText" required
-          placeholder="예: New Orleans jazz, alto sax, brushed drums"></textarea>
+        <textarea id="newPromptText" required rows="6" maxlength="5000"
+          placeholder="예: New Orleans jazz, alto sax, brushed drums (장문 prompt OK, 최대 5000자)"></textarea>
       </label>
       <label>
         닉네임 (선택)
