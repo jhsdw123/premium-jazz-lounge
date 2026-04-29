@@ -14,7 +14,7 @@ config({ path: resolve(__dirname, '../../.env.local') });
 
 import { supabase, SUPABASE_BUCKET, SUPABASE_URL } from '../../lib/supabase.mjs';
 import { controlPanelPublic } from '../../lib/paths.mjs';
-import { uploadTrack, deleteTrack, deleteTracks } from '../../lib/storage.mjs';
+import { uploadTrack, deleteTrack, deleteTracks, getSignedUrl } from '../../lib/storage.mjs';
 import { computeFileHash, parsePrefixOrder } from '../../lib/track-utils.mjs';
 import { analyzeTrack } from '../../lib/track-meta.mjs';
 import { generateTitleCandidates } from '../../lib/llm.mjs';
@@ -543,6 +543,44 @@ app.post('/api/tracks/backfill', async (req, res) => {
       total: tracks.length,
       summary: { analyzed, skipped, dlErrors, anErrors, updErrors },
       results,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Tracks: signed audio URL (Phase 3-C-3 — preview player) ─────────────
+//   GET /api/tracks/:id/audio-url
+//   Private bucket 의 곡을 1시간 유효 signed URL 로 노출.
+app.get('/api/tracks/:id/audio-url', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    if (!id) return res.status(400).json({ ok: false, error: 'invalid id' });
+
+    const { data: track, error } = await supabase
+      .from('pjl_tracks')
+      .select('id, storage_path, original_filename, title:pjl_titles(title_en)')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!track) return res.status(404).json({ ok: false, error: `trackId=${id} not found` });
+    if (!track.storage_path) return res.status(500).json({ ok: false, error: 'storage_path 비어있음' });
+
+    const expiresInSec = 3600;
+    let url;
+    try {
+      url = await getSignedUrl(track.storage_path, expiresInSec);
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: `signed URL 발급 실패: ${e.message}` });
+    }
+
+    res.json({
+      ok: true,
+      trackId: track.id,
+      url,
+      expiresAt: new Date(Date.now() + expiresInSec * 1000).toISOString(),
+      title: track.title?.title_en || null,
+      originalFilename: track.original_filename,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

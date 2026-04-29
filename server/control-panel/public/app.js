@@ -9,6 +9,7 @@ const state = {
   tracks: [],
   selected: new Set(),
   bulkInProgress: false,
+  playingTrackId: null,
 };
 
 // ─── Toast notifications ─────────────────────────────────────────────
@@ -331,6 +332,10 @@ function renderTracks() {
     const titleBtnIcon = t.title_id ? '♻' : '✨';
     const titleBtnTitle = t.title_id ? '제목 reroll' : '제목 생성';
 
+    const isPlaying = state.playingTrackId === t.id;
+    if (isPlaying) tr.classList.add('now-playing');
+    const playBtnCls = `play-btn${isPlaying ? ' playing' : ''}`;
+
     tr.innerHTML = `
       <td class="col-check">
         <input type="checkbox" data-id="${t.id}"
@@ -338,7 +343,10 @@ function renderTracks() {
       </td>
       <td class="col-id">${t.id}</td>
       <td>
-        <div>${prefixBadge}${titleHtml}${vocalIcon}</div>
+        <div>
+          <button class="${playBtnCls}" data-track-id="${t.id}" title="재생/일시정지">▶</button>
+          ${prefixBadge}${titleHtml}${vocalIcon}
+        </div>
         <div class="filename">${escapeHtml(t.original_filename || '')}</div>
         ${chipsHtml}
       </td>
@@ -369,6 +377,12 @@ function renderTracks() {
   );
   $$('.delete-btn').forEach((btn) =>
     btn.addEventListener('click', () => deleteTrack(parseInt(btn.dataset.id, 10)))
+  );
+  $$('.play-btn').forEach((btn) =>
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      playTrack(parseInt(btn.dataset.trackId, 10));
+    })
   );
 
   updateBulkBar();
@@ -752,6 +766,91 @@ async function generateTitlesSequential(trackIds) {
   setUploadProgress(100, `제목 생성 완료 (성공 ${done}, 실패 ${errs})`);
   await Promise.all([refreshTracks(), refreshStats()]);
 }
+
+// ─── Audio preview (sticky player) ──────────────────────────────────
+const audioPlayer = $('#audioPlayer');
+const audioEl = $('#audioEl');
+const npTitle = $('#npTitle');
+
+function clearPlayingState() {
+  state.playingTrackId = null;
+  $$('.play-btn.playing').forEach((b) => b.classList.remove('playing'));
+  $$('tr.now-playing').forEach((tr) => tr.classList.remove('now-playing'));
+}
+
+async function playTrack(trackId) {
+  // 같은 곡 ▶ 다시 누르면 toggle 일시정지/재개
+  if (state.playingTrackId === trackId && !audioEl.paused) {
+    audioEl.pause();
+    return;
+  }
+  if (state.playingTrackId === trackId && audioEl.paused && audioEl.src) {
+    try { await audioEl.play(); } catch {}
+    return;
+  }
+
+  // 다른 곡 ▶ → 기존 재생 중단 + URL 새로 fetch
+  clearPlayingState();
+  audioEl.pause();
+
+  let info;
+  try {
+    const r = await fetch(`/api/tracks/${trackId}/audio-url`);
+    info = await r.json();
+    if (!r.ok || !info.ok) throw new Error(info.error || `HTTP ${r.status}`);
+  } catch (e) {
+    toast(`재생 URL 발급 실패: ${e.message}`, 'error');
+    return;
+  }
+
+  audioEl.src = info.url;
+  npTitle.textContent = info.title || info.originalFilename || `Track #${trackId}`;
+  npTitle.title = info.originalFilename || '';
+  audioPlayer.hidden = false;
+
+  state.playingTrackId = trackId;
+  // playing 표시
+  const btn = document.querySelector(`.play-btn[data-track-id="${trackId}"]`);
+  if (btn) btn.classList.add('playing');
+  const row = btn?.closest('tr');
+  if (row) row.classList.add('now-playing');
+
+  try {
+    await audioEl.play();
+  } catch (e) {
+    toast(`재생 실패: ${e.message}`, 'error');
+    clearPlayingState();
+    audioPlayer.hidden = true;
+  }
+}
+
+$('#closePlayer').addEventListener('click', () => {
+  audioEl.pause();
+  audioEl.removeAttribute('src');
+  audioEl.load();
+  audioPlayer.hidden = true;
+  clearPlayingState();
+});
+
+audioEl.addEventListener('ended', () => {
+  // 재생 완료 — playing 표시만 해제, player 는 유지 (사용자가 시크/재생 가능)
+  $$('.play-btn.playing').forEach((b) => b.classList.remove('playing'));
+});
+
+audioEl.addEventListener('play', () => {
+  // 재개 시 ▶ 다시 활성화 표시
+  if (state.playingTrackId != null) {
+    const btn = document.querySelector(`.play-btn[data-track-id="${state.playingTrackId}"]`);
+    if (btn) btn.classList.add('playing');
+  }
+});
+
+audioEl.addEventListener('pause', () => {
+  // 일시정지 — 행 highlight 는 유지하지만 ▶ pulse 는 멈춤
+  if (!audioEl.ended) {
+    $$('.play-btn.playing').forEach((b) => b.classList.remove('playing'));
+  }
+});
 
 // ─── Init ───────────────────────────────────────────────────────────
 async function init() {

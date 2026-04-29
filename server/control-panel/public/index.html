@@ -390,6 +390,75 @@
     }
     dialog button[type="submit"]:hover { background: var(--jazz-gold); }
 
+    /* Play button (per-row) */
+    .play-btn {
+      background: transparent;
+      border: 1px solid rgba(212, 175, 55, 0.3);
+      color: var(--jazz-gold);
+      padding: 1px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 10px;
+      line-height: 1.6;
+      margin-right: 8px;
+      vertical-align: middle;
+      transition: all 0.15s;
+      font-family: inherit;
+    }
+    .play-btn:hover { background: rgba(212, 175, 55, 0.15); border-color: var(--jazz-gold); }
+    .play-btn.playing {
+      background: var(--jazz-gold);
+      color: #000;
+      border-color: var(--jazz-gold);
+      animation: pulseplay 1.4s ease-in-out infinite;
+    }
+    @keyframes pulseplay {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(212, 175, 55, 0.5); }
+      50%      { box-shadow: 0 0 0 4px rgba(212, 175, 55, 0); }
+    }
+    tbody tr.now-playing { background: rgba(212, 175, 55, 0.07); }
+
+    /* Sticky audio player */
+    .sticky-player {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: rgba(10, 10, 10, 0.97);
+      border-top: 2px solid var(--jazz-gold);
+      padding: 12px 24px;
+      display: flex; align-items: center; gap: 16px;
+      box-shadow: 0 -8px 32px rgba(0,0,0,0.6);
+      z-index: 100;
+      animation: slideUp 0.2s ease-out;
+      backdrop-filter: blur(6px);
+    }
+    .sticky-player[hidden] { display: none !important; }
+    @keyframes slideUp {
+      from { transform: translateY(100%); }
+      to   { transform: translateY(0); }
+    }
+    .np-info {
+      display: flex; align-items: center; gap: 8px;
+      min-width: 240px; max-width: 360px;
+      overflow: hidden;
+    }
+    .np-info .np-icon { color: var(--jazz-gold); font-size: 14px; flex-shrink: 0; }
+    .np-info .np-title {
+      font-size: 13px; font-weight: 600; color: var(--text);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    #audioEl {
+      flex: 1; height: 36px;
+      filter: invert(0.85) hue-rotate(180deg);
+    }
+    .player-close-btn {
+      background: transparent; border: none; color: var(--text-dim);
+      font-size: 22px; cursor: pointer; padding: 0 8px;
+      line-height: 1; flex-shrink: 0; font-family: inherit;
+    }
+    .player-close-btn:hover { color: var(--text); }
+
+    /* main 의 bottom padding — sticky player 에 가려지는 트랙 행 보정 */
+    main { padding-bottom: 80px; }
+
     /* Toaster */
     #toaster {
       position: fixed; bottom: 20px; right: 20px;
@@ -627,6 +696,16 @@
       </div>
     </form>
   </dialog>
+
+  <!-- Sticky audio player (Phase 3-C-3) -->
+  <div id="audioPlayer" class="sticky-player" hidden>
+    <div class="np-info">
+      <span class="np-icon">▶</span>
+      <span class="np-title" id="npTitle">—</span>
+    </div>
+    <audio id="audioEl" controls preload="none"></audio>
+    <button id="closePlayer" class="player-close-btn" title="닫기">×</button>
+  </div>
 
   <div id="toaster"></div>
 
