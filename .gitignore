@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+*.egg-info/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Supabase / Auth credentials
+secrets/
+credentials.json
+service-account*.json
+oauth-token*.json
+*.pem
+*.key
+
+# Build output
+.next/
+out/
+dist/
+build/
+video/out/
+
+# Remotion
+video/.remotion/
+
+# Local data (대용량, 재생성 가능)
+data/tracks/
+data/output/
+data/temp/
+data/cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local archives
+*.zip
+*.tar.gz
+*.bak
