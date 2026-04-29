@@ -157,6 +157,87 @@
       margin-top: 4px; font-variant-numeric: tabular-nums;
     }
 
+    /* Filter bar */
+    .filter-bar {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 12px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .filter-row {
+      display: flex; flex-wrap: wrap; gap: 14px; align-items: center;
+    }
+    .search-row { gap: 8px; }
+    .search-icon { color: var(--text-muted); font-size: 13px; }
+    #searchInput {
+      flex: 1; min-width: 240px;
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 6px 10px; font-family: inherit; font-size: 13px;
+    }
+    #searchInput:focus { outline: none; border-color: var(--jazz-gold-dim); }
+    .filter-group {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 12px;
+    }
+    .filter-group label {
+      color: var(--text-dim); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .filter-group select, .filter-group input[type="number"] {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 4px 8px; font-family: inherit; font-size: 12px;
+    }
+    .filter-group input[type="number"] { width: 70px; }
+    .filter-group .dim { color: var(--text-muted); font-size: 11px; }
+    .filter-actions { margin-left: auto; display: flex; gap: 6px; }
+    .filter-btn {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 5px 12px; font-size: 12px; cursor: pointer;
+      font-family: inherit;
+    }
+    .filter-btn:hover { background: var(--bg-hover); }
+    .filter-btn.primary {
+      background: var(--jazz-gold-dim); color: #000;
+      border-color: var(--jazz-gold); font-weight: 600;
+    }
+    .filter-btn.primary:hover { background: var(--jazz-gold); }
+
+    /* Bulk action bar */
+    .bulk-bar {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .bulk-count { color: var(--text-dim); }
+    .bulk-count #bulkCount { color: var(--jazz-gold); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .bulk-divider {
+      width: 1px; height: 16px; background: var(--border);
+      margin: 0 4px;
+    }
+    .bulk-btn {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 4px 10px; font-size: 12px; cursor: pointer;
+      font-family: inherit;
+    }
+    .bulk-btn:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
+    .bulk-btn:disabled {
+      opacity: 0.4; cursor: not-allowed;
+    }
+    .bulk-btn.warn:not(:disabled) { color: var(--jazz-gold); }
+    .bulk-btn.warn:not(:disabled):hover { border-color: var(--jazz-gold-dim); }
+    .bulk-btn.danger:not(:disabled) { color: var(--red); }
+    .bulk-btn.danger:not(:disabled):hover { border-color: var(--red); }
+
     /* Track list */
     .track-list-header {
       display: flex; justify-content: space-between; align-items: center;
@@ -191,17 +272,31 @@
     }
     .track-list tbody tr:hover { background: var(--bg-hover); }
 
+    .col-check { width: 30px; text-align: center; }
+    .col-check input[type="checkbox"] { accent-color: var(--jazz-gold); cursor: pointer; }
     .col-id { width: 50px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
     .col-duration { width: 70px; font-variant-numeric: tabular-nums; color: var(--text-dim); }
     .col-prompt { color: var(--text-dim); font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .col-actions { width: 50px; text-align: center; }
+    .col-action { width: 44px; text-align: center; }
 
-    .delete-btn {
-      background: none; color: var(--text-muted); border: none;
-      cursor: pointer; font-size: 14px; padding: 2px 6px;
-      transition: color 0.15s;
+    tbody tr.selected { background: rgba(212,175,55,0.05); }
+    tbody tr.selected:hover { background: rgba(212,175,55,0.08); }
+
+    .row-btn {
+      background: none; border: 1px solid transparent;
+      cursor: pointer; font-size: 14px; padding: 3px 7px;
+      border-radius: 4px;
+      color: var(--text-muted);
+      transition: all 0.15s;
+      line-height: 1;
     }
-    .delete-btn:hover { color: var(--red); }
+    .row-btn:hover:not(:disabled) {
+      border-color: var(--border-strong);
+      background: var(--bg-input);
+    }
+    .row-btn:disabled { opacity: 0.4; cursor: wait; }
+    .reroll-btn:hover:not(:disabled) { color: var(--jazz-gold); }
+    .delete-btn:hover:not(:disabled) { color: var(--red); }
 
     .prefix-badge {
       display: inline-block; background: var(--jazz-gold-dim); color: #000;
@@ -366,23 +461,106 @@
                accept="audio/*,video/mp4,.mp3,.m4a,.wav,.flac,.ogg,.aac,.opus" />
       </div>
 
+      <!-- ─── Filter bar ─── -->
+      <div class="filter-bar">
+        <div class="filter-row search-row">
+          <span class="search-icon">🔍</span>
+          <input type="search" id="searchInput"
+                 placeholder="검색: 파일명 또는 제목 (300ms 후 자동 적용)" />
+        </div>
+        <div class="filter-row">
+          <span class="filter-group">
+            <label>Prompt</label>
+            <select id="filterPrompt">
+              <option value="">전체</option>
+            </select>
+          </span>
+          <span class="filter-group">
+            <label>Vocals</label>
+            <select id="filterVocals">
+              <option value="">전체</option>
+              <option value="true">보컬 있음</option>
+              <option value="false">보컬 없음</option>
+            </select>
+          </span>
+          <span class="filter-group">
+            <label>Used</label>
+            <select id="filterUsed">
+              <option value="all">전체</option>
+              <option value="unused">미사용</option>
+              <option value="used">사용됨</option>
+            </select>
+          </span>
+          <span class="filter-group">
+            <label>Prefix</label>
+            <select id="filterPrefix">
+              <option value="any">전체</option>
+              <option value="with-prefix">prefix 있음</option>
+              <option value="no-prefix">prefix 없음</option>
+            </select>
+          </span>
+        </div>
+        <div class="filter-row">
+          <span class="filter-group">
+            <label>Length (sec)</label>
+            <input type="number" id="filterMinDur" placeholder="min" min="0" />
+            <span class="dim">~</span>
+            <input type="number" id="filterMaxDur" placeholder="max" min="0" />
+          </span>
+          <span class="filter-group">
+            <label>Sort</label>
+            <select id="filterOrder">
+              <option value="newest">최신순</option>
+              <option value="oldest">오래된순</option>
+              <option value="shortest">짧은순</option>
+              <option value="longest">긴순</option>
+              <option value="random">랜덤</option>
+            </select>
+          </span>
+          <span class="filter-actions">
+            <button id="applyFilterBtn" type="button" class="filter-btn primary">🔄 적용</button>
+            <button id="resetFilterBtn" type="button" class="filter-btn">↺ 초기화</button>
+          </span>
+        </div>
+      </div>
+
+      <!-- ─── Bulk action bar ─── -->
+      <div class="bulk-bar" id="bulkBar">
+        <span class="bulk-count"><span id="bulkCount">0</span>개 선택됨</span>
+        <span class="bulk-divider"></span>
+        <button class="bulk-btn" id="selectAllBtn" type="button">☑ 전체 선택</button>
+        <button class="bulk-btn" id="clearSelBtn" type="button">☐ 해제</button>
+        <span class="bulk-divider"></span>
+        <button class="bulk-btn warn" id="bulkRetitleBtn" type="button" disabled>♻ 일괄 retitle</button>
+        <button class="bulk-btn" id="bulkBackfillBtn" type="button" disabled>🔍 일괄 backfill</button>
+        <button class="bulk-btn danger" id="bulkDeleteBtn" type="button" disabled>🗑 선택 삭제</button>
+      </div>
+
+      <!-- ─── Bulk progress (재사용) ─── -->
+      <div class="upload-progress" id="bulkProgress" hidden>
+        <div class="progress-bar"><div class="progress-fill"></div></div>
+        <div class="progress-text"></div>
+      </div>
+
       <div class="track-list-header">
-        <h3>Track List</h3>
+        <h3>Track List <span id="trackCount" class="dim"></span></h3>
         <button class="refresh-btn" id="refreshTracksBtn">↻ 새로고침</button>
       </div>
       <div class="track-list">
         <table>
           <thead>
             <tr>
+              <th class="col-check"></th>
               <th class="col-id">#</th>
               <th>Title / Filename</th>
               <th class="col-duration">Length</th>
               <th class="col-prompt">Prompt</th>
-              <th class="col-actions"></th>
+              <th class="col-action">Title</th>
+              <th class="col-action">Del</th>
             </tr>
           </thead>
           <tbody id="trackBody">
-            <tr><td colspan="5" class="empty">로딩 중…</td></tr>
+            <tr><td colspan="7" class="empty">로딩 중…</td></tr>
           </tbody>
         </table>
       </div>

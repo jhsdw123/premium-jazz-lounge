@@ -284,7 +284,31 @@ app.get('/api/tracks', async (req, res) => {
       const idArr = String(ids).split(',').map((s) => parseIntOrNull(s.trim())).filter((n) => n != null);
       if (idArr.length) q = q.in('id', idArr);
     }
-    if (search) q = q.ilike('original_filename', `%${search}%`);
+
+    // 검색: filename + title_en 양쪽 ilike.
+    // title_en 은 join 한 테이블 컬럼이라 PostgREST or() 한 줄로 검색 불가 →
+    // 먼저 매칭되는 title_id 들을 prefetch 한 뒤 OR(filename ilike, title_id IN (...)).
+    if (search) {
+      // PostgREST or() 문자열에서 충돌 가능한 메타문자 제거.
+      const safe = String(search).replace(/[,()*\\]/g, ' ').trim();
+      if (safe) {
+        const { data: titleHits } = await supabase
+          .from('pjl_titles')
+          .select('id')
+          .ilike('title_en', `%${safe}%`);
+        const matchingTitleIds = (titleHits || []).map((t) => t.id);
+
+        // PostgREST or() 안에서는 ilike wildcard 가 '*' (URL 컨텍스트, '%' 금지)
+        if (matchingTitleIds.length) {
+          q = q.or(
+            `original_filename.ilike.*${safe}*,title_id.in.(${matchingTitleIds.join(',')})`
+          );
+        } else {
+          q = q.ilike('original_filename', `%${safe}%`);
+        }
+      }
+    }
+
     const pid = parseIntOrNull(promptId);
     if (pid) q = q.eq('prompt_id', pid);
     if (hasVocals === 'true') q = q.eq('has_vocals', true);

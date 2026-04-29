@@ -7,6 +7,8 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const state = {
   prompts: [],
   tracks: [],
+  selected: new Set(),
+  bulkInProgress: false,
 };
 
 // ─── Toast notifications ─────────────────────────────────────────────
@@ -85,17 +87,31 @@ async function refreshPrompts() {
   try {
     const j = await apiGet('/api/prompts');
     state.prompts = j.prompts || [];
-    const select = $('#promptSelect');
-    const cur = select.value;
-    select.innerHTML = '<option value="">(없음)</option>';
+
+    // 업로드 dropdown
+    const uploadSelect = $('#promptSelect');
+    const uploadCur = uploadSelect.value;
+    uploadSelect.innerHTML = '<option value="">(없음)</option>';
+
+    // 필터 dropdown
+    const filterSelect = $('#filterPrompt');
+    const filterCur = filterSelect.value;
+    filterSelect.innerHTML = '<option value="">전체</option>';
+
     for (const p of state.prompts) {
-      const opt = document.createElement('option');
-      opt.value = p.id;
       const label = p.nickname || p.prompt_text.slice(0, 50);
-      opt.textContent = `${label} (${p.use_count})`;
-      select.appendChild(opt);
+      const text = `${label} (${p.use_count})`;
+
+      const o1 = document.createElement('option');
+      o1.value = p.id; o1.textContent = text;
+      uploadSelect.appendChild(o1);
+
+      const o2 = document.createElement('option');
+      o2.value = p.id; o2.textContent = text;
+      filterSelect.appendChild(o2);
     }
-    if (cur) select.value = cur;
+    if (uploadCur) uploadSelect.value = uploadCur;
+    if (filterCur) filterSelect.value = filterCur;
   } catch (e) {
     toast(`prompts 로드 실패: ${e.message}`, 'error');
   }
@@ -122,33 +138,164 @@ $('#newPromptForm').addEventListener('submit', async (ev) => {
   }
 });
 
+// ─── Filter form ↔ URL ────────────────────────────────────────────
+function readFiltersFromUrl() {
+  const p = new URLSearchParams(location.search);
+  return {
+    search: p.get('search') || '',
+    promptId: p.get('prompt') || '',
+    hasVocals: p.get('vocals') || '',
+    usedFilter: p.get('used') || 'all',
+    prefixOrder: p.get('prefix') || 'any',
+    minDuration: p.get('min') || '',
+    maxDuration: p.get('max') || '',
+    orderBy: p.get('sort') || 'newest',
+  };
+}
+
+function writeFiltersToUrl(f) {
+  const p = new URLSearchParams();
+  if (f.search) p.set('search', f.search);
+  if (f.promptId) p.set('prompt', f.promptId);
+  if (f.hasVocals) p.set('vocals', f.hasVocals);
+  if (f.usedFilter && f.usedFilter !== 'all') p.set('used', f.usedFilter);
+  if (f.prefixOrder && f.prefixOrder !== 'any') p.set('prefix', f.prefixOrder);
+  if (f.minDuration) p.set('min', f.minDuration);
+  if (f.maxDuration) p.set('max', f.maxDuration);
+  if (f.orderBy && f.orderBy !== 'newest') p.set('sort', f.orderBy);
+  const qs = p.toString();
+  history.replaceState(null, '', qs ? `${location.pathname}?${qs}` : location.pathname);
+}
+
+function applyFiltersToForm(f) {
+  $('#searchInput').value = f.search;
+  $('#filterPrompt').value = f.promptId;
+  $('#filterVocals').value = f.hasVocals;
+  $('#filterUsed').value = f.usedFilter || 'all';
+  $('#filterPrefix').value = f.prefixOrder || 'any';
+  $('#filterMinDur').value = f.minDuration;
+  $('#filterMaxDur').value = f.maxDuration;
+  $('#filterOrder').value = f.orderBy || 'newest';
+}
+
+function readFiltersFromForm() {
+  return {
+    search: $('#searchInput').value.trim(),
+    promptId: $('#filterPrompt').value,
+    hasVocals: $('#filterVocals').value,
+    usedFilter: $('#filterUsed').value,
+    prefixOrder: $('#filterPrefix').value,
+    minDuration: $('#filterMinDur').value,
+    maxDuration: $('#filterMaxDur').value,
+    orderBy: $('#filterOrder').value,
+  };
+}
+
+function clearFilters() {
+  applyFiltersToForm({
+    search: '', promptId: '', hasVocals: '',
+    usedFilter: 'all', prefixOrder: 'any',
+    minDuration: '', maxDuration: '', orderBy: 'newest',
+  });
+}
+
+async function applyFilters() {
+  const f = readFiltersFromForm();
+  writeFiltersToUrl(f);
+  // 선택 상태는 필터 변경 시 유지하되, 필터링되어 사라진 행의 선택은 자연스럽게 안 보일 뿐
+  await refreshTracks();
+}
+
+$('#applyFilterBtn').addEventListener('click', () => applyFilters());
+
+$('#resetFilterBtn').addEventListener('click', async () => {
+  clearFilters();
+  state.selected.clear();
+  updateBulkBar();
+  await applyFilters();
+});
+
+// 검색만 debounce 자동 적용
+let searchDebounceTimer = null;
+$('#searchInput').addEventListener('input', () => {
+  clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => applyFilters(), 300);
+});
+// Enter 즉시 적용
+$('#searchInput').addEventListener('keydown', (ev) => {
+  if (ev.key === 'Enter') {
+    ev.preventDefault();
+    clearTimeout(searchDebounceTimer);
+    applyFilters();
+  }
+});
+
 // ─── Track list ─────────────────────────────────────────────────────
 async function refreshTracks() {
+  const f = readFiltersFromForm();
+  const p = new URLSearchParams();
+  p.set('limit', '200');
+  if (f.search) p.set('search', f.search);
+  if (f.promptId) p.set('promptId', f.promptId);
+  if (f.hasVocals) p.set('hasVocals', f.hasVocals);
+  if (f.usedFilter) p.set('usedFilter', f.usedFilter);
+  if (f.prefixOrder) p.set('prefixOrder', f.prefixOrder);
+  if (f.minDuration) p.set('minDuration', f.minDuration);
+  if (f.maxDuration) p.set('maxDuration', f.maxDuration);
+  if (f.orderBy) p.set('orderBy', f.orderBy);
+
   try {
-    const j = await apiGet('/api/tracks?limit=200');
+    const j = await apiGet(`/api/tracks?${p}`);
     state.tracks = j.tracks || [];
     renderTracks();
   } catch (e) {
     toast(`tracks 로드 실패: ${e.message}`, 'error');
+    state.tracks = [];
+    renderTracks();
   }
 }
 
 function renderTracks() {
   const tb = $('#trackBody');
+  $('#trackCount').textContent = state.tracks.length
+    ? `(${state.tracks.length})`
+    : '';
+
   if (!state.tracks.length) {
-    tb.innerHTML = '<tr><td colspan="5" class="empty">아직 곡이 없습니다. mp3 파일을 드래그해서 추가하세요.</td></tr>';
+    const f = readFiltersFromForm();
+    const hasFilter = f.search || f.promptId || f.hasVocals
+      || (f.usedFilter && f.usedFilter !== 'all')
+      || (f.prefixOrder && f.prefixOrder !== 'any')
+      || f.minDuration || f.maxDuration;
+    tb.innerHTML = `<tr><td colspan="7" class="empty">${
+      hasFilter ? '조건에 맞는 곡이 없습니다. 필터를 조정하세요.' : '아직 곡이 없습니다. mp3 파일을 드래그해서 추가하세요.'
+    }</td></tr>`;
+    updateBulkBar();
     return;
   }
+
   tb.innerHTML = '';
   for (const t of state.tracks) {
     const tr = document.createElement('tr');
+    if (state.selected.has(t.id)) tr.classList.add('selected');
+
     const titleHtml = t.title?.title_en
       ? escapeHtml(t.title.title_en)
       : '<span class="no-title">(no title)</span>';
     const prefixBadge = t.prefix_order ? `<span class="prefix-badge">${t.prefix_order}</span>` : '';
     const vocalIcon = t.has_vocals ? '<span class="vocal-icon" title="보컬 포함">🎤</span>' : '';
-    const promptName = t.prompt?.nickname || (t.prompt?.prompt_text ? t.prompt.prompt_text.slice(0, 28) : '—');
+    const promptName = t.prompt?.nickname
+      || (t.prompt?.prompt_text ? t.prompt.prompt_text.slice(0, 28) : '—');
+
+    // title_id 가 있으면 ♻ reroll, 없으면 ✨ generate
+    const titleBtnIcon = t.title_id ? '♻' : '✨';
+    const titleBtnTitle = t.title_id ? '제목 reroll' : '제목 생성';
+
     tr.innerHTML = `
+      <td class="col-check">
+        <input type="checkbox" data-id="${t.id}"
+               ${state.selected.has(t.id) ? 'checked' : ''} />
+      </td>
       <td class="col-id">${t.id}</td>
       <td>
         <div>${prefixBadge}${titleHtml}${vocalIcon}</div>
@@ -156,15 +303,34 @@ function renderTracks() {
       </td>
       <td class="col-duration">${fmtDuration(t.duration_actual_sec)}</td>
       <td class="col-prompt">${escapeHtml(promptName)}</td>
-      <td class="col-actions">
-        <button class="delete-btn" data-id="${t.id}" title="삭제">🗑</button>
+      <td class="col-action">
+        <button class="row-btn reroll-btn" data-id="${t.id}" title="${titleBtnTitle}">${titleBtnIcon}</button>
+      </td>
+      <td class="col-action">
+        <button class="row-btn delete-btn" data-id="${t.id}" title="삭제">🗑</button>
       </td>
     `;
     tb.appendChild(tr);
   }
+
+  // Hook up handlers
+  $$('.col-check input[type="checkbox"]').forEach((cb) => {
+    cb.addEventListener('change', () => {
+      const id = parseInt(cb.dataset.id, 10);
+      if (cb.checked) state.selected.add(id);
+      else state.selected.delete(id);
+      cb.closest('tr').classList.toggle('selected', cb.checked);
+      updateBulkBar();
+    });
+  });
+  $$('.reroll-btn').forEach((btn) =>
+    btn.addEventListener('click', () => rerollOrGenerate(parseInt(btn.dataset.id, 10), btn))
+  );
   $$('.delete-btn').forEach((btn) =>
     btn.addEventListener('click', () => deleteTrack(parseInt(btn.dataset.id, 10)))
   );
+
+  updateBulkBar();
 }
 
 async function deleteTrack(id) {
@@ -172,15 +338,196 @@ async function deleteTrack(id) {
   try {
     await apiPost('/api/tracks/delete', { ids: [id] });
     toast(`삭제됨: id=${id}`, 'success');
+    state.selected.delete(id);
     await Promise.all([refreshTracks(), refreshStats()]);
   } catch (e) {
     toast(`삭제 실패: ${e.message}`, 'error');
   }
 }
 
+async function rerollOrGenerate(trackId, btnEl) {
+  const track = state.tracks.find((t) => t.id === trackId);
+  const isReroll = !!track?.title_id;
+
+  if (isReroll) {
+    const cur = track.title?.title_en || `(id=${track.title_id})`;
+    if (!confirm(`현재 제목 "${cur}" 을(를) reject 처리하고 새 제목을 받습니다.\n계속하시겠습니까?`)) return;
+  }
+
+  const originalText = btnEl.textContent;
+  btnEl.disabled = true;
+  btnEl.textContent = '⏳';
+
+  try {
+    const endpoint = isReroll ? '/api/titles/reroll' : '/api/titles/generate';
+    const body = isReroll ? { trackId, reason: 'manual reroll' } : { trackId };
+    const j = await apiPost(endpoint, body);
+
+    toast(`새 제목: ${j.title.title_en}`, 'success');
+
+    // 해당 row 만 갱신 (전체 리프레시 X)
+    const idx = state.tracks.findIndex((t) => t.id === trackId);
+    if (idx >= 0) {
+      state.tracks[idx] = {
+        ...state.tracks[idx],
+        title_id: j.title.id,
+        title: { id: j.title.id, status: 'used', title_en: j.title.title_en },
+      };
+      renderTracks();
+    }
+    refreshStats();  // background refresh
+  } catch (e) {
+    toast(`${isReroll ? 'Reroll' : 'Generate'} 실패: ${e.message}`, 'error');
+    btnEl.disabled = false;
+    btnEl.textContent = originalText;
+  }
+}
+
 $('#refreshTracksBtn').addEventListener('click', () =>
   Promise.all([refreshTracks(), refreshStats()])
 );
+
+// ─── Bulk action bar ────────────────────────────────────────────────
+function updateBulkBar() {
+  const n = state.selected.size;
+  $('#bulkCount').textContent = n;
+  const enabled = n > 0 && !state.bulkInProgress;
+  $('#bulkRetitleBtn').disabled = !enabled;
+  $('#bulkBackfillBtn').disabled = !enabled;
+  $('#bulkDeleteBtn').disabled = !enabled;
+}
+
+$('#selectAllBtn').addEventListener('click', () => {
+  for (const t of state.tracks) state.selected.add(t.id);
+  renderTracks();  // checkbox 상태 + selected row 클래스 갱신
+});
+$('#clearSelBtn').addEventListener('click', () => {
+  state.selected.clear();
+  renderTracks();
+});
+
+$('#bulkRetitleBtn').addEventListener('click', () => bulkRetitle());
+$('#bulkBackfillBtn').addEventListener('click', () => bulkBackfill());
+$('#bulkDeleteBtn').addEventListener('click', () => bulkDelete());
+
+// ─── Bulk progress UI (재사용) ─────────────────────────────────────
+const bulkProgress = $('#bulkProgress');
+const bulkFill = bulkProgress.querySelector('.progress-fill');
+const bulkText = bulkProgress.querySelector('.progress-text');
+
+function showBulkProgress(text = '시작…') {
+  bulkProgress.hidden = false;
+  bulkFill.style.width = '0%';
+  bulkText.textContent = text;
+}
+function setBulkProgress(pct, text) {
+  bulkFill.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+  if (text) bulkText.textContent = text;
+}
+function hideBulkProgress() {
+  bulkProgress.hidden = true;
+  bulkFill.style.width = '0%';
+  bulkText.textContent = '';
+}
+
+async function bulkRetitle() {
+  const ids = Array.from(state.selected);
+  if (!ids.length) return;
+  if (!confirm(`${ids.length}개 트랙의 제목을 일괄 재생성합니다.\n(이미 제목 있으면 reject 후 새로 생성)\n약 ${Math.ceil(ids.length * 4.5)}초 소요. 계속?`)) return;
+
+  state.bulkInProgress = true;
+  updateBulkBar();
+  showBulkProgress(`0/${ids.length} 제목 작업 중…`);
+
+  let ok = 0, errs = 0;
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    const track = state.tracks.find((t) => t.id === id);
+    const isReroll = !!track?.title_id;
+    setBulkProgress(
+      Math.round((i / ids.length) * 100),
+      `${i + 1}/${ids.length} ${isReroll ? '리롤' : '생성'} 중… (id=${id})`
+    );
+    try {
+      const endpoint = isReroll ? '/api/titles/reroll' : '/api/titles/generate';
+      const body = isReroll ? { trackId: id, reason: 'bulk retitle' } : { trackId: id };
+      await apiPost(endpoint, body);
+      ok++;
+    } catch (e) {
+      errs++;
+      console.warn(`bulk retitle id=${id}:`, e.message);
+    }
+    if (i < ids.length - 1) await sleep(4500);
+  }
+  setBulkProgress(100, `완료: 성공 ${ok}, 실패 ${errs}`);
+
+  state.bulkInProgress = false;
+  await Promise.all([refreshTracks(), refreshStats()]);
+  setTimeout(hideBulkProgress, 2200);
+
+  if (errs) toast(`일괄 retitle: 성공 ${ok}, 실패 ${errs}`, 'info');
+  else toast(`일괄 retitle 완료: ${ok}개`, 'success');
+}
+
+async function bulkBackfill() {
+  const ids = Array.from(state.selected);
+  if (!ids.length) return;
+  if (!confirm(`${ids.length}개 트랙의 길이/BPM 을 ffprobe 로 일괄 재분석합니다. 계속?`)) return;
+
+  state.bulkInProgress = true;
+  updateBulkBar();
+  showBulkProgress(`backfill 중… (${ids.length}곡 sequential)`);
+
+  try {
+    const j = await apiPost('/api/tracks/backfill', { ids });
+    setBulkProgress(100,
+      `완료: analyzed=${j.summary.analyzed}, dl=${j.summary.dlErrors}, an=${j.summary.anErrors}, upd=${j.summary.updErrors}`
+    );
+    if (j.summary.analyzed > 0) {
+      toast(`backfill 완료: ${j.summary.analyzed}곡 분석`, 'success');
+    } else {
+      toast(`backfill: 분석된 곡 없음`, 'info');
+    }
+  } catch (e) {
+    toast(`backfill 실패: ${e.message}`, 'error');
+  }
+
+  state.bulkInProgress = false;
+  await Promise.all([refreshTracks(), refreshStats()]);
+  setTimeout(hideBulkProgress, 2200);
+}
+
+async function bulkDelete() {
+  const ids = Array.from(state.selected);
+  if (!ids.length) return;
+  if (!confirm(`${ids.length}개 트랙을 영구 삭제합니다. (Storage + DB)\n되돌릴 수 없습니다. 계속?`)) return;
+
+  state.bulkInProgress = true;
+  updateBulkBar();
+  showBulkProgress(`삭제 중…`);
+
+  try {
+    const j = await apiPost('/api/tracks/delete', { ids });
+    setBulkProgress(100, `삭제됨: ${j.deleted} (Storage: ${j.removedFromStorage})`);
+    toast(`${j.deleted}개 삭제 완료`, 'success');
+    state.selected.clear();
+  } catch (e) {
+    toast(`일괄 삭제 실패: ${e.message}`, 'error');
+  }
+
+  state.bulkInProgress = false;
+  await Promise.all([refreshTracks(), refreshStats()]);
+  setTimeout(hideBulkProgress, 1800);
+}
+
+// ─── beforeunload guard during bulk ─────────────────────────────────
+window.addEventListener('beforeunload', (e) => {
+  if (state.bulkInProgress) {
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
+  }
+});
 
 // ─── Drop zone + file input ─────────────────────────────────────────
 const dz = $('#dropzone');
@@ -195,7 +542,6 @@ dz.addEventListener('dragover', (e) => {
   dz.classList.add('dragover');
 });
 dz.addEventListener('dragleave', (e) => {
-  // dragleave fires on internal element transitions; only clear if we left dz entirely
   if (e.target === dz) dz.classList.remove('dragover');
 });
 dz.addEventListener('drop', (e) => {
@@ -208,18 +554,18 @@ dz.addEventListener('drop', (e) => {
 fi.addEventListener('change', (e) => {
   const files = Array.from(e.target.files);
   if (files.length) handleFiles(files);
-  fi.value = '';  // 같은 파일 재선택 가능하게
+  fi.value = '';
 });
 
 // ─── Upload pipeline ────────────────────────────────────────────────
-const CHUNK_SIZE = 5;          // multer 한도와 일치
-const TITLE_GEN_DELAY_MS = 4500;  // Gemini free tier 15 RPM
+const CHUNK_SIZE = 5;
+const TITLE_GEN_DELAY_MS = 4500;
 
 const progressEl = $('#uploadProgress');
 const fillEl = progressEl.querySelector('.progress-fill');
 const textEl = progressEl.querySelector('.progress-text');
 
-function setProgress(pct, text) {
+function setUploadProgress(pct, text) {
   fillEl.style.width = `${Math.max(0, Math.min(100, pct))}%`;
   textEl.textContent = text || '';
 }
@@ -230,32 +576,28 @@ async function handleFiles(files) {
   const hasVocals = $('#hasVocals').checked;
 
   progressEl.hidden = false;
-  setProgress(0, `${files.length}개 파일 준비 중…`);
+  setUploadProgress(0, `${files.length}개 파일 준비 중…`);
 
   const allUploadedIds = [];
   let dupCount = 0, errCount = 0;
 
-  // 1) 청크 단위 업로드 (multer 5개/요청 한도)
   for (let i = 0; i < files.length; i += CHUNK_SIZE) {
     const chunk = files.slice(i, i + CHUNK_SIZE);
     const startIdx = i + 1;
     const endIdx = Math.min(i + CHUNK_SIZE, files.length);
-    setProgress(
-      Math.round((i / files.length) * 50),  // 업로드는 progress 의 0–50%
+    setUploadProgress(
+      Math.round((i / files.length) * 50),
       `업로드 중 ${startIdx}–${endIdx} / ${files.length}…`
     );
-
     try {
       const result = await uploadChunk(chunk, promptId, hasVocals, (loaded, total) => {
         const chunkPct = total > 0 ? loaded / total : 0;
         const overall = ((i / files.length) + (chunkPct * chunk.length / files.length)) * 50;
-        setProgress(Math.round(overall), `업로드 중 ${startIdx}–${endIdx} / ${files.length}…`);
+        setUploadProgress(Math.round(overall), `업로드 중 ${startIdx}–${endIdx} / ${files.length}…`);
       });
-
       for (const r of result.results || []) {
-        if (r.status === 'uploaded') {
-          allUploadedIds.push(r.trackId);
-        } else if (r.status === 'duplicate') {
+        if (r.status === 'uploaded') allUploadedIds.push(r.trackId);
+        else if (r.status === 'duplicate') {
           dupCount++;
           toast(`중복 (이미 trackId=${r.existingTrackId}): ${r.filename}`, 'info');
         } else if (r.status === 'error') {
@@ -269,22 +611,19 @@ async function handleFiles(files) {
     }
   }
 
-  setProgress(50, `업로드 완료 (성공 ${allUploadedIds.length}, 중복 ${dupCount}, 오류 ${errCount})`);
+  setUploadProgress(50, `업로드 완료 (성공 ${allUploadedIds.length}, 중복 ${dupCount}, 오류 ${errCount})`);
 
-  // 2) 일단 트랙 리스트 새로고침 — 사용자가 분석된 길이를 즉시 확인 가능
   await Promise.all([refreshTracks(), refreshStats()]);
 
-  // 3) 제목 생성 — 클라이언트에서 순차 + 4.5s sleep (진행률 표시)
   if (allUploadedIds.length) {
     await generateTitlesSequential(allUploadedIds);
   }
 
-  // 4) 마무리
   progressEl.hidden = true;
-  setProgress(0, '');
+  setUploadProgress(0, '');
   if (allUploadedIds.length === 0 && dupCount === 0 && errCount === 0) {
     toast('처리할 파일이 없습니다', 'info');
-  } else if (errCount === 0) {
+  } else if (errCount === 0 && allUploadedIds.length > 0) {
     toast(`완료: ${allUploadedIds.length}개 업로드 + 제목 생성`, 'success');
   }
 }
@@ -318,8 +657,8 @@ async function generateTitlesSequential(trackIds) {
   const total = trackIds.length;
   let done = 0, errs = 0;
   for (let i = 0; i < total; i++) {
-    setProgress(
-      50 + Math.round(((i) / total) * 50),
+    setUploadProgress(
+      50 + Math.round((i / total) * 50),
       `제목 생성 중 ${i + 1}/${total}… (Gemini)`
     );
     try {
@@ -330,16 +669,20 @@ async function generateTitlesSequential(trackIds) {
       console.warn(`title gen failed (trackId=${trackIds[i]}):`, e.message);
       toast(`제목 생성 실패 trackId=${trackIds[i]}: ${e.message}`, 'error');
     }
-    // refresh midway so UI shows incremental titles
     if (i % 2 === 1) await refreshTracks();
     if (i < total - 1) await sleep(TITLE_GEN_DELAY_MS);
   }
-  setProgress(100, `제목 생성 완료 (성공 ${done}, 실패 ${errs})`);
+  setUploadProgress(100, `제목 생성 완료 (성공 ${done}, 실패 ${errs})`);
   await Promise.all([refreshTracks(), refreshStats()]);
 }
 
 // ─── Init ───────────────────────────────────────────────────────────
 async function init() {
-  await Promise.all([refreshStats(), refreshPrompts(), refreshTracks()]);
+  // 1) prompts 먼저 로드 (필터 dropdown 채우기 위해)
+  await Promise.all([refreshStats(), refreshPrompts()]);
+  // 2) URL → form 적용
+  applyFiltersToForm(readFiltersFromUrl());
+  // 3) 트랙 로드
+  await refreshTracks();
 }
 init();
