@@ -75,7 +75,31 @@ app.get('/api/stats', async (_req, res) => {
     stats[t] = count ?? 0;
   }));
 
-  res.json({ ok: Object.keys(errors).length === 0, stats, errors });
+  // 추가: 제목 있는 트랙 / 영상에 사용된 트랙 카운트 (Pool 탭 표시용)
+  let tracksWithTitle = 0;
+  let tracksUsed = 0;
+  try {
+    const [a, b] = await Promise.all([
+      supabase.from('pjl_tracks').select('id', { count: 'exact', head: true })
+        .not('title_id', 'is', null).eq('is_active', true),
+      supabase.from('pjl_tracks').select('id', { count: 'exact', head: true })
+        .gt('used_count', 0).eq('is_active', true),
+    ]);
+    tracksWithTitle = a.count ?? 0;
+    tracksUsed = b.count ?? 0;
+    if (a.error) errors.tracksWithTitle = a.error.message;
+    if (b.error) errors.tracksUsed = b.error.message;
+  } catch (e) {
+    errors.derived = e.message;
+  }
+
+  res.json({
+    ok: Object.keys(errors).length === 0,
+    stats,
+    tracksWithTitle,
+    tracksUsed,
+    errors,
+  });
 });
 
 // ─── Tracks: upload / list / delete ──────────────────────────────────────

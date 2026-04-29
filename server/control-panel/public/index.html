@@ -6,245 +6,428 @@
   <title>🎷 Premium Jazz Lounge — Control Panel</title>
   <style>
     :root {
-      --bg: #0d0d10;
-      --bg-card: #16161c;
-      --bg-card-hover: #1c1c24;
-      --border: #2a2a35;
-      --text: #e8e6df;
-      --text-dim: #8a8a98;
-      --gold: #d4af37;
-      --gold-dim: #8a7128;
+      --bg: #0A0A0A;
+      --bg-card: #161616;
+      --bg-hover: #1F1F1F;
+      --bg-input: #0E0E0E;
+      --border: #2A2A2A;
+      --border-strong: #3A3A3A;
+      --text: #E8E6DF;
+      --text-dim: #8A8A98;
+      --text-muted: #5A5A66;
+      --jazz-gold: #D4AF37;
+      --jazz-gold-dim: #A88829;
       --green: #4ade80;
       --red: #f87171;
-      --yellow: #facc15;
+      --bg-radial: radial-gradient(ellipse at top, #1A1A1A 0%, #050505 70%);
     }
     * { box-sizing: border-box; }
-    html, body {
-      margin: 0; padding: 0;
+    html, body { margin: 0; padding: 0; min-height: 100vh; }
+    body {
       background: var(--bg);
+      background-image: var(--bg-radial);
+      background-attachment: fixed;
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 14px;
+      font-family: 'Pretendard', 'Apple SD Gothic Neo', 'Noto Sans KR', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
       line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
     }
+    code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 11px; }
+
+    /* Header */
     header {
-      padding: 28px 36px;
+      display: flex; justify-content: space-between; align-items: baseline;
+      padding: 18px 28px;
       border-bottom: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+      background: rgba(0,0,0,0.4);
     }
-    header h1 {
-      margin: 0;
-      font-size: 22px;
-      font-weight: 600;
-      letter-spacing: -0.01em;
+    header h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+    header h1 .gold { color: var(--jazz-gold); }
+    header #version { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+
+    /* Tabs */
+    nav.tabs {
+      display: flex; gap: 2px;
+      padding: 0 28px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(0,0,0,0.3);
     }
-    header .gold { color: var(--gold); }
-    header .phase {
-      font-size: 12px;
-      color: var(--text-dim);
-      padding: 4px 10px;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
+    .tab {
+      background: none; color: var(--text-dim); border: none;
+      padding: 11px 18px;
+      font-size: 13px; font-weight: 500;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      font-family: inherit;
+      letter-spacing: 0.01em;
     }
-    main {
-      padding: 28px 36px;
-      max-width: 1100px;
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--jazz-gold); border-bottom-color: var(--jazz-gold); }
+
+    main { padding: 22px 28px; max-width: 1200px; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    /* Stats row */
+    .stats-row {
+      display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+      margin-bottom: 18px;
     }
-    .row {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 16px;
-      margin-bottom: 28px;
-    }
-    .card {
+    .stat-card {
       background: var(--bg-card);
       border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+    }
+    .stat-card label {
+      display: block; color: var(--text-dim); font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      margin-bottom: 3px; font-weight: 500;
+    }
+    .stat-card .stat-value {
+      font-size: 19px; font-weight: 600; color: var(--jazz-gold);
+      font-variant-numeric: tabular-nums;
+    }
+
+    /* Drop zone */
+    .dropzone {
+      background: var(--bg-card);
+      border: 2px dashed var(--border-strong);
       border-radius: 8px;
-      padding: 18px 20px;
+      padding: 22px 24px;
+      margin-bottom: 18px;
+      transition: all 0.2s ease;
+      position: relative;
+    }
+    .dropzone.dragover {
+      border-color: var(--jazz-gold);
+      background: rgba(212,175,55,0.05);
+    }
+    .dropzone-clickarea {
+      text-align: center;
+      padding: 20px 0 12px;
+      cursor: pointer;
+      border-radius: 4px;
       transition: background 0.15s;
     }
-    .card:hover { background: var(--bg-card-hover); }
-    .card .label {
-      font-size: 11px;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
+    .dropzone-clickarea:hover { background: rgba(255,255,255,0.02); }
+    .dropzone-clickarea p {
+      margin: 0; color: var(--text-dim); font-size: 13.5px;
+    }
+    .dropzone-clickarea .gold { color: var(--jazz-gold); font-weight: 500; }
+
+    .dropzone-controls {
+      display: flex; gap: 18px; flex-wrap: wrap; align-items: center;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+    }
+    .dropzone-controls > * { display: inline-flex; align-items: center; gap: 6px; }
+    .dropzone-controls label { color: var(--text-dim); }
+    .dropzone-controls select {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 4px 10px; min-width: 220px; font-family: inherit; font-size: 12px;
+    }
+    .dropzone-controls .icon-btn {
+      background: var(--bg-input); color: var(--jazz-gold);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 3px 9px; cursor: pointer; font-size: 13px;
+      font-family: inherit; line-height: 1;
+    }
+    .dropzone-controls .icon-btn:hover { border-color: var(--jazz-gold-dim); background: var(--bg-hover); }
+
+    .vocal-check { user-select: none; cursor: pointer; }
+    .vocal-check input { accent-color: var(--jazz-gold); }
+
+    /* Upload progress */
+    .upload-progress { margin-top: 14px; }
+    .progress-bar {
+      background: var(--bg-input); border-radius: 3px;
+      height: 6px; overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .progress-fill {
+      height: 100%; background: var(--jazz-gold);
+      transition: width 0.2s ease; width: 0%;
+    }
+    .progress-text {
+      color: var(--text-dim); font-size: 11px;
+      margin-top: 4px; font-variant-numeric: tabular-nums;
+    }
+
+    /* Track list */
+    .track-list-header {
+      display: flex; justify-content: space-between; align-items: center;
       margin-bottom: 8px;
     }
-    .card .value {
-      font-size: 22px;
-      font-weight: 600;
-      color: var(--gold);
+    .track-list-header h3 {
+      margin: 0; font-size: 12px; font-weight: 500;
+      color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.06em;
     }
-    .card .sub {
-      font-size: 12px;
-      color: var(--text-dim);
-      margin-top: 6px;
-      word-break: break-all;
+    .track-list-header .refresh-btn {
+      background: none; color: var(--text-dim); border: 1px solid var(--border);
+      border-radius: 4px; padding: 3px 10px; font-size: 11px;
+      cursor: pointer; font-family: inherit;
     }
-    .status-line {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 13px;
+    .track-list-header .refresh-btn:hover { color: var(--text); border-color: var(--border-strong); }
+
+    .track-list {
+      background: var(--bg-card); border: 1px solid var(--border);
+      border-radius: 8px; overflow: hidden;
     }
-    .dot {
-      width: 8px; height: 8px; border-radius: 50%;
-      background: var(--text-dim);
-      flex-shrink: 0;
+    .track-list table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .track-list th, .track-list td {
+      padding: 8px 12px; text-align: left;
+      border-bottom: 1px solid var(--border);
     }
-    .dot.ok { background: var(--green); box-shadow: 0 0 8px rgba(74,222,128,0.6); }
-    .dot.fail { background: var(--red); box-shadow: 0 0 8px rgba(248,113,113,0.6); }
-    .dot.pending { background: var(--yellow); }
-    .notice {
+    .track-list tbody tr:last-child td { border-bottom: none; }
+    .track-list th {
+      background: rgba(0,0,0,0.3);
+      color: var(--text-dim); font-size: 10px;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      font-weight: 500;
+    }
+    .track-list tbody tr:hover { background: var(--bg-hover); }
+
+    .col-id { width: 50px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+    .col-duration { width: 70px; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+    .col-prompt { color: var(--text-dim); font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .col-actions { width: 50px; text-align: center; }
+
+    .delete-btn {
+      background: none; color: var(--text-muted); border: none;
+      cursor: pointer; font-size: 14px; padding: 2px 6px;
+      transition: color 0.15s;
+    }
+    .delete-btn:hover { color: var(--red); }
+
+    .prefix-badge {
+      display: inline-block; background: var(--jazz-gold-dim); color: #000;
+      font-size: 10px; padding: 1px 6px; border-radius: 3px;
+      margin-right: 8px; font-weight: 700; vertical-align: middle;
+    }
+    .vocal-icon { color: var(--jazz-gold); margin-left: 6px; font-size: 11px; opacity: 0.8; }
+    .no-title { color: var(--text-muted); font-style: italic; }
+    .filename {
+      color: var(--text-muted); font-size: 11px;
+      margin-top: 1px; font-family: 'SF Mono', Menlo, Consolas, monospace;
+      max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .empty {
+      text-align: center; padding: 32px 16px;
+      color: var(--text-muted); font-size: 13px;
+    }
+
+    /* Placeholder tabs */
+    .placeholder {
       background: var(--bg-card);
-      border: 1px dashed var(--gold-dim);
+      border: 1px dashed var(--border-strong);
       border-radius: 8px;
-      padding: 16px 20px;
+      padding: 80px 20px;
+      text-align: center;
       color: var(--text-dim);
-      font-size: 13px;
+      font-size: 14px;
     }
-    .notice strong { color: var(--gold); }
-    button {
-      background: var(--bg-card);
-      color: var(--text);
-      border: 1px solid var(--border);
-      padding: 8px 16px;
-      border-radius: 6px;
-      font-size: 13px;
-      cursor: pointer;
-      transition: all 0.15s;
+    .placeholder strong { color: var(--jazz-gold); display: block; margin-bottom: 6px; font-size: 16px; }
+
+    /* Dialog */
+    dialog {
+      background: var(--bg-card); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 0; min-width: 400px;
+      box-shadow: 0 16px 60px rgba(0,0,0,0.6);
     }
-    button:hover {
-      background: var(--bg-card-hover);
-      border-color: var(--gold-dim);
+    dialog::backdrop { background: rgba(0,0,0,0.5); backdrop-filter: blur(2px); }
+    dialog form {
+      padding: 20px; display: flex; flex-direction: column; gap: 12px;
     }
-    .toolbar {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 20px;
+    dialog h3 {
+      margin: 0 0 4px; font-size: 14px; font-weight: 600; color: var(--jazz-gold);
     }
-    .err {
-      font-size: 12px;
-      color: var(--red);
+    dialog label {
+      font-size: 11px; color: var(--text-dim);
+      display: flex; flex-direction: column; gap: 4px;
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    dialog input, dialog textarea {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 7px 9px; font-family: inherit; font-size: 13px;
+      text-transform: none; letter-spacing: normal;
+    }
+    dialog input:focus, dialog textarea:focus {
+      outline: none; border-color: var(--jazz-gold-dim);
+    }
+    dialog textarea { min-height: 70px; resize: vertical; }
+    dialog .actions {
+      display: flex; gap: 8px; justify-content: flex-end;
       margin-top: 4px;
-      word-break: break-all;
+    }
+    dialog button {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); padding: 6px 14px;
+      border-radius: 4px; cursor: pointer; font-size: 12px;
+      font-family: inherit;
+    }
+    dialog button:hover { background: var(--bg-hover); }
+    dialog button[type="submit"] {
+      background: var(--jazz-gold-dim); color: #000;
+      border-color: var(--jazz-gold); font-weight: 600;
+    }
+    dialog button[type="submit"]:hover { background: var(--jazz-gold); }
+
+    /* Toaster */
+    #toaster {
+      position: fixed; bottom: 20px; right: 20px;
+      z-index: 1000;
+      display: flex; flex-direction: column; gap: 6px;
+      pointer-events: none;
+    }
+    .toast {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--jazz-gold);
+      border-radius: 4px;
+      padding: 9px 14px;
+      min-width: 240px; max-width: 380px;
+      font-size: 12px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+      animation: slidein 0.18s ease-out;
+      pointer-events: auto;
+    }
+    .toast.error { border-left-color: var(--red); }
+    .toast.success { border-left-color: var(--green); }
+    .toast.info { border-left-color: var(--text-dim); }
+    @keyframes slidein {
+      from { transform: translateX(20px); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
     }
   </style>
 </head>
 <body>
   <header>
     <h1><span class="gold">🎷 Premium Jazz Lounge</span> — Control Panel</h1>
-    <span class="phase">Phase 2 · Bootstrap</span>
+    <span id="version">v0.3</span>
   </header>
 
+  <nav class="tabs">
+    <button class="tab active" data-tab="pool">Pool</button>
+    <button class="tab" data-tab="builder">Builder</button>
+    <button class="tab" data-tab="uploader">Uploader</button>
+  </nav>
+
   <main>
-    <div class="toolbar">
-      <button id="refresh">↻ 새로고침</button>
-      <button onclick="window.open('/api/health', '_blank')">/api/health</button>
-      <button onclick="window.open('/api/stats', '_blank')">/api/stats</button>
-    </div>
 
-    <div class="row">
-      <div class="card" id="card-db">
-        <div class="label">Supabase DB</div>
-        <div class="status-line">
-          <span class="dot pending"></span>
-          <span class="value" id="db-status" style="font-size:14px">확인 중…</span>
+    <!-- ─── Pool tab ─── -->
+    <section id="tab-pool" class="tab-content active">
+      <div class="stats-row">
+        <div class="stat-card">
+          <label>Tracks</label>
+          <div class="stat-value" id="stat-tracks">—</div>
         </div>
-        <div class="sub" id="db-sub"></div>
-      </div>
-      <div class="card" id="card-storage">
-        <div class="label">Storage Bucket</div>
-        <div class="status-line">
-          <span class="dot pending"></span>
-          <span class="value" id="storage-status" style="font-size:14px">확인 중…</span>
+        <div class="stat-card">
+          <label>With Title</label>
+          <div class="stat-value" id="stat-with-title">—</div>
         </div>
-        <div class="sub" id="storage-sub"></div>
+        <div class="stat-card">
+          <label>Used</label>
+          <div class="stat-value" id="stat-used">—</div>
+        </div>
+        <div class="stat-card">
+          <label>Prompts</label>
+          <div class="stat-value" id="stat-prompts">—</div>
+        </div>
       </div>
-      <div class="card">
-        <div class="label">서버</div>
-        <div class="value" id="version">v?.?.?</div>
-        <div class="sub" id="port"></div>
-      </div>
-    </div>
 
-    <div class="row">
-      <div class="card">
-        <div class="label">Tracks</div>
-        <div class="value" id="stat-tracks">—</div>
+      <div class="dropzone" id="dropzone">
+        <div class="dropzone-clickarea" id="dropClick">
+          <p>📂 mp3 / m4a 파일을 여기에 <span class="gold">드래그</span>하거나 <span class="gold">클릭</span>해서 선택</p>
+        </div>
+        <div class="dropzone-controls">
+          <span>
+            <label for="promptSelect">Prompt</label>
+            <select id="promptSelect">
+              <option value="">(없음)</option>
+            </select>
+            <button class="icon-btn" type="button" id="newPromptBtn" title="새 프롬프트 추가">+</button>
+          </span>
+          <label class="vocal-check">
+            <input type="checkbox" id="hasVocals" />
+            보컬 포함
+          </label>
+        </div>
+        <div class="upload-progress" id="uploadProgress" hidden>
+          <div class="progress-bar"><div class="progress-fill"></div></div>
+          <div class="progress-text"></div>
+        </div>
+        <input type="file" id="fileInput" hidden multiple
+               accept="audio/*,video/mp4,.mp3,.m4a,.wav,.flac,.ogg,.aac,.opus" />
       </div>
-      <div class="card">
-        <div class="label">Titles</div>
-        <div class="value" id="stat-titles">—</div>
-      </div>
-      <div class="card">
-        <div class="label">Prompts</div>
-        <div class="value" id="stat-prompts">—</div>
-      </div>
-      <div class="card">
-        <div class="label">Video Projects</div>
-        <div class="value" id="stat-videos">—</div>
-      </div>
-    </div>
 
-    <div class="notice">
-      📌 <strong>다음 단계:</strong> Phase 3 에서 Pool 탭이 추가됩니다 — Suno 곡 업로드, 자동 LLM 제목 생성, 길이/BPM/악기 분석.
-    </div>
+      <div class="track-list-header">
+        <h3>Track List</h3>
+        <button class="refresh-btn" id="refreshTracksBtn">↻ 새로고침</button>
+      </div>
+      <div class="track-list">
+        <table>
+          <thead>
+            <tr>
+              <th class="col-id">#</th>
+              <th>Title / Filename</th>
+              <th class="col-duration">Length</th>
+              <th class="col-prompt">Prompt</th>
+              <th class="col-actions"></th>
+            </tr>
+          </thead>
+          <tbody id="trackBody">
+            <tr><td colspan="5" class="empty">로딩 중…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ─── Builder tab placeholder ─── -->
+    <section id="tab-builder" class="tab-content">
+      <div class="placeholder">
+        <strong>🚧 Builder</strong>
+        Phase 4 에서 구현 예정 — 영상 빌더 (Pool 에서 13–15곡 선택 → Remotion 렌더 → 30분 영상)
+      </div>
+    </section>
+
+    <!-- ─── Uploader tab placeholder ─── -->
+    <section id="tab-uploader" class="tab-content">
+      <div class="placeholder">
+        <strong>🚧 Uploader</strong>
+        Phase 5 에서 구현 예정 — YouTube 16개 언어 자동 번역 + 예약 업로드
+      </div>
+    </section>
+
   </main>
 
-  <script>
-    function setStatus(prefix, ok, label, sub, err) {
-      const card = document.getElementById('card-' + prefix);
-      const dot = card.querySelector('.dot');
-      const status = document.getElementById(prefix + '-status');
-      const subEl = document.getElementById(prefix + '-sub');
-      dot.classList.remove('pending', 'ok', 'fail');
-      dot.classList.add(ok ? 'ok' : 'fail');
-      status.textContent = label;
-      status.style.color = ok ? 'var(--green)' : 'var(--red)';
-      subEl.innerHTML = sub || '';
-      if (err) subEl.innerHTML += `<div class="err">${err}</div>`;
-    }
+  <!-- New prompt dialog -->
+  <dialog id="newPromptDialog">
+    <form id="newPromptForm">
+      <h3>새 Prompt 추가</h3>
+      <label>
+        Prompt 텍스트
+        <textarea id="newPromptText" required
+          placeholder="예: New Orleans jazz, alto sax, brushed drums"></textarea>
+      </label>
+      <label>
+        닉네임 (선택)
+        <input id="newPromptNickname" placeholder="예: NOLA-Sax" />
+      </label>
+      <div class="actions">
+        <button type="button" id="cancelPromptBtn">취소</button>
+        <button type="submit">추가</button>
+      </div>
+    </form>
+  </dialog>
 
-    async function refresh() {
-      // Health
-      try {
-        const r = await fetch('/api/health');
-        const j = await r.json();
-        document.getElementById('version').textContent = 'v' + (j.version || '?');
-        document.getElementById('port').textContent = location.host;
-        setStatus('db', !!j.db?.ok, j.db?.ok ? '연결됨' : '연결 실패',
-          j.db?.ok ? `테이블: <code>${j.db.table}</code>` : '', j.db?.error);
-        setStatus('storage', !!j.storage?.ok, j.storage?.ok ? '존재' : '없음',
-          `버킷: <code>${j.storage?.bucket || '-'}</code>${j.storage?.public ? ' (public)' : ''}`,
-          j.storage?.error);
-      } catch (e) {
-        setStatus('db', false, '서버 응답 없음', '', e.message);
-        setStatus('storage', false, '서버 응답 없음', '', e.message);
-      }
+  <div id="toaster"></div>
 
-      // Stats
-      try {
-        const r = await fetch('/api/stats');
-        const j = await r.json();
-        document.getElementById('stat-tracks').textContent = j.stats?.pjl_tracks ?? '—';
-        document.getElementById('stat-titles').textContent = j.stats?.pjl_titles ?? '—';
-        document.getElementById('stat-prompts').textContent = j.stats?.pjl_prompts ?? '—';
-        document.getElementById('stat-videos').textContent = j.stats?.pjl_video_projects ?? '—';
-      } catch (e) {
-        ['tracks','titles','prompts','videos'].forEach(k =>
-          document.getElementById('stat-' + k).textContent = '?'
-        );
-      }
-    }
-
-    document.getElementById('refresh').addEventListener('click', refresh);
-    refresh();
-  </script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
