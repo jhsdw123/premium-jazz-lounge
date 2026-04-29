@@ -19,6 +19,7 @@ import { computeFileHash, parsePrefixOrder } from '../../lib/track-utils.mjs';
 import { analyzeTrack } from '../../lib/track-meta.mjs';
 import { generateTitleCandidates } from '../../lib/llm.mjs';
 import { normalizeTitle, findCollision } from '../../lib/title-utils.mjs';
+import { detectInstruments } from '../../lib/instruments.mjs';
 
 const PORT = parseInt(process.env.PORT, 10) || 4001;
 const VERSION = '0.2.0';
@@ -163,6 +164,19 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
       promptId = pdata.id;
     }
 
+    // 악기 자동 추출용 prompt_text 확보 — 명시적 promptText 우선,
+    // 없으면 promptId 로 DB 에서 조회. 한 번만 fetch 해서 모든 파일에 공유.
+    let resolvedPromptText = promptText;
+    if (!resolvedPromptText && promptId) {
+      const { data: pr } = await supabase
+        .from('pjl_prompts')
+        .select('prompt_text')
+        .eq('id', promptId)
+        .maybeSingle();
+      resolvedPromptText = pr?.prompt_text || '';
+    }
+    const inferredInstruments = await detectInstruments(resolvedPromptText);
+
     const results = [];
     let uploaded = 0, duplicates = 0, errors = 0;
 
@@ -225,7 +239,7 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
             bpm,
             duration_raw_sec: durationRawSec,
             duration_actual_sec: durationActualSec,
-            instruments: [],
+            instruments: inferredInstruments,
           })
           .select('id')
           .single();
@@ -241,6 +255,7 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
           storagePath,
           duration_raw_sec: durationRawSec,
           duration_actual_sec: durationActualSec,
+          instruments: inferredInstruments,
           ...(analyzeError ? { analyzeWarning: analyzeError } : {}),
         });
         uploaded++;
@@ -285,6 +300,29 @@ app.get('/api/tracks', async (req, res) => {
       if (idArr.length) q = q.in('id', idArr);
     }
 
+    // orderBy=random — Postgres 측 random() (pjl_random_tracks RPC).
+    // 1) RPC 로 최대 500 개 random ID 추출
+    // 2) 메인 쿼리에 .in('id', ids) 로 제약 + 다른 필터 그대로 적용
+    // 3) fetch 후 JS 에서 RPC 순서대로 reorder + lim slice
+    // RPC 미적용 환경 fallback: 마지막 단계의 JS shuffle.
+    let useRpcRandom = orderBy === 'random';
+    let randomOrderedIds = null;
+    if (useRpcRandom) {
+      try {
+        const { data: rndRows, error: rpcErr } = await supabase
+          .rpc('pjl_random_tracks', { _limit: 500 });
+        if (rpcErr) throw rpcErr;
+        randomOrderedIds = (rndRows || []).map((r) => r.id);
+        if (randomOrderedIds.length === 0) {
+          return res.json({ ok: true, count: 0, tracks: [] });
+        }
+        q = q.in('id', randomOrderedIds);
+      } catch (e) {
+        console.warn('[random] pjl_random_tracks RPC unavailable — JS shuffle fallback:', e.message);
+        useRpcRandom = false;
+      }
+    }
+
     // 검색: filename + title_en 양쪽 ilike.
     // title_en 은 join 한 테이블 컬럼이라 PostgREST or() 한 줄로 검색 불가 →
     // 먼저 매칭되는 title_id 들을 prefetch 한 뒤 OR(filename ilike, title_id IN (...)).
@@ -327,19 +365,27 @@ app.get('/api/tracks', async (req, res) => {
       case 'oldest':   q = q.order('created_at', { ascending: true }); break;
       case 'shortest': q = q.order('duration_actual_sec', { ascending: true, nullsFirst: false }); break;
       case 'longest':  q = q.order('duration_actual_sec', { ascending: false, nullsFirst: false }); break;
-      case 'random':   /* client-side shuffle */ break;
+      case 'random':   /* RPC 가 위에서 처리, JS reorder 는 fetch 후 */ break;
       case 'newest':
       default:         q = q.order('created_at', { ascending: false });
     }
 
-    q = q.limit(lim);
+    // random 일 때는 RPC 가 가져온 ID 들 모두 fetch (≤500), 이후 JS reorder + slice.
+    q = q.limit(orderBy === 'random' ? Math.max(lim, 500) : lim);
 
     const { data, error } = await q;
     if (error) throw error;
 
     let tracks = data || [];
     if (orderBy === 'random') {
-      tracks = [...tracks].sort(() => Math.random() - 0.5);
+      if (useRpcRandom && randomOrderedIds) {
+        // RPC 의 random 순서 그대로 보존
+        const map = new Map(tracks.map((t) => [t.id, t]));
+        tracks = randomOrderedIds.map((id) => map.get(id)).filter(Boolean).slice(0, lim);
+      } else {
+        // RPC 없는 환경 fallback: JS shuffle
+        tracks = [...tracks].sort(() => Math.random() - 0.5).slice(0, lim);
+      }
     }
 
     res.json({ ok: true, count: tracks.length, tracks });
@@ -496,6 +542,75 @@ app.post('/api/tracks/backfill', async (req, res) => {
       ok: true,
       total: tracks.length,
       summary: { analyzed, skipped, dlErrors, anErrors, updErrors },
+      results,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Tracks: extract-instruments (Phase 3-C-2-C) ──────────────────────────
+//   POST /api/tracks/extract-instruments
+//   body: { ids?: number[], overwrite?: boolean }
+//
+//   - ids 가 있으면 해당 트랙만, 없으면 instruments 가 비어있는 트랙 전체.
+//   - overwrite=true 면 기존 instruments 가 있어도 prompt 재추출로 교체.
+//   - prompt_text 가 없는 트랙은 skip.
+//   - 오디오 다운로드/Gemini 호출 없음 — 순수 텍스트 매칭, 빠름.
+app.post('/api/tracks/extract-instruments', async (req, res) => {
+  try {
+    const explicitIds = Array.isArray(req.body?.ids)
+      ? req.body.ids.map(parseIntOrNull).filter((n) => n != null)
+      : null;
+    const overwrite = req.body?.overwrite === true;
+
+    let q = supabase
+      .from('pjl_tracks')
+      .select('id, instruments, prompt:pjl_prompts(prompt_text)')
+      .eq('is_active', true);
+
+    if (explicitIds && explicitIds.length) {
+      q = q.in('id', explicitIds);
+    }
+
+    const { data: tracks, error: selErr } = await q.limit(500);
+    if (selErr) throw selErr;
+
+    let updated = 0, skipped = 0, errors = 0;
+    const results = [];
+
+    for (const t of tracks) {
+      const had = (t.instruments || []).length > 0;
+      if (had && !overwrite) {
+        skipped++;
+        results.push({ id: t.id, status: 'skipped', reason: 'already-has-instruments', instruments: t.instruments });
+        continue;
+      }
+      const promptText = t.prompt?.prompt_text || '';
+      if (!promptText) {
+        skipped++;
+        results.push({ id: t.id, status: 'skipped', reason: 'no-prompt' });
+        continue;
+      }
+      try {
+        const inferred = await detectInstruments(promptText);
+        const { error: uerr } = await supabase
+          .from('pjl_tracks')
+          .update({ instruments: inferred })
+          .eq('id', t.id);
+        if (uerr) throw uerr;
+        updated++;
+        results.push({ id: t.id, status: 'updated', instruments: inferred, prev: t.instruments || [] });
+      } catch (e) {
+        errors++;
+        results.push({ id: t.id, status: 'error', error: e.message });
+      }
+    }
+
+    res.json({
+      ok: true,
+      total: tracks.length,
+      summary: { updated, skipped, errors },
       results,
     });
   } catch (e) {
