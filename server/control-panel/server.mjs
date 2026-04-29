@@ -1,14 +1,18 @@
-import 'dotenv/config';
+import { config } from 'dotenv';
 import express from 'express';
 import cors from 'cors';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
-import { supabase, SUPABASE_BUCKET, SUPABASE_URL } from '../../lib/supabase.mjs';
-import { controlPanelPublic } from '../../lib/paths.mjs';
-
+// .env.local 명시적 로드. lib/supabase.mjs 도 자체 로드하므로 (ESM 호이스팅으로
+// 어차피 그쪽이 먼저 평가됨) 이건 server.mjs 본문에서 process.env 를 직접 읽는
+// 코드(예: PORT)를 위한 안전망.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+config({ path: resolve(__dirname, '../../.env.local') });
+
+import { supabase, SUPABASE_BUCKET, SUPABASE_URL } from '../../lib/supabase.mjs';
+import { controlPanelPublic } from '../../lib/paths.mjs';
 
 const PORT = parseInt(process.env.PORT, 10) || 4001;
 const VERSION = '0.2.0';
