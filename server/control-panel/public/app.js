@@ -896,22 +896,40 @@ function fmtNatural(totalSec) {
   return `${min}분 (너무 김 — 45분 이하 권장)`;
 }
 
-function getOrderedTracksForRender() {
-  // pin 1~5 자동 배치 후 나머지를 그 뒤에 — 단, unpinAll 면 builder.tracks 순서 그대로.
-  if (builder.unpinAll) return [...builder.tracks];
+// 핀 트랙은 prefix_order 그대로의 디스플레이 슬롯에 고정 (1→슬롯1, 3→슬롯3),
+// 자유 트랙이 빈 슬롯과 6번 이후를 채움. unpinAll=true 면 builder.tracks 순서 그대로.
+function arrangeTracksWithPins(tracks) {
+  if (builder.unpinAll) return [...tracks];
 
-  const pinned = new Map();   // prefix_order -> track
+  const pinned = new Map();   // prefix_order(1..5) -> track (선착순 dedupe)
   const free = [];
-  for (const t of builder.tracks) {
+  for (const t of tracks) {
     const po = t.prefix_order;
     if (po >= 1 && po <= 5 && !pinned.has(po)) pinned.set(po, t);
     else free.push(t);
   }
-  const slots = [];
-  for (let i = 1; i <= 5; i++) {
-    if (pinned.has(i)) slots.push(pinned.get(i));
+  const result = new Array(tracks.length);
+  for (const [po, t] of pinned) {
+    const idx = po - 1;             // 1-based 슬롯 → 0-based 인덱스
+    if (idx < result.length) result[idx] = t;
   }
-  return [...slots, ...free];
+  let fi = 0;
+  for (let i = 0; i < result.length; i++) {
+    if (!result[i]) result[i] = free[fi++];
+  }
+  // free 가 모자라면 (트랙 수 < 5 같은 edge), undefined 자리 정리
+  return result.filter(Boolean);
+}
+
+// builder.tracks 의 인덱스 i 위치가 핀 슬롯인지 (그 자리에 prefix_order==i+1 인 트랙이 있을 때).
+function isPinnedAtIndex(t, idx) {
+  if (builder.unpinAll || !t) return false;
+  return t.prefix_order >= 1 && t.prefix_order <= 5 && t.prefix_order === idx + 1;
+}
+
+// builder.tracks 가 곧 디스플레이 순서. 별도 reorder 없음.
+function getOrderedTracksForRender() {
+  return [...builder.tracks];
 }
 
 function renderBuilderTracks() {
@@ -924,8 +942,7 @@ function renderBuilderTracks() {
     const pos = idx + 1;
     const dur = Number(t.duration_actual_sec) || Number(t.duration_raw_sec) || 0;
     totalDur += dur;
-    const isPinSlot = !builder.unpinAll && t.prefix_order >= 1 && t.prefix_order <= 5
-      && pos === t.prefix_order;
+    const isPinSlot = isPinnedAtIndex(t, idx);
     const draggable = !isPinSlot;
 
     const row = document.createElement('div');
@@ -1000,20 +1017,38 @@ function setupDragDrop(container) {
 }
 
 function reorderBuilderTracks(srcId, targetId) {
-  // builder.tracks 안에서 srcId 를 빼서 targetId 자리 앞에 삽입
+  // 핀 슬롯은 절대 건드리지 않음. free 자리들 안에서만 src 이동.
   const srcIdx = builder.tracks.findIndex((t) => t.id === srcId);
   const tgtIdx = builder.tracks.findIndex((t) => t.id === targetId);
-  if (srcIdx < 0 || tgtIdx < 0) return;
-  const [src] = builder.tracks.splice(srcIdx, 1);
-  // 새 인덱스 — splice 가 srcIdx<tgtIdx 일 때 tgtIdx 가 1 줄어든 자리 = tgtIdx - 1
-  const adj = srcIdx < tgtIdx ? tgtIdx - 1 : tgtIdx;
-  builder.tracks.splice(adj, 0, src);
+  if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return;
+  if (isPinnedAtIndex(builder.tracks[srcIdx], srcIdx)) return;  // 안전판
+  if (isPinnedAtIndex(builder.tracks[tgtIdx], tgtIdx)) return;
+
+  // 1) free 위치 인덱스 + 트랙들 추출 (현재 순서대로)
+  const freeIdxs = [];
+  const freeTracks = [];
+  builder.tracks.forEach((t, i) => {
+    if (!isPinnedAtIndex(t, i)) {
+      freeIdxs.push(i);
+      freeTracks.push(t);
+    }
+  });
+  // 2) free 배열 안에서 src/tgt 위치 찾아서 splice
+  const fSrc = freeIdxs.indexOf(srcIdx);
+  const fTgt = freeIdxs.indexOf(tgtIdx);
+  if (fSrc < 0 || fTgt < 0) return;
+  const [src] = freeTracks.splice(fSrc, 1);
+  const adj = fSrc < fTgt ? fTgt - 1 : fTgt;
+  freeTracks.splice(adj, 0, src);
+  // 3) 다시 원래 free 슬롯 위치들에 채워넣기 (핀 슬롯은 그대로)
+  freeIdxs.forEach((bIdx, k) => { builder.tracks[bIdx] = freeTracks[k]; });
   renderBuilderTracks();
 }
 
 function removeBuilderTrack(id) {
-  builder.tracks = builder.tracks.filter((t) => t.id !== id);
-  // sessionStorage 도 갱신 (refresh 시 일관)
+  // 제거 후 재배치 — 핀 슬롯이 비었거나, 핀 트랙 자체가 제거됐을 수 있어서.
+  const filtered = builder.tracks.filter((t) => t.id !== id);
+  builder.tracks = arrangeTracksWithPins(filtered);
   sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(builder.tracks.map((t) => t.id)));
   renderBuilderTracks();
 }
@@ -1028,22 +1063,23 @@ function shuffleArr(arr) {
 }
 
 $('#bShufflePartialBtn').addEventListener('click', () => {
-  // 6번 이후 (인덱스 5 이상) 만 셔플. unpin 모드면 전체 동작과 같음.
-  if (builder.unpinAll) {
-    builder.tracks = shuffleArr(builder.tracks);
-  } else {
-    const ordered = getOrderedTracksForRender();
-    const head = ordered.slice(0, 5);
-    const tail = shuffleArr(ordered.slice(5));
-    // builder.tracks 를 새 순서로 재구성
-    // (단 head 는 내부적으로 prefix_order 기준이므로 그대로 두고 free 부분만 셔플)
-    const pinnedIds = new Set(head.filter((t) => t.prefix_order >= 1 && t.prefix_order <= 5).map((t) => t.id));
-    const freeShuffled = shuffleArr(builder.tracks.filter((t) => !pinnedIds.has(t.id)));
-    const pinnedKeep = builder.tracks.filter((t) => pinnedIds.has(t.id));
-    builder.tracks = [...pinnedKeep, ...freeShuffled];
+  // 핀 슬롯(인덱스에 prefix_order 정확히 일치)은 그대로 두고, 그 외 자리만 Fisher-Yates 셔플.
+  // unpinAll 이면 isPinnedAtIndex 가 항상 false → 전체 셔플과 동일.
+  const freeIdxs = [];
+  const freeTracks = [];
+  builder.tracks.forEach((t, i) => {
+    if (!isPinnedAtIndex(t, i)) {
+      freeIdxs.push(i);
+      freeTracks.push(t);
+    }
+  });
+  for (let i = freeTracks.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [freeTracks[i], freeTracks[j]] = [freeTracks[j], freeTracks[i]];
   }
+  freeIdxs.forEach((bIdx, k) => { builder.tracks[bIdx] = freeTracks[k]; });
   renderBuilderTracks();
-  toast('6번 이후 셔플 완료', 'info');
+  toast(builder.unpinAll ? '전체 셔플 완료' : `핀 외 ${freeTracks.length}곡 셔플`, 'info');
 });
 
 $('#bShuffleAllBtn').addEventListener('click', () => {
@@ -1056,7 +1092,12 @@ $('#bShuffleAllBtn').addEventListener('click', () => {
 });
 
 $('#bUnpinAll').addEventListener('change', (ev) => {
+  const wasUnpinned = builder.unpinAll;
   builder.unpinAll = ev.target.checked;
+  // 핀 모드로 복귀할 때만 재배치 (핀 트랙을 다시 prefix_order 슬롯으로).
+  if (wasUnpinned && !builder.unpinAll) {
+    builder.tracks = arrangeTracksWithPins(builder.tracks);
+  }
   renderBuilderTracks();
 });
 
@@ -1352,7 +1393,10 @@ window.builderOnEnter = async function builderOnEnter() {
     const fetched = j.tracks || [];
     // 요청한 id 순서를 유지하기 위해 재정렬
     const map = new Map(fetched.map((t) => [t.id, t]));
-    builder.tracks = ids.map((id) => map.get(id)).filter(Boolean);
+    const orderedFromIds = ids.map((id) => map.get(id)).filter(Boolean);
+    // 핀 적용 — prefix_order 1~5 트랙은 그 슬롯에 고정 배치
+    builder.unpinAll = $('#bUnpinAll').checked;
+    builder.tracks = arrangeTracksWithPins(orderedFromIds);
     if (!builder.tracks.length) {
       toast('선택했던 곡이 모두 사라졌습니다 (삭제됨?)', 'error');
       $('#builderEmpty').hidden = false;
@@ -1361,7 +1405,6 @@ window.builderOnEnter = async function builderOnEnter() {
     }
     $('#builderEmpty').hidden = true;
     $('#builderMain').hidden = false;
-    builder.unpinAll = $('#bUnpinAll').checked;
     renderBuilderTracks();
   } catch (e) {
     toast(`Builder 트랙 로드 실패: ${e.message}`, 'error');

@@ -1274,28 +1274,38 @@ app.post('/api/videos/suggest-titles', async (req, res) => {
 
     let text;
     try {
+      // ⚠ 영상 제목 (4-8 단어) × 5개 + 2.5-flash 의 thinking 토큰 소비를 감안.
+      //   기존 512 는 thinking 에 다 먹혀 응답이 truncate 되어 JSON 파싱 실패 (500) 발생.
       text = await callGemini(prompt, {
         temperature: 1.0,
-        maxOutputTokens: 512,
+        maxOutputTokens: 2048,
         responseSchema: {
           type: 'OBJECT',
           properties: {
-            titles: { type: 'ARRAY', items: { type: 'STRING' }, minItems: 5 },
+            // minItems 너무 빡빡하면 Gemini 가 거부하고 빈 응답 줌. 3 으로 완화.
+            titles: { type: 'ARRAY', items: { type: 'STRING' }, minItems: 3 },
           },
           required: ['titles'],
         },
       });
     } catch (e) {
+      console.error('[suggest-titles] Gemini 호출 실패:', e);
       return res.status(500).json({ ok: false, error: `Gemini 호출 실패: ${e.message}` });
     }
 
     const titles = parseTitlesJson(text).slice(0, 5);
     if (!titles.length) {
-      return res.status(500).json({ ok: false, error: 'Gemini 응답 파싱 실패', raw: text });
+      console.error('[suggest-titles] 파싱 실패. raw 응답:', text);
+      return res.status(500).json({
+        ok: false,
+        error: 'Gemini 응답 파싱 실패 (응답이 비었거나 잘림). 다시 시도해주세요.',
+        raw: text,
+      });
     }
 
     res.json({ ok: true, titles, trackCount: tracks.length });
   } catch (e) {
+    console.error('[suggest-titles] 서버 오류:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
