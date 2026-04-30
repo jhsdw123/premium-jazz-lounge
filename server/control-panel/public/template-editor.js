@@ -382,6 +382,9 @@ function drawVisualizer(canvas, c, time) {
   //    아니면 fake (sine + 랜덤).
   const real = getRealSpectrum();
   if (real) {
+    // legacy 매핑: percent → pow(2) → rawIdx (FFT bin) + adaptive range (3~7 bin).
+    // 저음(percent~0): 윈도우 좁게 (3 bin) — 저음 영역은 bin 자체가 빽빽하니 좁게.
+    // 고음(percent~1): 윈도우 넓게 (7 bin) — 고음 영역은 bin 이 듬성하니 넓게.
     const fftSize = audio.analyser.fftSize;
     const binCount = real.length;
     const ccLocal = Math.max(0, c.centerCut | 0);
@@ -391,11 +394,15 @@ function drawVisualizer(canvas, c, time) {
       const percent = denom > 0 ? (i + ccLocal) / denom : 0;
       const logIndex = Math.pow(percent, 2.0);
       const rawIdx = Math.floor(tsLocal + logIndex * (fftSize / 5));
-      const start = Math.max(0, Math.min(binCount - 1, rawIdx));
-      const end = Math.max(start + 1, Math.min(binCount, rawIdx + 4));
-      let sum = 0;
-      const cnt = end - start;
-      for (let j = start; j < end; j++) sum += real[j];
+      const range = 2 + Math.floor(percent * 4);   // legacy: 3~7 bins
+      let sum = 0, cnt = 0;
+      for (let k = 0; k <= range; k++) {
+        const idx = rawIdx + k;
+        if (idx >= 0 && idx < binCount) {
+          sum += real[idx];
+          cnt++;
+        }
+      }
       state.raw[i] = cnt > 0 ? (sum / cnt) / 255 : 0;
     }
   } else {
@@ -492,6 +499,7 @@ let _visTickerStarted = false;
 function startVisualizerTicker() {
   if (_visTickerStarted) return;
   _visTickerStarted = true;
+  let debugCounter = 0;
   setInterval(() => {
     if (!te.initialized) return;
     const now = performance.now();
@@ -500,7 +508,57 @@ function startVisualizerTicker() {
       const cv = document.querySelector(`#teCanvasInner [data-id="${c.id}"] canvas[data-vis-id="${c.id}"]`);
       if (cv) drawVisualizer(cv, c, now);
     }
+    // 디버그 패널 — 200ms 마다 (4 tick) 갱신
+    debugCounter++;
+    if (debugCounter % 4 === 0) updateDebugSpectrumPanel();
   }, 50);
+}
+
+function updateDebugSpectrumPanel() {
+  const cb = document.getElementById('teDebugSpectrum');
+  const panel = document.getElementById('teDebugSpectrumPanel');
+  if (!cb || !panel) return;
+  if (!cb.checked) {
+    panel.style.display = 'none';
+    return;
+  }
+  panel.style.display = 'block';
+
+  const visComps = te.components.filter((c) => c.type === 'visualizer');
+  if (!visComps.length) {
+    panel.textContent = '(visualizer 컴포넌트 없음)';
+    return;
+  }
+  const c = visComps[0];
+  const state = visState.get(c.id);
+  if (!state) {
+    panel.textContent = '(state 없음)';
+    return;
+  }
+  const real = audioHasRealData() ? '✅ REAL' : '❌ FAKE';
+  const N = state.len;
+  let min = 1, max = 0, sum = 0;
+  for (let i = 0; i < N; i++) {
+    if (state.raw[i] < min) min = state.raw[i];
+    if (state.raw[i] > max) max = state.raw[i];
+    sum += state.raw[i];
+  }
+  const avg = sum / N;
+  const fmt = (v) => v.toFixed(3);
+  const sample = (arr, start, count) => {
+    const out = [];
+    for (let i = start; i < start + count && i < arr.length; i++) out.push(fmt(arr[i]));
+    return out.join(' ');
+  };
+  const mid = Math.floor(N / 2);
+  panel.textContent = [
+    `mode: ${real}    bars: ${N}    min: ${fmt(min)}  max: ${fmt(max)}  avg: ${fmt(avg)}`,
+    `low (i=0..4):    ${sample(state.raw, 0, 5)}`,
+    `mid (i=${mid}..${mid + 4}):  ${sample(state.raw, mid, 5)}`,
+    `high (i=${N - 5}..${N - 1}): ${sample(state.raw, N - 5, 5)}`,
+    `lastData low: ${sample(state.lastData, 0, 5)}`,
+    `lastData high: ${sample(state.lastData, N - 5, 5)}`,
+  ].join('\n');
 }
 
 function renderProgress(c) {
@@ -679,20 +737,31 @@ function bindComponentInteractions(el, c) {
   });
 
   // 리사이즈 (우하단 핸들)
+  // ⚠ Text 의 fontSize 스케일링은 drag start 시점의 width/fontSize 기준으로
+  //   누적 ratio 를 계산해야 함. 매 move 마다 round 하면 좁힘→넓힘 round-trip 시
+  //   fontSize 가 원본으로 정확히 복귀 안 되어 wrap 이 미세하게 남는 버그.
+  let _dragStart = null;
   window.interact(el).resizable({
     edges: { right: '.te-handle', bottom: '.te-handle' },
     listeners: {
+      start() {
+        const cur = te.components.find((x) => x.id === c.id);
+        _dragStart = cur ? { width: cur.width, height: cur.height, fontSize: cur.fontSize || 72 } : null;
+      },
+      end() {
+        _dragStart = null;
+      },
       move(ev) {
         const cur = te.components.find((x) => x.id === c.id);
         if (!cur) return;
         const s = scale();
-        const oldW = cur.width;
         cur.width = Math.max(20, Math.round(cur.width + ev.deltaRect.width / s));
         cur.height = Math.max(10, Math.round(cur.height + ev.deltaRect.height / s));
-        // Text 는 폭에 비례해 폰트 크기 함께 스케일
-        if (cur.type === 'text' && oldW > 0 && cur.width !== oldW) {
-          const factor = cur.width / oldW;
-          cur.fontSize = Math.max(8, Math.round((cur.fontSize || 72) * factor));
+        // Text 는 폭에 비례해 폰트 크기 함께 스케일.
+        // drag start 시점 기준 누적 ratio (per-frame round 누적 X).
+        if (cur.type === 'text' && _dragStart && _dragStart.width > 0) {
+          const factor = cur.width / _dragStart.width;
+          cur.fontSize = Math.max(8, Math.round(_dragStart.fontSize * factor));
         }
         applyComponentTransform(el, cur);
         // 비주얼라이저는 width/height 변경 시 bar 다시 그리기
@@ -949,7 +1018,7 @@ function renderProps() {
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
         <label style="color:var(--jazz-gold)">— 주파수 —</label>
       </div>
-      ${slider('sensitivity', 'Sensitivity', 0, 0.3, 0.005, c.sensitivity ?? 0.15, '')}
+      ${slider('sensitivity', 'Sensitivity', 0, 1, 0.005, c.sensitivity ?? 0.15, '')}
       ${slider('smoothing', 'Smoothing', 0, 1, 0.01, c.smoothing ?? 0.85, '')}
       ${slider('midBoost', 'Mid Boost', 0, 10, 0.05, c.midBoost ?? 1.5, '')}
       ${slider('highBoost', 'High Boost', 0, 10, 0.05, c.highBoost ?? 0.8, '')}
@@ -1356,7 +1425,12 @@ function ensureAudioContext() {
   audio.context = new (window.AudioContext || window.webkitAudioContext)();
   audio.analyser = audio.context.createAnalyser();
   audio.analyser.fftSize = FFT_SIZE;
-  audio.analyser.smoothingTimeConstant = 0.85;
+  // ⚠ 막대 다양성을 위해 내부 smoothing 은 낮게. 사용자 smoothing 슬라이더가
+  // 우리 쪽 pass 에서 적용되므로 여기서 더 smooth 하면 인접 막대들이 평탄화됨.
+  audio.analyser.smoothingTimeConstant = 0.3;
+  // dB range — 음악의 dynamic range 를 더 잘 보이게.
+  audio.analyser.minDecibels = -90;
+  audio.analyser.maxDecibels = -20;
   audio.bytes = new Uint8Array(audio.analyser.frequencyBinCount);
   audio.analyser.connect(audio.context.destination);
 }
