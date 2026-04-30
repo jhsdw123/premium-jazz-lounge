@@ -22,6 +22,8 @@ import { normalizeTitle, findCollision } from '../../lib/title-utils.mjs';
 import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { buildAndPersistPlaylist } from '../../lib/template-to-remotion.mjs';
+import { processBackground } from '../../lib/template-bg.mjs';
+import { randomUUID } from 'node:crypto';
 
 const PORT = parseInt(process.env.PORT, 10) || 4001;
 const VERSION = '0.2.0';
@@ -951,10 +953,10 @@ app.get('/api/templates', async (_req, res) => {
   try {
     const { data, error } = await supabase
       .from('pjl_templates')
-      .select('id, name, description, is_default, config_json, thumbnail_url, use_count, created_at, updated_at')
-      .order('is_default', { ascending: false })
+      .select('id, name, description, is_default, is_favorite, config_json, background_image_url, thumbnail_url, use_count, created_at, updated_at')
+      .order('is_favorite', { ascending: false })
       .order('use_count', { ascending: false })
-      .order('id', { ascending: true });
+      .order('updated_at', { ascending: false });
     if (error) throw error;
     res.json({ ok: true, templates: data || [] });
   } catch (e) {
@@ -981,7 +983,11 @@ app.get('/api/templates/:id', async (req, res) => {
 
 app.post('/api/templates', async (req, res) => {
   try {
-    const { name, description = null, config_json, is_default = false } = req.body || {};
+    const {
+      name, description = null, config_json,
+      is_default = false, is_favorite = false,
+      background_image_url = null, thumbnail_url = null,
+    } = req.body || {};
     if (!name || typeof name !== 'string') {
       return res.status(400).json({ ok: false, error: 'name 필수' });
     }
@@ -1000,7 +1006,15 @@ app.post('/api/templates', async (req, res) => {
 
     const { data, error } = await supabase
       .from('pjl_templates')
-      .insert({ name: name.trim(), description, config_json, is_default: !!is_default })
+      .insert({
+        name: name.trim(),
+        description,
+        config_json,
+        is_default: !!is_default,
+        is_favorite: !!is_favorite,
+        background_image_url,
+        thumbnail_url,
+      })
       .select('*')
       .single();
     if (error) throw error;
@@ -1016,7 +1030,10 @@ app.put('/api/templates/:id', async (req, res) => {
     if (id == null) return res.status(400).json({ ok: false, error: 'invalid id' });
 
     const patch = {};
-    const { name, description, config_json, is_default, thumbnail_url } = req.body || {};
+    const {
+      name, description, config_json, is_default, is_favorite,
+      thumbnail_url, background_image_url,
+    } = req.body || {};
     if (name !== undefined) patch.name = String(name).trim();
     if (description !== undefined) patch.description = description;
     if (config_json !== undefined) {
@@ -1026,7 +1043,9 @@ app.put('/api/templates/:id', async (req, res) => {
       patch.config_json = config_json;
     }
     if (thumbnail_url !== undefined) patch.thumbnail_url = thumbnail_url;
+    if (background_image_url !== undefined) patch.background_image_url = background_image_url;
     if (is_default !== undefined) patch.is_default = !!is_default;
+    if (is_favorite !== undefined) patch.is_favorite = !!is_favorite;
 
     if (Object.keys(patch).length === 0) {
       return res.status(400).json({ ok: false, error: '변경할 필드 없음' });
@@ -1134,6 +1153,92 @@ app.post('/api/templates/:id/duplicate', async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+// ─── Templates: favorite toggle (Phase 4-C-1-A) ──────────────────────────
+
+app.post('/api/templates/:id/favorite', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    if (id == null) return res.status(400).json({ ok: false, error: 'invalid id' });
+    const isFav = !!req.body?.is_favorite;
+    const { data, error } = await supabase
+      .from('pjl_templates')
+      .update({ is_favorite: isFav })
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: 'template not found' });
+    res.json({ ok: true, template: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Templates: background upload (Phase 4-C-1-A) ────────────────────────
+//   POST /api/templates/upload-background
+//   multipart/form-data, field: "file" (mp4 또는 image/*)
+//   mp4 면 ffmpeg 로 첫 프레임 PNG 추출, 이미지면 그대로.
+//   Storage 의 template-bg/ 경로에 업로드 후 signed URL 반환.
+
+const bgUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 100 * 1024 * 1024, files: 1 }, // 100MB (Loop mp4 대비)
+});
+
+app.post('/api/templates/upload-background',
+  (req, res, next) => {
+    bgUpload.single('file')(req, res, (err) => {
+      if (err instanceof multer.MulterError) {
+        return res.status(400).json({ ok: false, error: `multer: ${err.code} (${err.message})` });
+      }
+      if (err) return res.status(400).json({ ok: false, error: err.message });
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      if (!req.file) return res.status(400).json({ ok: false, error: 'file 필드 비어있음' });
+
+      // 1) 첫 프레임 추출 (또는 이미지 그대로)
+      let processed;
+      try {
+        processed = await processBackground(req.file.buffer, req.file.originalname, req.file.mimetype);
+      } catch (e) {
+        return res.status(400).json({ ok: false, error: `처리 실패: ${e.message}` });
+      }
+
+      // 2) Storage 업로드 — 경로: template-bg/{uuid}.{ext}
+      const path = `template-bg/${randomUUID()}.${processed.ext}`;
+      const { error: upErr } = await supabase.storage
+        .from(SUPABASE_BUCKET)
+        .upload(path, processed.buffer, {
+          contentType: processed.mime,
+          cacheControl: '86400',
+          upsert: false,
+        });
+      if (upErr) throw new Error(`Storage upload 실패: ${upErr.message}`);
+
+      // 3) signed URL — 1년 유효 (편집 세션 동안 유지). 진짜 영구 보관 필요 시 public bucket 또는 별도 보관 정책.
+      const { data: sd, error: sErr } = await supabase.storage
+        .from(SUPABASE_BUCKET)
+        .createSignedUrl(path, 60 * 60 * 24 * 365);
+      if (sErr) throw new Error(`signed URL 발급 실패: ${sErr.message}`);
+
+      res.json({
+        ok: true,
+        url: sd.signedUrl,
+        path,
+        mime: processed.mime,
+        ext: processed.ext,
+        bytes: processed.buffer.length,
+      });
+    } catch (e) {
+      console.error('[upload-background]', e);
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  }
+);
 
 // ─── Video Series: CRUD (Phase 4-B) ──────────────────────────────────────
 

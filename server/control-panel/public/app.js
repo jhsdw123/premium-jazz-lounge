@@ -68,6 +68,9 @@ function switchTab(tab) {
   if (tab === 'builder' && typeof window.builderOnEnter === 'function') {
     window.builderOnEnter();
   }
+  if (tab === 'templates' && typeof window.templatesOnEnter === 'function') {
+    window.templatesOnEnter();
+  }
 }
 $$('.tab').forEach((btn) => {
   btn.addEventListener('click', () => switchTab(btn.dataset.tab));

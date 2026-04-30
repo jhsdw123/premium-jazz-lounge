@@ -600,6 +600,269 @@
 
     .ai-loading { color: var(--text-dim); font-size: 12px; margin-top: 6px; }
 
+    /* ─── Template Editor ─── */
+    .te-grid {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      gap: 14px;
+      align-items: start;
+    }
+    @media (max-width: 1080px) { .te-grid { grid-template-columns: 1fr; } }
+    .te-side {
+      display: flex; flex-direction: column; gap: 12px;
+    }
+    .te-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+    }
+    .te-card h3 {
+      margin: 0 0 8px;
+      font-size: 11px; font-weight: 500;
+      color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .te-card .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .te-card input[type="text"], .te-card input[type="number"],
+    .te-card select, .te-card textarea {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 6px 8px; font-family: inherit; font-size: 12px;
+    }
+    .te-card input[type="text"]:focus, .te-card input[type="number"]:focus,
+    .te-card select:focus, .te-card textarea:focus {
+      outline: none; border-color: var(--jazz-gold-dim);
+    }
+    .te-comp-buttons {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
+    }
+    .te-btn {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 6px 10px; font-size: 12px; cursor: pointer;
+      font-family: inherit; text-align: center;
+    }
+    .te-btn:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+    .te-btn.gold {
+      background: var(--jazz-gold-dim); color: #000;
+      border-color: var(--jazz-gold); font-weight: 600;
+    }
+    .te-btn.gold:hover { background: var(--jazz-gold); }
+    .te-btn.danger { color: var(--red); }
+    .te-btn.danger:hover { border-color: var(--red); }
+    .te-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .te-bg-status {
+      font-size: 11px; color: var(--text-dim); margin-top: 4px;
+      font-family: 'SF Mono', Menlo, Consolas, monospace;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    .te-list { display: flex; flex-direction: column; gap: 4px; }
+    .te-list-item {
+      display: grid;
+      grid-template-columns: 22px 1fr auto;
+      gap: 6px;
+      align-items: center;
+      padding: 6px 8px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      font-size: 12px;
+    }
+    .te-list-item.active { border-color: var(--jazz-gold); background: rgba(212,175,55,0.06); }
+    .te-list-item .star {
+      cursor: pointer; user-select: none; font-size: 13px;
+      color: var(--text-muted); line-height: 1;
+    }
+    .te-list-item .star.fav { color: var(--jazz-gold); }
+    .te-list-item .name {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      cursor: pointer;
+    }
+    .te-list-item .actions { display: flex; gap: 2px; }
+    .te-list-item .actions button {
+      background: transparent; border: 1px solid transparent;
+      color: var(--text-muted); padding: 2px 6px;
+      font-size: 11px; cursor: pointer; border-radius: 3px;
+      font-family: inherit; line-height: 1;
+    }
+    .te-list-item .actions button:hover { color: var(--text); border-color: var(--border-strong); }
+    .te-list-item .actions button.danger:hover { color: var(--red); border-color: var(--red); }
+
+    /* Canvas */
+    .te-canvas-wrap {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .te-canvas-meta {
+      display: flex; gap: 12px; font-size: 11px; color: var(--text-dim);
+      align-items: center;
+    }
+    .te-canvas-meta .strong { color: var(--jazz-gold); font-weight: 600; }
+    .te-canvas-frame {
+      position: relative;
+      width: 100%;
+      max-width: 1280px;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      overflow: hidden;
+      margin: 0 auto;
+    }
+    .te-canvas-bg {
+      position: absolute; inset: 0;
+      background-size: cover; background-position: center;
+      pointer-events: none;
+    }
+    .te-canvas-bg.empty {
+      background: repeating-linear-gradient(
+        45deg, #0E0E0E 0 10px, #161616 10px 20px
+      );
+    }
+    .te-canvas-bg.empty::after {
+      content: '배경 이미지 없음 — 좌측에서 업로드';
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--text-muted); font-size: 13px;
+    }
+    .te-canvas-inner {
+      position: absolute; inset: 0;
+    }
+    /* Component */
+    .te-comp {
+      position: absolute;
+      box-sizing: border-box;
+      cursor: move;
+      touch-action: none;
+      user-select: none;
+    }
+    .te-comp.selected { outline: 2px dashed var(--jazz-gold); outline-offset: 0; }
+    .te-comp .te-handle {
+      position: absolute;
+      width: 14px; height: 14px;
+      background: var(--jazz-gold);
+      border-radius: 2px;
+      cursor: nwse-resize;
+      right: -7px; bottom: -7px;
+      opacity: 0;
+      transition: opacity 0.15s;
+    }
+    .te-comp.selected .te-handle { opacity: 1; }
+    .te-comp .te-del {
+      position: absolute;
+      top: -10px; right: -10px;
+      width: 20px; height: 20px;
+      background: rgba(0,0,0,0.85);
+      border: 1px solid var(--red);
+      color: var(--red);
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 12px; line-height: 18px; text-align: center;
+      opacity: 0; transition: opacity 0.15s;
+      font-family: inherit;
+      padding: 0;
+    }
+    .te-comp.selected .te-del { opacity: 1; }
+    .te-comp .te-opacity {
+      position: absolute;
+      bottom: -22px; left: 0;
+      width: 90px;
+      opacity: 0; transition: opacity 0.15s;
+      pointer-events: none;
+    }
+    .te-comp.selected .te-opacity { opacity: 1; pointer-events: auto; }
+    .te-comp .te-opacity input {
+      width: 90px; height: 4px; accent-color: var(--jazz-gold);
+    }
+
+    .te-comp-text { display: flex; align-items: center; justify-content: center; }
+    .te-comp-text .text-render {
+      width: 100%; text-align: inherit;
+      pointer-events: none;
+    }
+    .te-comp-image img {
+      width: 100%; height: 100%;
+      object-fit: contain;
+      pointer-events: none;
+    }
+    .te-comp-visualizer {
+      display: flex; align-items: flex-end; justify-content: center;
+      gap: 0; padding: 0;
+    }
+    .te-bar {
+      display: inline-block;
+      background: currentColor;
+      border-radius: 1px 1px 0 0;
+    }
+    .te-comp-progress {
+      display: flex; align-items: center;
+    }
+    .te-progress-track {
+      width: 100%; height: 100%;
+      border-radius: 999px;
+      position: relative;
+      overflow: hidden;
+    }
+    .te-progress-fill {
+      position: absolute; top: 0; left: 0; bottom: 0;
+      width: 50%;
+      border-radius: 999px;
+    }
+
+    /* Properties panel */
+    .te-props {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      margin-top: 12px;
+    }
+    .te-props.empty {
+      text-align: center; color: var(--text-muted);
+      padding: 24px 12px; font-size: 12px;
+    }
+    .te-props h3 {
+      margin: 0 0 10px;
+      font-size: 11px; font-weight: 500;
+      color: var(--jazz-gold);
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .te-prop-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+    }
+    .te-prop {
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .te-prop label {
+      font-size: 10px; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .te-prop input[type="color"] {
+      width: 100%; height: 28px;
+      padding: 0; background: var(--bg-input);
+      border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+    }
+    .te-prop input, .te-prop select {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 5px 7px; font-family: inherit; font-size: 12px;
+    }
+    .te-prop-warn {
+      grid-column: 1 / -1;
+      font-size: 11px; color: var(--jazz-gold);
+      background: rgba(212,175,55,0.08);
+      border-left: 2px solid var(--jazz-gold);
+      padding: 6px 10px;
+      border-radius: 3px;
+    }
+
     /* Toaster */
     #toaster {
       position: fixed; bottom: 20px; right: 20px;
@@ -637,6 +900,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="pool">Pool</button>
     <button class="tab" data-tab="builder">Builder</button>
+    <button class="tab" data-tab="templates">Template Editor</button>
     <button class="tab" data-tab="uploader">Uploader</button>
   </nav>
 
@@ -873,6 +1137,74 @@
       </div>
     </section>
 
+    <!-- ─── Template Editor tab ─── -->
+    <section id="tab-templates" class="tab-content">
+      <div class="te-grid">
+        <!-- 좌측: 사이드 -->
+        <div class="te-side">
+          <div class="te-card">
+            <h3>🖼 배경 이미지</h3>
+            <div class="row">
+              <button class="te-btn" id="teBgUploadBtn" type="button">📂 업로드 (mp4 / 이미지)</button>
+              <button class="te-btn" id="teBgClearBtn" type="button" title="배경 제거">✕</button>
+            </div>
+            <div class="te-bg-status" id="teBgStatus">(배경 없음)</div>
+            <input type="file" id="teBgFile" hidden accept="video/mp4,video/*,image/*" />
+          </div>
+
+          <div class="te-card">
+            <h3>📦 컴포넌트 추가</h3>
+            <div class="te-comp-buttons">
+              <button class="te-btn" data-add="text" type="button">+ Text</button>
+              <button class="te-btn" data-add="image" type="button">+ Image</button>
+              <button class="te-btn" data-add="visualizer" type="button">+ Visualizer</button>
+              <button class="te-btn" data-add="progress" type="button">+ Progress</button>
+            </div>
+          </div>
+
+          <div class="te-card">
+            <h3>💾 저장</h3>
+            <div class="te-prop">
+              <label>이름</label>
+              <input type="text" id="teSaveName" placeholder="새 템플릿 이름" />
+            </div>
+            <div class="row" style="margin-top:8px;">
+              <label class="vocal-check" style="font-size:12px;">
+                <input type="checkbox" id="teSaveFav" />
+                즐겨찾기
+              </label>
+            </div>
+            <div class="row" style="margin-top:8px;">
+              <button class="te-btn gold" id="teSaveBtn" type="button">💾 새 템플릿으로 저장</button>
+            </div>
+          </div>
+
+          <div class="te-card">
+            <h3>📁 내 템플릿</h3>
+            <div class="te-list" id="teList"></div>
+          </div>
+        </div>
+
+        <!-- 우측: Canvas + Properties -->
+        <div>
+          <div class="te-canvas-wrap">
+            <div class="te-canvas-meta">
+              <span>편집 중: <span class="strong" id="teEditingName">(새 템플릿)</span></span>
+              <span style="margin-left:auto;">캔버스: <span class="strong">1920 × 1080</span></span>
+              <span>컴포넌트: <span class="strong" id="teCompCount">0</span></span>
+            </div>
+            <div class="te-canvas-frame" id="teCanvasFrame">
+              <div class="te-canvas-bg empty" id="teCanvasBg"></div>
+              <div class="te-canvas-inner" id="teCanvasInner"></div>
+            </div>
+          </div>
+          <div class="te-props empty" id="teProps">
+            컴포넌트를 클릭하면 여기서 속성을 편집합니다.
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ─── Uploader tab placeholder ─── -->
     <section id="tab-uploader" class="tab-content">
       <div class="placeholder">
@@ -915,6 +1247,9 @@
 
   <div id="toaster"></div>
 
+  <!-- interact.js — 드래그/리사이즈 라이브러리. Template Editor 전용. -->
+  <script src="https://cdn.jsdelivr.net/npm/interactjs@1.10.27/dist/interact.min.js"></script>
   <script type="module" src="app.js"></script>
+  <script type="module" src="template-editor.js"></script>
 </body>
 </html>
