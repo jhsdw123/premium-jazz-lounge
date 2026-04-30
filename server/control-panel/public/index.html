@@ -891,6 +891,112 @@
       padding: 6px 10px;
       border-radius: 3px;
     }
+    /* ─── Template gallery (cards) ─── */
+    .te-card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 8px;
+    }
+    .te-card-header h3 { margin: 0; }
+    .te-mode-toggle {
+      display: inline-flex; gap: 0;
+      border: 1px solid var(--border); border-radius: 4px;
+      overflow: hidden;
+    }
+    .te-mode-toggle button {
+      background: var(--bg-input); color: var(--text-dim);
+      border: none; padding: 3px 8px;
+      font-family: inherit; font-size: 11px; cursor: pointer;
+      border-right: 1px solid var(--border);
+    }
+    .te-mode-toggle button:last-child { border-right: none; }
+    .te-mode-toggle button:hover { color: var(--text); }
+    .te-mode-toggle button.active { background: var(--jazz-gold-dim); color: #000; font-weight: 600; }
+
+    .te-card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: 8px;
+    }
+    .te-tcard {
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+      transition: all 0.15s;
+    }
+    .te-tcard:hover { border-color: var(--border-strong); }
+    .te-tcard.active { border-color: var(--jazz-gold); box-shadow: 0 0 0 1px var(--jazz-gold-dim); }
+    .te-tcard-thumb {
+      display: block; width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #000;
+      cursor: pointer;
+      border-bottom: 1px solid var(--border);
+    }
+    .te-tcard-fav {
+      position: absolute; top: 4px; left: 4px;
+      width: 22px; height: 22px;
+      background: rgba(0,0,0,0.65);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      color: var(--text-muted);
+      font-size: 13px; line-height: 18px;
+      cursor: pointer;
+      font-family: inherit;
+      padding: 0; text-align: center;
+      backdrop-filter: blur(4px);
+    }
+    .te-tcard-fav:hover { color: var(--text); }
+    .te-tcard-fav.fav { color: var(--jazz-gold); border-color: var(--jazz-gold-dim); }
+    .te-tcard-del {
+      position: absolute; top: 4px; right: 4px;
+      width: 22px; height: 22px;
+      background: rgba(0,0,0,0.65);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      color: var(--text-muted);
+      font-size: 11px; line-height: 18px;
+      cursor: pointer;
+      font-family: inherit;
+      padding: 0; text-align: center;
+      backdrop-filter: blur(4px);
+    }
+    .te-tcard-del:hover { color: var(--red); border-color: var(--red); }
+    .te-tcard-default {
+      position: absolute; bottom: 32px; left: 4px;
+      background: rgba(212,175,55,0.85); color: #000;
+      font-size: 9px; font-weight: 700;
+      padding: 1px 4px; border-radius: 2px;
+      letter-spacing: 0.05em;
+    }
+    .te-tcard-name {
+      padding: 5px 8px 2px;
+      font-size: 11px; font-weight: 500;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      cursor: pointer;
+    }
+    .te-tcard-actions {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 2px; padding: 0 5px 5px;
+    }
+    .te-tcard-actions button {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      font-size: 10px; padding: 2px 4px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .te-tcard-actions button:hover { color: var(--text); border-color: var(--border-strong); }
+    .te-tcard-thumb-loading {
+      width: 100%; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--text-muted); font-size: 10px;
+      background: repeating-linear-gradient(45deg, #0E0E0E 0 8px, #161616 8px 16px);
+    }
+
     /* Audio preview progress */
     .te-preview-progress {
       width: 100%; height: 4px;
@@ -1282,7 +1388,13 @@
           </div>
 
           <div class="te-card">
-            <h3>📁 내 템플릿</h3>
+            <div class="te-card-header">
+              <h3>📁 내 템플릿</h3>
+              <div class="te-mode-toggle" id="teModeToggle">
+                <button type="button" data-mode="list" title="리스트 보기">📋 리스트</button>
+                <button type="button" data-mode="gallery" title="갤러리 보기">🎴 갤러리</button>
+              </div>
+            </div>
             <div class="te-list" id="teList"></div>
           </div>
         </div>

@@ -1288,9 +1288,49 @@ async function refreshTemplateList() {
   }
 }
 
+// ─── 갤러리 / 리스트 모드 ────────────────────────────────────
+const VIEW_MODE_KEY = 'pjl.te.viewMode';
+
+const gallery = {
+  mode: localStorage.getItem(VIEW_MODE_KEY) || 'list',
+  imgCache: new Map(),       // url → { img: Image, ready: bool }
+  observer: null,            // IntersectionObserver — 화면 진입 시점에만 카드 그리기
+  drawnTids: new Set(),      // 이미 그린 카드 id (캐싱)
+};
+
+function applyModeToggleUI() {
+  const wrap = $('#teModeToggle');
+  if (!wrap) return;
+  wrap.querySelectorAll('button').forEach((b) => {
+    b.classList.toggle('active', b.dataset.mode === gallery.mode);
+  });
+}
+
+function bindModeToggle() {
+  $('#teModeToggle')?.querySelectorAll('button').forEach((b) => {
+    b.addEventListener('click', () => {
+      gallery.mode = b.dataset.mode;
+      localStorage.setItem(VIEW_MODE_KEY, gallery.mode);
+      applyModeToggleUI();
+      renderTemplateList();
+    });
+  });
+}
+
 function renderTemplateList() {
+  applyModeToggleUI();
+  if (gallery.mode === 'gallery') {
+    renderTemplateGallery();
+    return;
+  }
+  // 리스트 모드 (기존)
   const ul = $('#teList');
   if (!ul) return;
+  // observer 정리 — 리스트 모드에선 lazy load 불필요
+  if (gallery.observer) { gallery.observer.disconnect(); gallery.observer = null; }
+  gallery.drawnTids.clear();
+
+  ul.className = 'te-list';
   ul.innerHTML = '';
   if (!te.templates.length) {
     ul.innerHTML = `<div style="color:var(--text-muted);font-size:11px;padding:8px;">(저장된 템플릿 없음)</div>`;
@@ -1312,18 +1352,318 @@ function renderTemplateList() {
     `;
     ul.appendChild(row);
   }
-  ul.querySelectorAll('.star').forEach((s) =>
+  bindTemplateActions(ul);
+}
+
+function renderTemplateGallery() {
+  const wrap = $('#teList');
+  if (!wrap) return;
+  wrap.className = 'te-card-grid';
+  wrap.innerHTML = '';
+
+  if (!te.templates.length) {
+    wrap.className = 'te-list';
+    wrap.innerHTML = `<div style="color:var(--text-muted);font-size:11px;padding:8px;">(저장된 템플릿 없음)</div>`;
+    return;
+  }
+
+  // 카드 DOM 생성 (썸네일은 placeholder, IntersectionObserver 가 보일 때 draw)
+  for (const t of te.templates) {
+    const isCur = te.editingTemplate?.id === t.id;
+    const card = document.createElement('div');
+    card.className = `te-tcard${isCur ? ' active' : ''}`;
+    card.dataset.tid = t.id;
+    card.innerHTML = `
+      <button class="te-tcard-fav ${t.is_favorite ? 'fav' : ''}" data-fav-id="${t.id}" title="즐겨찾기 토글">${t.is_favorite ? '★' : '☆'}</button>
+      <button class="te-tcard-del" data-del-id="${t.id}" title="삭제">✕</button>
+      <canvas class="te-tcard-thumb" data-load-id="${t.id}" width="320" height="180" title="${escapeHtml(t.name)} — 클릭해서 편집"></canvas>
+      ${t.is_default ? `<span class="te-tcard-default">DEFAULT</span>` : ''}
+      <div class="te-tcard-name" data-load-id="${t.id}" title="${escapeHtml(t.description || t.name)}">${escapeHtml(t.name)}</div>
+      <div class="te-tcard-actions">
+        <button data-load-id="${t.id}" type="button">편집</button>
+        <button data-dup-id="${t.id}" type="button">복제</button>
+      </div>
+    `;
+    wrap.appendChild(card);
+  }
+
+  bindTemplateActions(wrap);
+  setupGalleryObserver(wrap);
+}
+
+function bindTemplateActions(scope) {
+  // 리스트 모드 ([data-load], [data-dup], [data-del], .star)
+  scope.querySelectorAll('.star').forEach((s) =>
     s.addEventListener('click', () => toggleFavorite(parseInt(s.dataset.id, 10)))
   );
-  ul.querySelectorAll('[data-load]').forEach((b) =>
+  scope.querySelectorAll('[data-load]').forEach((b) =>
     b.addEventListener('click', () => loadTemplate(parseInt(b.dataset.load, 10)))
   );
-  ul.querySelectorAll('[data-dup]').forEach((b) =>
+  scope.querySelectorAll('[data-dup]').forEach((b) =>
     b.addEventListener('click', () => duplicateTemplate(parseInt(b.dataset.dup, 10)))
   );
-  ul.querySelectorAll('[data-del]').forEach((b) =>
+  scope.querySelectorAll('[data-del]').forEach((b) =>
     b.addEventListener('click', () => deleteTemplate(parseInt(b.dataset.del, 10)))
   );
+  // 갤러리 모드 (data-{action}-id)
+  scope.querySelectorAll('[data-fav-id]').forEach((b) =>
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      toggleFavorite(parseInt(b.dataset.favId, 10));
+    })
+  );
+  scope.querySelectorAll('[data-del-id]').forEach((b) =>
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      deleteTemplate(parseInt(b.dataset.delId, 10));
+    })
+  );
+  scope.querySelectorAll('[data-load-id]').forEach((b) =>
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      loadTemplate(parseInt(b.dataset.loadId, 10));
+    })
+  );
+  scope.querySelectorAll('[data-dup-id]').forEach((b) =>
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      duplicateTemplate(parseInt(b.dataset.dupId, 10));
+    })
+  );
+}
+
+function setupGalleryObserver(wrap) {
+  if (gallery.observer) gallery.observer.disconnect();
+  gallery.drawnTids.clear();
+  gallery.observer = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const card = entry.target;
+      const tid = parseInt(card.dataset.tid, 10);
+      if (gallery.drawnTids.has(tid)) continue;
+      const tmpl = te.templates.find((x) => x.id === tid);
+      const cv = card.querySelector('canvas.te-tcard-thumb');
+      if (tmpl && cv) {
+        drawCardThumbnail(cv, tmpl);
+        gallery.drawnTids.add(tid);
+      }
+      gallery.observer.unobserve(card);
+    }
+  }, { root: null, rootMargin: '100px', threshold: 0.05 });
+  wrap.querySelectorAll('.te-tcard').forEach((card) => gallery.observer.observe(card));
+}
+
+// ─── 카드 썸네일 그리기 ───────────────────────────────────────
+function loadGalleryImage(url, onReady) {
+  if (!url) return null;
+  const cached = gallery.imgCache.get(url);
+  if (cached && cached.ready) return cached.img;
+  if (cached) return null; // 로딩 중
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  const slot = { img, ready: false };
+  gallery.imgCache.set(url, slot);
+  img.onload = () => {
+    slot.ready = true;
+    if (onReady) onReady();
+  };
+  img.onerror = () => {
+    // 로드 실패해도 이미 그린 placeholder 그대로 둠.
+    slot.ready = false;
+  };
+  img.src = url;
+  return null;
+}
+
+function drawCardThumbnail(canvas, template) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  // 배경
+  ctx.fillStyle = '#0A0A0A';
+  ctx.fillRect(0, 0, W, H);
+  if (template.background_image_url) {
+    const img = loadGalleryImage(template.background_image_url, () => {
+      // 이미지 로드 후 다시 그리기 — 카드가 아직 DOM 에 있는지 확인
+      const card = document.querySelector(`.te-tcard[data-tid="${template.id}"]`);
+      if (card) {
+        const cv = card.querySelector('canvas.te-tcard-thumb');
+        if (cv) drawCardThumbnail(cv, template);
+      }
+    });
+    if (img) {
+      // cover 핏 — 비율 맞춰 채우고 잘라냄
+      const ar = img.naturalWidth / img.naturalHeight;
+      const target = W / H;
+      let dw = W, dh = H, dx = 0, dy = 0;
+      if (ar > target) { dw = H * ar; dx = (W - dw) / 2; }
+      else { dh = W / ar; dy = (H - dh) / 2; }
+      ctx.drawImage(img, dx, dy, dw, dh);
+    } else {
+      // 로딩 중 — 체크 패턴
+      ctx.fillStyle = '#161616';
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = '#0E0E0E';
+      const cs = 8;
+      for (let y = 0; y < H; y += cs) {
+        for (let x = (y / cs) % 2 === 0 ? 0 : cs; x < W; x += cs * 2) {
+          ctx.fillRect(x, y, cs, cs);
+        }
+      }
+    }
+  }
+
+  // 컴포넌트
+  const cfg = template.config_json || {};
+  const components = Array.isArray(cfg.components)
+    ? cfg.components
+    : loadConfigToCanvas(cfg);
+  const sx = W / CANVAS_W;
+  const sy = H / CANVAS_H;
+  for (const c of components) {
+    drawCardComponent(ctx, c, template, sx, sy);
+  }
+}
+
+function drawCardComponent(ctx, c, template, sx, sy) {
+  ctx.save();
+  ctx.globalAlpha = c.opacity ?? 1;
+  if (c.type === 'text') drawCardText(ctx, c, sx, sy);
+  else if (c.type === 'image') drawCardImage(ctx, c, template, sx, sy);
+  else if (c.type === 'visualizer') drawCardVisualizer(ctx, c, sx, sy);
+  else if (c.type === 'progress') drawCardProgress(ctx, c, sx, sy);
+  ctx.restore();
+}
+
+function drawCardText(ctx, c, sx, sy) {
+  const x = c.x * sx, y = c.y * sy;
+  const w = c.width * sx, h = c.height * sy;
+  const fs = (c.fontSize || 72) * sx;
+  if (fs < 3) return; // 너무 작으면 스킵 (무의미)
+  let weight = c.bold ? 700 : 400;
+  let style = c.italic ? 'italic ' : '';
+  ctx.font = `${style}${weight} ${fs}px ${c.fontFamily || 'Playfair Display, serif'}`;
+  ctx.fillStyle = c.color || '#FFFFFF';
+  ctx.textBaseline = 'middle';
+  const align = c.textAlign || 'center';
+  ctx.textAlign = align === 'left' ? 'left' : align === 'right' ? 'right' : 'center';
+
+  // textTransform 적용
+  let txt = String(c.content || '')
+    .replace(/\{\{trackTitle\}\}/g, 'Track Title')
+    .replace(/\{\{trackNumber\}\}/g, '1')
+    .replace(/\{\{totalTracks\}\}/g, '14');
+  if (c.textTransform === 'uppercase') txt = txt.toUpperCase();
+  else if (c.textTransform === 'lowercase') txt = txt.toLowerCase();
+  else if (c.textTransform === 'capitalize') txt = txt.replace(/\b\w/g, (m) => m.toUpperCase());
+
+  // 글로우 (밝은 색일 때만)
+  if (!isDarkColor(c.color) && (c.glowIntensity ?? 1.0) > 0) {
+    ctx.shadowColor = 'rgba(212,175,55,0.7)';
+    ctx.shadowBlur = 6 * (c.glowIntensity ?? 1.0);
+  }
+
+  // 다중 라인 — \n 분리
+  const lines = txt.split('\n');
+  const lineH = fs * (c.lineHeight ?? 1.2);
+  const totalH = lineH * lines.length;
+  const startY = y + h / 2 - totalH / 2 + lineH / 2;
+  let drawX = x + w / 2;
+  if (align === 'left') drawX = x;
+  else if (align === 'right') drawX = x + w;
+  for (let i = 0; i < lines.length; i++) {
+    ctx.fillText(lines[i], drawX, startY + i * lineH);
+  }
+}
+
+function drawCardImage(ctx, c, template, sx, sy) {
+  const x = c.x * sx, y = c.y * sy;
+  const w = c.width * sx, h = c.height * sy;
+  if (!c.src) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+    ctx.strokeRect(x, y, w, h);
+    return;
+  }
+  const img = loadGalleryImage(c.src, () => {
+    const card = document.querySelector(`.te-tcard[data-tid="${template.id}"]`);
+    if (card) {
+      const cv = card.querySelector('canvas.te-tcard-thumb');
+      if (cv) drawCardThumbnail(cv, template);
+    }
+  });
+  if (!img) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.strokeRect(x, y, w, h);
+    return;
+  }
+  ctx.drawImage(img, x, y, w, h);
+}
+
+function drawCardVisualizer(ctx, c, sx, sy) {
+  // static pseudo-spectrum (deterministic, no animation)
+  const x = c.x * sx, y = c.y * sy;
+  const w = c.width * sx, h = c.height * sy;
+  const N = c.barCount || 80;
+  const barWidth = Math.max(1, (c.barWidth || 6) * sx);
+  const barGap = (c.barGap || 2) * sx;
+  const ew = barWidth + barGap;
+  const halfBars = Math.min(N, Math.max(1, Math.floor((w / 2) / ew)));
+  const splitGap = (c.splitGap || 0) * sy;
+  const halfSplit = splitGap / 2;
+  const ox = x + w / 2;
+  const oy = y + h / 2;
+  const isGradient = c.colorMode === 'gradient' && Array.isArray(c.gradientStops) && c.gradientStops.length >= 2;
+
+  // glow
+  if ((c.glow ?? 20) > 0) {
+    ctx.shadowBlur = (c.glow / 4) * sx; // 카드 스케일에 맞춤
+    ctx.shadowColor = isGradient ? '#D4AF37' : (c.color || '#D4AF37');
+  }
+
+  const heightCap = h * 0.85;
+  for (let i = 0; i < halfBars; i++) {
+    // deterministic pseudo height: sin 합성 (시드)
+    const seed = (Math.sin(i * 0.92 + 1.7) * 43758.5453 + 1) % 1;
+    const seed2 = Math.sin(i * 0.31 + 0.6);
+    const norm = Math.max(0.15, Math.min(1, 0.4 + 0.35 * seed2 + 0.15 * seed));
+    const barH = norm * heightCap;
+    const halfH = barH / 2;
+
+    if (isGradient) {
+      const rgb = gradientColorAt(c.gradientStops, (i / Math.max(1, halfBars - 1)) * 100);
+      ctx.fillStyle = `rgb(${rgb.r},${rgb.g},${rgb.b})`;
+      ctx.shadowColor = ctx.fillStyle;
+    } else {
+      ctx.fillStyle = c.color || '#D4AF37';
+    }
+
+    if (c.verticalMode === 'symmetric' && (c.splitGap || 0) === 0) {
+      ctx.fillRect(ox + i * ew, oy - halfH, barWidth, barH);
+      ctx.fillRect(ox - (i + 1) * ew, oy - halfH, barWidth, barH);
+    } else {
+      if (c.verticalMode !== 'down') {
+        ctx.fillRect(ox + i * ew, oy - halfSplit - halfH, barWidth, halfH);
+        ctx.fillRect(ox - (i + 1) * ew, oy - halfSplit - halfH, barWidth, halfH);
+      }
+      if (c.verticalMode !== 'up') {
+        ctx.fillRect(ox + i * ew, oy + halfSplit, barWidth, halfH);
+        ctx.fillRect(ox - (i + 1) * ew, oy + halfSplit, barWidth, halfH);
+      }
+    }
+  }
+  ctx.shadowBlur = 0;
+}
+
+function drawCardProgress(ctx, c, sx, sy) {
+  const x = c.x * sx, y = c.y * sy;
+  const w = c.width * sx, h = c.height * sy;
+  const r = h / 2;
+  // bg
+  ctx.fillStyle = c.bgColor || 'rgba(255,255,255,0.1)';
+  roundedRect(ctx, x, y, w, h, r);
+  // fill 50%
+  ctx.fillStyle = c.fillColor || '#D4AF37';
+  roundedRect(ctx, x, y, w * 0.5, h, r);
 }
 
 async function toggleFavorite(id) {
@@ -1389,6 +1729,8 @@ async function templatesOnEnter() {
     renderCanvas();
     startVisualizerTicker();
     bindPreviewControls();
+    bindModeToggle();
+    applyModeToggleUI();
   } else {
     refreshTemplateList();
     // preview 곡 리스트 — 새 곡 업로드 가능성 → 리프레시
