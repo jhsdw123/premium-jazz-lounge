@@ -20,6 +20,8 @@ import { analyzeTrack } from '../../lib/track-meta.mjs';
 import { generateTitleCandidates } from '../../lib/llm.mjs';
 import { normalizeTitle, findCollision } from '../../lib/title-utils.mjs';
 import { detectInstruments } from '../../lib/instruments.mjs';
+import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
+import { buildAndPersistPlaylist } from '../../lib/template-to-remotion.mjs';
 
 const PORT = parseInt(process.env.PORT, 10) || 4001;
 const VERSION = '0.2.0';
@@ -1128,6 +1130,441 @@ app.post('/api/templates/:id/duplicate', async (req, res) => {
       .single();
     if (error) throw error;
     res.json({ ok: true, template: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Video Series: CRUD (Phase 4-B) ──────────────────────────────────────
+
+app.get('/api/video-series', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('pjl_video_series')
+      .select('id, name, description, current_vol, created_at, updated_at')
+      .order('name', { ascending: true });
+    if (error) throw error;
+    res.json({ ok: true, series: data || [] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/video-series', async (req, res) => {
+  try {
+    const name = (req.body?.series_name || req.body?.name || '').trim();
+    const description = req.body?.description ?? null;
+    const currentVol = Math.max(0, parseInt(req.body?.current_vol, 10) || 0);
+    if (!name) return res.status(400).json({ ok: false, error: 'series_name 필수' });
+
+    const { data, error } = await supabase
+      .from('pjl_video_series')
+      .insert({ name, description, current_vol: currentVol })
+      .select('*')
+      .single();
+    if (error) {
+      if (/duplicate|unique/i.test(error.message)) {
+        return res.status(409).json({ ok: false, error: `시리즈 "${name}" 이미 존재` });
+      }
+      throw error;
+    }
+    res.json({ ok: true, series: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.put('/api/video-series/:id', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    if (id == null) return res.status(400).json({ ok: false, error: 'invalid id' });
+
+    const patch = {};
+    if (req.body?.name !== undefined) patch.name = String(req.body.name).trim();
+    if (req.body?.description !== undefined) patch.description = req.body.description;
+    if (req.body?.current_vol !== undefined) {
+      const v = parseInt(req.body.current_vol, 10);
+      if (Number.isNaN(v) || v < 0) {
+        return res.status(400).json({ ok: false, error: 'current_vol 음수 불가' });
+      }
+      patch.current_vol = v;
+    }
+    if (!Object.keys(patch).length) {
+      return res.status(400).json({ ok: false, error: '변경할 필드 없음' });
+    }
+
+    const { data, error } = await supabase
+      .from('pjl_video_series')
+      .update(patch)
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: 'series not found' });
+    res.json({ ok: true, series: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete('/api/video-series/:id', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    if (id == null) return res.status(400).json({ ok: false, error: 'invalid id' });
+    const { error } = await supabase.from('pjl_video_series').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ ok: true, deletedId: id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Videos: AI title suggest (Phase 4-B) ────────────────────────────────
+//   POST /api/videos/suggest-titles { trackIds, seriesName? }
+//   trackIds 의 곡 제목/프롬프트를 컨텍스트로 5개 영상 제목 후보 생성.
+
+app.post('/api/videos/suggest-titles', async (req, res) => {
+  try {
+    const trackIds = Array.isArray(req.body?.trackIds)
+      ? req.body.trackIds.map(parseIntOrNull).filter((n) => n != null)
+      : [];
+    const seriesName = (req.body?.seriesName || '').trim();
+    if (!trackIds.length) {
+      return res.status(400).json({ ok: false, error: 'trackIds 필수' });
+    }
+
+    // 1) 트랙 + 제목 + 프롬프트 join 조회
+    const { data: tracks, error } = await supabase
+      .from('pjl_tracks')
+      .select(`
+        id, original_filename, instruments, has_vocals,
+        title:pjl_titles(title_en),
+        prompt:pjl_prompts(prompt_text, nickname)
+      `)
+      .in('id', trackIds);
+    if (error) throw error;
+    if (!tracks?.length) {
+      return res.status(404).json({ ok: false, error: '해당 트랙 없음' });
+    }
+
+    // 2) Gemini 컨텍스트 구성
+    const trackLines = tracks.slice(0, 20).map((t, i) => {
+      const title = t.title?.title_en || '(no title)';
+      const instr = (t.instruments || []).join(', ') || '';
+      return `  ${i + 1}. "${title}"${instr ? ` [${instr}]` : ''}`;
+    }).join('\n');
+
+    const allInstr = new Set();
+    for (const t of tracks) for (const x of (t.instruments || [])) allInstr.add(x);
+    const instrLine = [...allInstr].slice(0, 12).join(', ');
+
+    const prompt = [
+      'You are naming a long jazz YouTube video (25–35 minutes, instrumental).',
+      'Output JSON ONLY: {"titles": ["Title One", "Title Two", ...]}.',
+      'Each title is 4–8 English words, evocative, jazz/lounge mood, in Title Case.',
+      'No emojis, no quotation marks inside the title text.',
+      seriesName ? `This is for the "${seriesName}" series — title should fit the series tone.` : '',
+      '',
+      'Tracks included in this video:',
+      trackLines,
+      instrLine ? `Combined instruments: ${instrLine}` : '',
+      '',
+      'Generate 5 candidate video titles, all distinct from each other.',
+    ].filter(Boolean).join('\n');
+
+    let text;
+    try {
+      text = await callGemini(prompt, {
+        temperature: 1.0,
+        maxOutputTokens: 512,
+        responseSchema: {
+          type: 'OBJECT',
+          properties: {
+            titles: { type: 'ARRAY', items: { type: 'STRING' }, minItems: 5 },
+          },
+          required: ['titles'],
+        },
+      });
+    } catch (e) {
+      return res.status(500).json({ ok: false, error: `Gemini 호출 실패: ${e.message}` });
+    }
+
+    const titles = parseTitlesJson(text).slice(0, 5);
+    if (!titles.length) {
+      return res.status(500).json({ ok: false, error: 'Gemini 응답 파싱 실패', raw: text });
+    }
+
+    res.json({ ok: true, titles, trackCount: tracks.length });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Videos: list / create (Phase 4-B) ───────────────────────────────────
+
+function makeBuildId() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${yyyy}${mm}${dd}_${hh}${mi}${ss}`;
+}
+
+app.get('/api/videos', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('pjl_video_projects')
+      .select('id, build_id, title, volume, status, total_duration_sec, series_id, template_id, created_at, updated_at')
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) throw error;
+    res.json({ ok: true, videos: data || [] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/videos/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const { data, error } = await supabase
+      .from('pjl_video_projects')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: 'video not found' });
+
+    // 트랙 매핑도 같이 (position 순서)
+    const { data: vt, error: vtErr } = await supabase
+      .from('pjl_video_tracks')
+      .select('position, start_sec, end_sec, track:pjl_tracks(id, title:pjl_titles(title_en), original_filename, duration_actual_sec, prefix_order)')
+      .eq('video_id', id)
+      .order('position', { ascending: true });
+    if (vtErr) throw vtErr;
+
+    res.json({ ok: true, video: data, tracks: vt || [] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/videos', async (req, res) => {
+  try {
+    const title = (req.body?.title || '').trim();
+    const trackIds = Array.isArray(req.body?.trackIds)
+      ? req.body.trackIds.map(parseIntOrNull).filter((n) => n != null)
+      : [];
+    const templateId = parseIntOrNull(req.body?.templateId);
+    const seriesIdRaw = req.body?.seriesId;
+    const seriesId = (seriesIdRaw === '' || seriesIdRaw == null) ? null : parseIntOrNull(seriesIdRaw);
+    const registerAsSeries = !!req.body?.registerAsSeries;
+
+    if (!title) return res.status(400).json({ ok: false, error: 'title 필수' });
+    if (!trackIds.length) return res.status(400).json({ ok: false, error: 'trackIds 비어있음' });
+
+    // 1) 템플릿 조회 (없으면 default)
+    let templateRow = null;
+    if (templateId) {
+      const { data, error } = await supabase
+        .from('pjl_templates')
+        .select('*')
+        .eq('id', templateId)
+        .maybeSingle();
+      if (error) throw error;
+      templateRow = data;
+    }
+    if (!templateRow) {
+      const { data, error } = await supabase
+        .from('pjl_templates')
+        .select('*')
+        .eq('is_default', true)
+        .order('id', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      if (error) throw error;
+      templateRow = data;
+    }
+    if (!templateRow) {
+      return res.status(409).json({
+        ok: false,
+        error: '사용 가능한 템플릿이 없습니다. tools/seed-default-template.mjs 를 먼저 실행하세요.',
+      });
+    }
+
+    // 2) 시리즈 결정 — registerAsSeries=true 면 신규 생성, seriesId 면 기존 사용
+    let seriesRow = null;
+    if (registerAsSeries) {
+      const { data, error } = await supabase
+        .from('pjl_video_series')
+        .insert({ name: title, current_vol: 0 })
+        .select('*')
+        .single();
+      if (error) {
+        if (/duplicate|unique/i.test(error.message)) {
+          // 이미 같은 이름의 시리즈가 있으면 그것을 사용
+          const { data: existing } = await supabase
+            .from('pjl_video_series')
+            .select('*')
+            .eq('name', title)
+            .maybeSingle();
+          seriesRow = existing;
+        } else {
+          throw error;
+        }
+      } else {
+        seriesRow = data;
+      }
+    } else if (seriesId) {
+      const { data, error } = await supabase
+        .from('pjl_video_series')
+        .select('*')
+        .eq('id', seriesId)
+        .maybeSingle();
+      if (error) throw error;
+      if (!data) return res.status(404).json({ ok: false, error: 'series not found' });
+      seriesRow = data;
+    }
+
+    const nextVolume = seriesRow ? (seriesRow.current_vol + 1) : 1;
+
+    // 3) 트랙 메타 조회 (제목 join 포함). 사용자 지정 순서로 정렬.
+    const { data: trackRows, error: terr } = await supabase
+      .from('pjl_tracks')
+      .select(`
+        id, storage_path, original_filename,
+        duration_actual_sec, duration_raw_sec, prefix_order,
+        title:pjl_titles(title_en)
+      `)
+      .in('id', trackIds);
+    if (terr) throw terr;
+
+    const trackMap = new Map((trackRows || []).map((t) => [t.id, t]));
+    const orderedTracks = trackIds.map((id) => trackMap.get(id)).filter(Boolean);
+    if (orderedTracks.length !== trackIds.length) {
+      return res.status(404).json({
+        ok: false,
+        error: `일부 trackId 가 DB 에 없습니다 (요청 ${trackIds.length}, 발견 ${orderedTracks.length})`,
+      });
+    }
+
+    // 4) build_id 생성, video_projects insert
+    const buildId = makeBuildId();
+    const { data: video, error: vErr } = await supabase
+      .from('pjl_video_projects')
+      .insert({
+        build_id: buildId,
+        title,
+        volume: nextVolume,
+        track_ids: trackIds,
+        template_json: templateRow.config_json || {},
+        status: 'draft',
+        series_id: seriesRow?.id || null,
+        template_id: templateRow.id,
+      })
+      .select('*')
+      .single();
+    if (vErr) throw vErr;
+
+    // 5) video_tracks N:M insert
+    let cursor = 0;
+    const vtRows = orderedTracks.map((t, i) => {
+      const dur = Number(t.duration_actual_sec) || Number(t.duration_raw_sec) || 180;
+      const start = cursor;
+      const end = start + dur;
+      cursor = end;
+      return {
+        video_id: video.id,
+        track_id: t.id,
+        position: i + 1,
+        start_sec: start,
+        end_sec: end,
+      };
+    });
+    const { error: vtErr } = await supabase.from('pjl_video_tracks').insert(vtRows);
+    if (vtErr) throw vtErr;
+
+    // 6) Remotion 입력 빌드 + 트랙 다운로드 + jazz-playlist.json 쓰기
+    let buildResult;
+    try {
+      buildResult = await buildAndPersistPlaylist({
+        template: templateRow,
+        tracks: orderedTracks,
+        videoTitle: seriesRow ? `${seriesRow.name} Vol.${nextVolume} — ${title}` : title,
+      });
+    } catch (e) {
+      return res.status(500).json({
+        ok: false,
+        error: `playlist/다운로드 실패: ${e.message}`,
+        videoId: video.id,
+        buildId,
+      });
+    }
+
+    // 7) total_duration_sec 갱신 + template use_count + series.current_vol 증가
+    await supabase
+      .from('pjl_video_projects')
+      .update({ total_duration_sec: Math.round(buildResult.totalDurationSec) })
+      .eq('id', video.id);
+
+    await supabase
+      .from('pjl_templates')
+      .update({ use_count: (templateRow.use_count || 0) + 1 })
+      .eq('id', templateRow.id);
+
+    if (seriesRow) {
+      await supabase
+        .from('pjl_video_series')
+        .update({ current_vol: nextVolume })
+        .eq('id', seriesRow.id);
+    }
+
+    // 8) 트랙 사용 카운트 증가
+    for (const t of orderedTracks) {
+      await supabase
+        .from('pjl_tracks')
+        .update({
+          used_count: undefined, // sentinel — 다음 줄에서 RPC 또는 별도 처리
+        })
+        .eq('id', t.id);
+    }
+    // 위는 noop. 아래에서 sequential 실제 증가 — supabase-js 는 increment RPC 별도 필요해서
+    // 간단히 select → update 로.
+    for (const t of orderedTracks) {
+      const { data: row } = await supabase
+        .from('pjl_tracks')
+        .select('used_count')
+        .eq('id', t.id)
+        .maybeSingle();
+      if (row) {
+        await supabase
+          .from('pjl_tracks')
+          .update({
+            used_count: (row.used_count || 0) + 1,
+            last_used_at: new Date().toISOString(),
+          })
+          .eq('id', t.id);
+      }
+    }
+
+    res.json({
+      ok: true,
+      videoId: video.id,
+      buildId,
+      title: video.title,
+      volume: nextVolume,
+      seriesId: seriesRow?.id || null,
+      seriesName: seriesRow?.name || null,
+      templateId: templateRow.id,
+      templateName: templateRow.name,
+      totalDurationSec: buildResult.totalDurationSec,
+      trackCount: orderedTracks.length,
+      downloads: buildResult.downloads,
+      playlistPath: buildResult.playlistPath,
+    });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

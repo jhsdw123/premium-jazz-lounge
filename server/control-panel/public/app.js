@@ -62,12 +62,15 @@ function fmtDuration(sec) {
 }
 
 // ─── Tab switching ──────────────────────────────────────────────────
+function switchTab(tab) {
+  $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
+  $$('.tab-content').forEach((c) => c.classList.toggle('active', c.id === `tab-${tab}`));
+  if (tab === 'builder' && typeof window.builderOnEnter === 'function') {
+    window.builderOnEnter();
+  }
+}
 $$('.tab').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    const tab = btn.dataset.tab;
-    $$('.tab').forEach((b) => b.classList.toggle('active', b === btn));
-    $$('.tab-content').forEach((c) => c.classList.toggle('active', c.id === `tab-${tab}`));
-  });
+  btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
 
 // ─── Stats ──────────────────────────────────────────────────────────
@@ -451,6 +454,7 @@ function updateBulkBar() {
   $('#bulkBackfillBtn').disabled = !enabled;
   $('#bulkExtractBtn').disabled = !enabled;
   $('#bulkDeleteBtn').disabled = !enabled;
+  $('#sendToBuilderBtn').disabled = !enabled;
 }
 
 $('#selectAllBtn').addEventListener('click', () => {
@@ -851,6 +855,520 @@ audioEl.addEventListener('pause', () => {
     $$('.play-btn.playing').forEach((b) => b.classList.remove('playing'));
   }
 });
+
+// ─── Send to Builder ────────────────────────────────────────────────
+const BUILDER_SS_KEY = 'pjl.builder.trackIds';
+
+$('#sendToBuilderBtn').addEventListener('click', () => {
+  const ids = Array.from(state.selected);
+  if (!ids.length) return;
+  sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(ids));
+  toast(`${ids.length}곡을 Builder 로 전송`, 'success');
+  switchTab('builder');
+});
+
+// ─── Builder tab ────────────────────────────────────────────────────
+const builder = {
+  tracks: [],          // 정렬된 트랙 객체들 (Pool API 응답 형태)
+  templates: [],
+  series: [],
+  unpinAll: false,
+  suggestedTitles: [],
+  loading: false,
+  rendering: false,
+};
+
+function fmtMinSec(totalSec) {
+  if (!totalSec || !Number.isFinite(totalSec)) return '0:00';
+  const m = Math.floor(totalSec / 60);
+  const s = String(Math.round(totalSec % 60)).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function fmtNatural(totalSec) {
+  // 25~35분 자연스러운 표시
+  if (!totalSec) return '—';
+  const min = Math.round(totalSec / 60);
+  if (min < 20) return `${min}분 (짧음 — 25분 이상 권장)`;
+  if (min < 25) return `${min}분 (다소 짧음)`;
+  if (min <= 35) return `${min}분 (적정)`;
+  if (min <= 45) return `${min}분 (다소 김)`;
+  return `${min}분 (너무 김 — 45분 이하 권장)`;
+}
+
+function getOrderedTracksForRender() {
+  // pin 1~5 자동 배치 후 나머지를 그 뒤에 — 단, unpinAll 면 builder.tracks 순서 그대로.
+  if (builder.unpinAll) return [...builder.tracks];
+
+  const pinned = new Map();   // prefix_order -> track
+  const free = [];
+  for (const t of builder.tracks) {
+    const po = t.prefix_order;
+    if (po >= 1 && po <= 5 && !pinned.has(po)) pinned.set(po, t);
+    else free.push(t);
+  }
+  const slots = [];
+  for (let i = 1; i <= 5; i++) {
+    if (pinned.has(i)) slots.push(pinned.get(i));
+  }
+  return [...slots, ...free];
+}
+
+function renderBuilderTracks() {
+  const container = $('#bTracks');
+  const ordered = getOrderedTracksForRender();
+  container.innerHTML = '';
+
+  let totalDur = 0;
+  ordered.forEach((t, idx) => {
+    const pos = idx + 1;
+    const dur = Number(t.duration_actual_sec) || Number(t.duration_raw_sec) || 0;
+    totalDur += dur;
+    const isPinSlot = !builder.unpinAll && t.prefix_order >= 1 && t.prefix_order <= 5
+      && pos === t.prefix_order;
+    const draggable = !isPinSlot;
+
+    const row = document.createElement('div');
+    row.className = 'btrack';
+    row.dataset.id = t.id;
+    if (draggable) row.draggable = true;
+
+    const titleText = t.title?.title_en || t.original_filename || `Track ${t.id}`;
+    row.innerHTML = `
+      <span class="drag-handle ${draggable ? '' : 'locked'}" title="${draggable ? '드래그해서 순서 변경' : '핀 잠금'}">⋮⋮</span>
+      <span class="pos">${pos}</span>
+      <span class="pin-icon ${isPinSlot ? '' : 'unpinned'}" title="${isPinSlot ? `prefix ${t.prefix_order} 고정` : ''}">${isPinSlot ? '📌' : ''}</span>
+      <span class="btitle" title="${escapeHtml(titleText)}">${escapeHtml(titleText)}</span>
+      <span class="bdur">${fmtMinSec(dur)}</span>
+      <button class="bremove" data-id="${t.id}" title="제외">×</button>
+    `;
+    container.appendChild(row);
+  });
+
+  // 요약
+  $('#bTrackCount').textContent = ordered.length;
+  $('#bSumCount').textContent = ordered.length;
+  $('#bSumDuration').textContent = fmtMinSec(totalDur);
+  $('#bSumNatural').textContent = fmtNatural(totalDur);
+
+  // 핸들러
+  container.querySelectorAll('.bremove').forEach((b) =>
+    b.addEventListener('click', () => removeBuilderTrack(parseInt(b.dataset.id, 10)))
+  );
+
+  setupDragDrop(container);
+}
+
+function setupDragDrop(container) {
+  let dragId = null;
+  container.querySelectorAll('.btrack[draggable="true"]').forEach((row) => {
+    row.addEventListener('dragstart', (ev) => {
+      dragId = parseInt(row.dataset.id, 10);
+      row.classList.add('dragging');
+      ev.dataTransfer.effectAllowed = 'move';
+      ev.dataTransfer.setData('text/plain', String(dragId));
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      container.querySelectorAll('.drop-target').forEach((r) => r.classList.remove('drop-target'));
+      dragId = null;
+    });
+  });
+
+  container.querySelectorAll('.btrack').forEach((row) => {
+    row.addEventListener('dragover', (ev) => {
+      if (dragId == null) return;
+      const targetId = parseInt(row.dataset.id, 10);
+      if (targetId === dragId) return;
+      // 핀 슬롯 위로는 드롭 불가
+      if (row.querySelector('.drag-handle.locked')) return;
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+      container.querySelectorAll('.drop-target').forEach((r) => r.classList.remove('drop-target'));
+      row.classList.add('drop-target');
+    });
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('drop-target');
+    });
+    row.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      const targetId = parseInt(row.dataset.id, 10);
+      if (dragId == null || targetId === dragId) return;
+      reorderBuilderTracks(dragId, targetId);
+    });
+  });
+}
+
+function reorderBuilderTracks(srcId, targetId) {
+  // builder.tracks 안에서 srcId 를 빼서 targetId 자리 앞에 삽입
+  const srcIdx = builder.tracks.findIndex((t) => t.id === srcId);
+  const tgtIdx = builder.tracks.findIndex((t) => t.id === targetId);
+  if (srcIdx < 0 || tgtIdx < 0) return;
+  const [src] = builder.tracks.splice(srcIdx, 1);
+  // 새 인덱스 — splice 가 srcIdx<tgtIdx 일 때 tgtIdx 가 1 줄어든 자리 = tgtIdx - 1
+  const adj = srcIdx < tgtIdx ? tgtIdx - 1 : tgtIdx;
+  builder.tracks.splice(adj, 0, src);
+  renderBuilderTracks();
+}
+
+function removeBuilderTrack(id) {
+  builder.tracks = builder.tracks.filter((t) => t.id !== id);
+  // sessionStorage 도 갱신 (refresh 시 일관)
+  sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(builder.tracks.map((t) => t.id)));
+  renderBuilderTracks();
+}
+
+function shuffleArr(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+$('#bShufflePartialBtn').addEventListener('click', () => {
+  // 6번 이후 (인덱스 5 이상) 만 셔플. unpin 모드면 전체 동작과 같음.
+  if (builder.unpinAll) {
+    builder.tracks = shuffleArr(builder.tracks);
+  } else {
+    const ordered = getOrderedTracksForRender();
+    const head = ordered.slice(0, 5);
+    const tail = shuffleArr(ordered.slice(5));
+    // builder.tracks 를 새 순서로 재구성
+    // (단 head 는 내부적으로 prefix_order 기준이므로 그대로 두고 free 부분만 셔플)
+    const pinnedIds = new Set(head.filter((t) => t.prefix_order >= 1 && t.prefix_order <= 5).map((t) => t.id));
+    const freeShuffled = shuffleArr(builder.tracks.filter((t) => !pinnedIds.has(t.id)));
+    const pinnedKeep = builder.tracks.filter((t) => pinnedIds.has(t.id));
+    builder.tracks = [...pinnedKeep, ...freeShuffled];
+  }
+  renderBuilderTracks();
+  toast('6번 이후 셔플 완료', 'info');
+});
+
+$('#bShuffleAllBtn').addEventListener('click', () => {
+  if (!confirm('1~5번 핀까지 모두 풀고 전체를 섞습니다. 계속?')) return;
+  $('#bUnpinAll').checked = true;
+  builder.unpinAll = true;
+  builder.tracks = shuffleArr(builder.tracks);
+  renderBuilderTracks();
+  toast('전체 셔플 완료', 'info');
+});
+
+$('#bUnpinAll').addEventListener('change', (ev) => {
+  builder.unpinAll = ev.target.checked;
+  renderBuilderTracks();
+});
+
+// ─── AI 추천 ─────────────────────────────────────────────────────────
+async function suggestTitles() {
+  if (!builder.tracks.length) return;
+  $('#bSuggestLoading').hidden = false;
+  $('#bSuggestChips').innerHTML = '';
+  $('#bSuggestBtn').disabled = true;
+  $('#bSuggestRetryBtn').hidden = true;
+  const seriesName = pickSeriesNameForContext();
+  try {
+    const j = await apiPost('/api/videos/suggest-titles', {
+      trackIds: builder.tracks.map((t) => t.id),
+      seriesName: seriesName || undefined,
+    });
+    builder.suggestedTitles = j.titles || [];
+    renderSuggestChips();
+    $('#bSuggestRetryBtn').hidden = false;
+  } catch (e) {
+    toast(`AI 추천 실패: ${e.message}`, 'error');
+  } finally {
+    $('#bSuggestLoading').hidden = true;
+    $('#bSuggestBtn').disabled = false;
+  }
+}
+
+function pickSeriesNameForContext() {
+  const sel = $('#bSeries').value;
+  if (sel === '__new') return $('#bSeriesNewName').value.trim();
+  if (sel) {
+    const s = builder.series.find((x) => String(x.id) === String(sel));
+    return s?.name || '';
+  }
+  return '';
+}
+
+function renderSuggestChips() {
+  const wrap = $('#bSuggestChips');
+  wrap.innerHTML = '';
+  for (const t of builder.suggestedTitles) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'suggest-chip';
+    chip.textContent = t;
+    chip.addEventListener('click', () => {
+      $('#bTitle').value = t;
+      toast(`제목 적용: ${t}`, 'info', 1500);
+    });
+    wrap.appendChild(chip);
+  }
+}
+
+$('#bSuggestBtn').addEventListener('click', () => suggestTitles());
+$('#bSuggestRetryBtn').addEventListener('click', () => suggestTitles());
+
+// ─── Series ─────────────────────────────────────────────────────────
+async function refreshSeries() {
+  try {
+    const j = await apiGet('/api/video-series');
+    builder.series = j.series || [];
+    const cur = $('#bSeries').value;
+    const sel = $('#bSeries');
+    sel.innerHTML = '<option value="">(시리즈 없음)</option>';
+    for (const s of builder.series) {
+      const o = document.createElement('option');
+      o.value = String(s.id);
+      o.textContent = `${s.name} (Vol.${s.current_vol})`;
+      sel.appendChild(o);
+    }
+    const o = document.createElement('option');
+    o.value = '__new';
+    o.textContent = '+ 새 시리즈로 등록';
+    sel.appendChild(o);
+    if (cur) sel.value = cur;
+    updateSeriesPreview();
+  } catch (e) {
+    console.warn('series 로드 실패:', e.message);
+  }
+}
+
+function updateSeriesPreview() {
+  const sel = $('#bSeries').value;
+  const wrap = $('#bSeriesPreview');
+  const newWrap = $('#bSeriesNewWrap');
+  if (sel === '__new') {
+    newWrap.hidden = false;
+    const name = $('#bSeriesNewName').value.trim() || '(이름 입력)';
+    wrap.hidden = false;
+    wrap.innerHTML = `미리보기: <span class="preview-strong">${escapeHtml(name)} Vol.1</span>`;
+  } else if (sel) {
+    newWrap.hidden = true;
+    const s = builder.series.find((x) => String(x.id) === String(sel));
+    if (s) {
+      wrap.hidden = false;
+      wrap.innerHTML = `미리보기: <span class="preview-strong">${escapeHtml(s.name)} Vol.${s.current_vol + 1}</span>`;
+    }
+  } else {
+    newWrap.hidden = true;
+    wrap.hidden = true;
+  }
+}
+
+$('#bSeries').addEventListener('change', updateSeriesPreview);
+$('#bSeriesNewName').addEventListener('input', updateSeriesPreview);
+
+// ─── Templates ──────────────────────────────────────────────────────
+async function refreshTemplates() {
+  try {
+    const j = await apiGet('/api/templates');
+    builder.templates = j.templates || [];
+    const sel = $('#bTemplate');
+    const cur = sel.value;
+    sel.innerHTML = '';
+    if (!builder.templates.length) {
+      const o = document.createElement('option');
+      o.value = '';
+      o.textContent = '(템플릿 없음 — seed-default-template.mjs 실행 필요)';
+      sel.appendChild(o);
+    } else {
+      for (const t of builder.templates) {
+        const o = document.createElement('option');
+        o.value = String(t.id);
+        o.textContent = `${t.name}${t.is_default ? ' ★ default' : ''}`;
+        sel.appendChild(o);
+      }
+      // default 자동 선택
+      const def = builder.templates.find((t) => t.is_default);
+      if (cur) sel.value = cur;
+      else if (def) sel.value = String(def.id);
+    }
+    updateTemplatePreview();
+  } catch (e) {
+    console.warn('templates 로드 실패:', e.message);
+  }
+}
+
+function updateTemplatePreview() {
+  const sel = $('#bTemplate').value;
+  const t = builder.templates.find((x) => String(x.id) === String(sel));
+  const wrap = $('#bTemplatePreview');
+  if (!t) { wrap.textContent = ''; return; }
+  const desc = t.description ? ` — ${t.description}` : '';
+  wrap.innerHTML = `<span class="preview-strong">${escapeHtml(t.name)}</span>${escapeHtml(desc)}`;
+}
+
+$('#bTemplate').addEventListener('change', updateTemplatePreview);
+
+// ─── 렌더 준비 완료 ──────────────────────────────────────────────────
+$('#bRenderBtn').addEventListener('click', async () => {
+  const title = $('#bTitle').value.trim();
+  if (!title) {
+    toast('영상 제목을 입력하세요', 'error');
+    $('#bTitle').focus();
+    return;
+  }
+  if (!builder.tracks.length) {
+    toast('트랙이 없습니다. Pool 탭으로 돌아가서 다시 선택하세요', 'error');
+    return;
+  }
+  const templateId = parseInt($('#bTemplate').value, 10) || null;
+  const seriesSel = $('#bSeries').value;
+  let seriesId = null, registerAsSeries = false, newSeriesName = null;
+  if (seriesSel === '__new') {
+    newSeriesName = $('#bSeriesNewName').value.trim();
+    if (!newSeriesName) {
+      toast('새 시리즈 이름을 입력하세요', 'error');
+      $('#bSeriesNewName').focus();
+      return;
+    }
+    registerAsSeries = true;
+  } else if (seriesSel) {
+    seriesId = parseInt(seriesSel, 10);
+  }
+
+  // registerAsSeries=true 면 영상 제목과 별개로 시리즈 이름 등록 — 시리즈 이름 우선시
+  // server 는 registerAsSeries=true 일 때 영상 title 을 시리즈 이름으로 씀 → 보정:
+  // 새 시리즈 이름이 영상 제목과 다르면 먼저 시리즈만 만들고, 그 id 로 진행.
+  if (registerAsSeries && newSeriesName !== title) {
+    try {
+      const sj = await apiPost('/api/video-series', { series_name: newSeriesName });
+      seriesId = sj.series.id;
+      registerAsSeries = false;
+    } catch (e) {
+      // 이미 있는 이름이면 fetch 해서 id 회수
+      if (/이미 존재/.test(e.message)) {
+        const list = await apiGet('/api/video-series');
+        const found = (list.series || []).find((s) => s.name === newSeriesName);
+        if (found) { seriesId = found.id; registerAsSeries = false; }
+        else { toast(`시리즈 등록 실패: ${e.message}`, 'error'); return; }
+      } else {
+        toast(`시리즈 등록 실패: ${e.message}`, 'error'); return;
+      }
+    }
+  }
+
+  const ordered = getOrderedTracksForRender();
+  const trackIds = ordered.map((t) => t.id);
+
+  builder.rendering = true;
+  $('#bRenderBtn').disabled = true;
+  $('#bRenderBtn').textContent = '🎬 처리 중…';
+
+  try {
+    const j = await apiPost('/api/videos', {
+      title,
+      trackIds,
+      templateId,
+      seriesId,
+      registerAsSeries,
+    });
+    toast(`영상 프로젝트 생성됨 (build_id: ${j.buildId})`, 'success', 6000);
+    console.log('[builder] video created:', j);
+
+    // sessionStorage 클리어
+    sessionStorage.removeItem(BUILDER_SS_KEY);
+
+    // 안내 메시지
+    setTimeout(() => {
+      alert(
+        `✅ 영상 프로젝트 생성 완료\n\n` +
+        `Build ID: ${j.buildId}\n` +
+        `Video ID: ${j.videoId}\n` +
+        `Title: ${j.title}\n` +
+        `Tracks: ${j.trackCount}곡 / ${fmtMinSec(j.totalDurationSec)}\n` +
+        `Template: ${j.templateName}\n` +
+        (j.seriesName ? `Series: ${j.seriesName} Vol.${j.volume}\n` : '') +
+        `\n🎬 다음 단계: Phase 4-D 의 렌더 파이프라인이 완성되면 자동으로 영상 export 됩니다.\n` +
+        `현재는 video/public/jazz-playlist.json 에 데이터가 기록되었으며,\n` +
+        `cd video && npx remotion studio 로 미리보기 가능합니다.`
+      );
+    }, 100);
+
+    // 상태 리셋
+    builder.tracks = [];
+    builder.suggestedTitles = [];
+    $('#bTitle').value = '';
+    $('#bSuggestChips').innerHTML = '';
+    $('#bSuggestRetryBtn').hidden = true;
+    $('#bSeries').value = '';
+    $('#bSeriesNewName').value = '';
+    updateSeriesPreview();
+    $('#builderEmpty').hidden = false;
+    $('#builderMain').hidden = true;
+    refreshStats();
+    refreshSeries();
+  } catch (e) {
+    toast(`영상 생성 실패: ${e.message}`, 'error', 6000);
+  } finally {
+    builder.rendering = false;
+    $('#bRenderBtn').disabled = false;
+    $('#bRenderBtn').textContent = '🎬 렌더 준비 완료';
+  }
+});
+
+$('#bResetBtn').addEventListener('click', () => {
+  if (!confirm('Builder 작업을 모두 초기화합니다. 계속?')) return;
+  sessionStorage.removeItem(BUILDER_SS_KEY);
+  builder.tracks = [];
+  builder.suggestedTitles = [];
+  $('#bTitle').value = '';
+  $('#bSuggestChips').innerHTML = '';
+  $('#bSuggestRetryBtn').hidden = true;
+  $('#bSeries').value = '';
+  $('#bSeriesNewName').value = '';
+  updateSeriesPreview();
+  $('#builderEmpty').hidden = false;
+  $('#builderMain').hidden = true;
+});
+
+// ─── Builder onEnter (탭 전환 시) ────────────────────────────────────
+window.builderOnEnter = async function builderOnEnter() {
+  await Promise.all([refreshTemplates(), refreshSeries()]);
+
+  const raw = sessionStorage.getItem(BUILDER_SS_KEY);
+  if (!raw) {
+    $('#builderEmpty').hidden = false;
+    $('#builderMain').hidden = true;
+    return;
+  }
+
+  let ids;
+  try { ids = JSON.parse(raw); } catch { ids = []; }
+  if (!Array.isArray(ids) || !ids.length) {
+    $('#builderEmpty').hidden = false;
+    $('#builderMain').hidden = true;
+    return;
+  }
+
+  // GET /api/tracks?ids=... 로 곡 정보 조회
+  try {
+    const j = await apiGet(`/api/tracks?ids=${ids.join(',')}&limit=500`);
+    const fetched = j.tracks || [];
+    // 요청한 id 순서를 유지하기 위해 재정렬
+    const map = new Map(fetched.map((t) => [t.id, t]));
+    builder.tracks = ids.map((id) => map.get(id)).filter(Boolean);
+    if (!builder.tracks.length) {
+      toast('선택했던 곡이 모두 사라졌습니다 (삭제됨?)', 'error');
+      $('#builderEmpty').hidden = false;
+      $('#builderMain').hidden = true;
+      return;
+    }
+    $('#builderEmpty').hidden = true;
+    $('#builderMain').hidden = false;
+    builder.unpinAll = $('#bUnpinAll').checked;
+    renderBuilderTracks();
+  } catch (e) {
+    toast(`Builder 트랙 로드 실패: ${e.message}`, 'error');
+    $('#builderEmpty').hidden = false;
+    $('#builderMain').hidden = true;
+  }
+};
 
 // ─── Init ───────────────────────────────────────────────────────────
 async function init() {

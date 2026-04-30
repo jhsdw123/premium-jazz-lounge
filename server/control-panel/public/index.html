@@ -459,6 +459,147 @@
     /* main 의 bottom padding — sticky player 에 가려지는 트랙 행 보정 */
     main { padding-bottom: 80px; }
 
+    /* ─── Builder tab ─── */
+    .builder-grid {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 16px;
+      align-items: start;
+    }
+    @media (max-width: 1080px) {
+      .builder-grid { grid-template-columns: 1fr; }
+    }
+    .builder-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 16px;
+    }
+    .builder-card h3 {
+      margin: 0 0 10px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .builder-card .row {
+      display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap;
+    }
+    .builder-card label.field {
+      display: flex; flex-direction: column; gap: 4px;
+      font-size: 11px; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.04em;
+      flex: 1; min-width: 180px;
+    }
+    .builder-card input[type="text"],
+    .builder-card select,
+    .builder-card textarea {
+      background: var(--bg-input); color: var(--text);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 7px 9px; font-family: inherit; font-size: 13px;
+      text-transform: none; letter-spacing: normal;
+    }
+    .builder-card input:focus, .builder-card select:focus, .builder-card textarea:focus {
+      outline: none; border-color: var(--jazz-gold-dim);
+    }
+    .builder-empty {
+      background: var(--bg-card);
+      border: 1px dashed var(--border-strong);
+      border-radius: 8px;
+      padding: 60px 20px;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 13px;
+    }
+    .builder-empty strong { color: var(--jazz-gold); display: block; margin-bottom: 6px; font-size: 16px; }
+
+    /* Builder track row */
+    .builder-tracks { display: flex; flex-direction: column; gap: 4px; }
+    .btrack {
+      display: grid;
+      grid-template-columns: 36px 28px 28px 1fr 60px 28px;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 6px 10px;
+      font-size: 13px;
+    }
+    .btrack.dragging { opacity: 0.4; }
+    .btrack.drop-target { border-color: var(--jazz-gold); background: rgba(212,175,55,0.06); }
+    .btrack .pos {
+      color: var(--jazz-gold); font-variant-numeric: tabular-nums;
+      font-weight: 600; font-size: 13px; text-align: center;
+    }
+    .btrack .pin-icon {
+      color: var(--jazz-gold); font-size: 13px; text-align: center;
+    }
+    .btrack .pin-icon.unpinned { color: var(--text-muted); }
+    .btrack .drag-handle {
+      color: var(--text-muted); cursor: grab; text-align: center; user-select: none;
+      font-size: 14px; line-height: 1;
+    }
+    .btrack .drag-handle.locked { color: var(--text-muted); cursor: not-allowed; opacity: 0.4; }
+    .btrack .drag-handle:hover:not(.locked) { color: var(--text-dim); }
+    .btrack .btitle {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .btrack .bdur {
+      color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 12px; text-align: right;
+    }
+    .btrack .bremove {
+      background: none; border: none; color: var(--text-muted); cursor: pointer;
+      font-size: 14px; padding: 0; line-height: 1;
+    }
+    .btrack .bremove:hover { color: var(--red); }
+
+    /* Suggested title chips */
+    .suggest-chips {
+      display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;
+    }
+    .suggest-chip {
+      background: rgba(212,175,55,0.08);
+      border: 1px solid rgba(212,175,55,0.3);
+      color: var(--jazz-gold);
+      padding: 4px 10px;
+      border-radius: 14px;
+      font-size: 12px;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all 0.15s;
+    }
+    .suggest-chip:hover { background: rgba(212,175,55,0.18); border-color: var(--jazz-gold); }
+
+    .builder-summary {
+      display: flex; gap: 14px; flex-wrap: wrap;
+      font-size: 12px; color: var(--text-dim);
+      padding: 8px 0; border-top: 1px solid var(--border);
+    }
+    .builder-summary .label { color: var(--text-muted); }
+    .builder-summary .val { color: var(--jazz-gold); font-weight: 600; font-variant-numeric: tabular-nums; }
+
+    .builder-actions {
+      display: flex; gap: 8px; flex-wrap: wrap;
+      padding-top: 10px; border-top: 1px solid var(--border);
+    }
+    .builder-actions .primary {
+      background: var(--jazz-gold-dim); color: #000; border: 1px solid var(--jazz-gold);
+      font-weight: 600;
+      padding: 8px 18px; border-radius: 4px; cursor: pointer;
+      font-family: inherit; font-size: 13px;
+    }
+    .builder-actions .primary:hover { background: var(--jazz-gold); }
+    .builder-actions .primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .preview-line {
+      font-size: 12px; color: var(--text-dim); margin-top: 4px;
+    }
+    .preview-line .preview-strong { color: var(--jazz-gold); }
+
+    .ai-loading { color: var(--text-dim); font-size: 12px; margin-top: 6px; }
+
     /* Toaster */
     #toaster {
       position: fixed; bottom: 20px; right: 20px;
@@ -627,6 +768,8 @@
         <button class="bulk-btn" id="bulkBackfillBtn" type="button" disabled>🔍 일괄 backfill</button>
         <button class="bulk-btn" id="bulkExtractBtn" type="button" disabled>🎷 악기 추출</button>
         <button class="bulk-btn danger" id="bulkDeleteBtn" type="button" disabled>🗑 선택 삭제</button>
+        <span class="bulk-divider"></span>
+        <button class="bulk-btn warn" id="sendToBuilderBtn" type="button" disabled>🎬 Builder 로 보내기</button>
       </div>
 
       <!-- ─── Bulk progress (재사용) ─── -->
@@ -659,11 +802,74 @@
       </div>
     </section>
 
-    <!-- ─── Builder tab placeholder ─── -->
+    <!-- ─── Builder tab ─── -->
     <section id="tab-builder" class="tab-content">
-      <div class="placeholder">
-        <strong>🚧 Builder</strong>
-        Phase 4 에서 구현 예정 — 영상 빌더 (Pool 에서 13–15곡 선택 → Remotion 렌더 → 30분 영상)
+      <!-- 곡 미선택 시 노출 -->
+      <div id="builderEmpty" class="builder-empty">
+        <strong>🎬 Builder</strong>
+        Pool 탭에서 곡을 선택한 뒤 <span style="color:var(--jazz-gold)">🎬 Builder 로 보내기</span> 버튼을 눌러주세요.
+      </div>
+
+      <!-- 곡 선택 후 노출 -->
+      <div id="builderMain" class="builder-grid" hidden>
+        <!-- 좌측: 곡 리스트 + 셔플 -->
+        <div class="builder-card">
+          <h3>선택된 곡 (<span id="bTrackCount">0</span>)</h3>
+          <div class="row">
+            <button class="bulk-btn" id="bShufflePartialBtn" type="button">🔀 셔플 (6번 이후만)</button>
+            <button class="bulk-btn warn" id="bShuffleAllBtn" type="button">🔀 전체 셔플</button>
+            <span style="flex:1"></span>
+            <label class="vocal-check" style="font-size:12px;">
+              <input type="checkbox" id="bUnpinAll" />
+              📌 핀 해제 (1~5 자유 정렬)
+            </label>
+          </div>
+          <div id="bTracks" class="builder-tracks"></div>
+          <div class="builder-summary">
+            <span><span class="label">트랙 수:</span> <span class="val" id="bSumCount">0</span></span>
+            <span><span class="label">총 길이:</span> <span class="val" id="bSumDuration">0:00</span></span>
+            <span><span class="label">영상 길이 (자연스러운):</span> <span class="val" id="bSumNatural">—</span></span>
+          </div>
+        </div>
+
+        <!-- 우측: 메타 + AI + 시리즈 + 템플릿 + 렌더 -->
+        <div style="display:flex; flex-direction:column; gap:12px;">
+          <div class="builder-card">
+            <h3>영상 제목</h3>
+            <label class="field" style="text-transform:none; letter-spacing:normal;">
+              <input type="text" id="bTitle" placeholder="예: Late Night Jazz Vol.7" />
+            </label>
+            <button class="bulk-btn warn" id="bSuggestBtn" type="button">✨ AI 추천 받기</button>
+            <button class="bulk-btn" id="bSuggestRetryBtn" type="button" hidden>↻ 다시 추천</button>
+            <div id="bSuggestLoading" class="ai-loading" hidden>Gemini 호출 중…</div>
+            <div id="bSuggestChips" class="suggest-chips"></div>
+          </div>
+
+          <div class="builder-card">
+            <h3>시리즈</h3>
+            <select id="bSeries" style="width:100%;">
+              <option value="">(시리즈 없음)</option>
+              <option value="__new">+ 새 시리즈로 등록</option>
+            </select>
+            <div id="bSeriesNewWrap" class="row" hidden style="margin-top:8px;">
+              <input type="text" id="bSeriesNewName" placeholder="새 시리즈 이름" style="flex:1; background:var(--bg-input); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:7px 9px; font-size:13px;" />
+            </div>
+            <div class="preview-line" id="bSeriesPreview" hidden></div>
+          </div>
+
+          <div class="builder-card">
+            <h3>템플릿</h3>
+            <select id="bTemplate" style="width:100%;"></select>
+            <div class="preview-line" id="bTemplatePreview"></div>
+          </div>
+
+          <div class="builder-card">
+            <div class="builder-actions">
+              <button class="primary" id="bRenderBtn" type="button">🎬 렌더 준비 완료</button>
+              <button class="bulk-btn" id="bResetBtn" type="button">↺ 새로 시작</button>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
