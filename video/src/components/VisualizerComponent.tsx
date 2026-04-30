@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import { staticFile, useCurrentFrame, useVideoConfig } from 'remotion';
 import { useAudioData, visualizeAudio } from '@remotion/media-utils';
 import { rawToBarHeights, getBarColor, type VisOpts } from '../lib/visualizerLogic';
@@ -13,12 +13,31 @@ type Track = {
   endSec: number;
 };
 
+// Auto Gain Control 상수 — 곡마다 음량 다른 문제를 자동 정규화로 해결.
+const AGC_TARGET_PEAK = 0.7;          // 정규화 후 목표 peak (천장 안 박힘)
+const AGC_LOOKBACK_FRAMES = 60;       // 2초 (30fps) peak 추적 윈도우
+const AGC_MIN_PEAK = 0.01;            // div-by-zero 방지 (조용 구간 보호)
+const FALLING_SMOOTHING_BASE = 0.92;  // EMA falling baseline (rising 은 0.7)
+const SENSITIVITY_BASELINE = 0.15;    // Editor default. 사용자 slider 의 1.0 multiplier 기준.
+
 export const VisualizerComponent: React.FC<{
   comp: Component;
   currentTrack: Track;
 }> = ({ comp, currentTrack }) => {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
+
+  // refs — Remotion render concurrency=1 일 때 frame 간 persist.
+  const peakHistoryRef = useRef<number[]>([]);
+  const prevAmpsRef = useRef<Float32Array | null>(null);
+  const lastTrackIdRef = useRef<number | null>(null);
+
+  // 곡 변경 시 AGC + smoothing state reset
+  if (lastTrackIdRef.current !== currentTrack.id) {
+    peakHistoryRef.current = [];
+    prevAmpsRef.current = null;
+    lastTrackIdRef.current = currentTrack.id;
+  }
 
   const audioData = useAudioData(staticFile(currentTrack.audioPath));
 
@@ -28,57 +47,97 @@ export const VisualizerComponent: React.FC<{
 
   const N = Math.max(1, comp.barCount | 0 || 80);
 
-  // Editor 와 같은 옵션 적용
+  // Editor 와 같은 옵션
   const opts: VisOpts = {
     barCount: N,
     centerCut: comp.centerCut ?? 0,
     trimStart: comp.trimStart ?? 3,
-    sensitivity: comp.sensitivity ?? 0.15,
+    sensitivity: comp.sensitivity ?? SENSITIVITY_BASELINE,
     midBoost: comp.midBoost ?? 1.5,
     highBoost: comp.highBoost ?? 0.8,
     smoothing: comp.smoothing ?? 0.85,
   };
 
-  // 시간 스무딩 — Remotion 은 frame 간 state 가 없어서 매 frame 독립 계산이라
-  // 시각적으로 jittery. Editor 의 rising-fast / falling-smooth 패턴을 흉내내려고
-  // 최근 K frame 을 sample 한 뒤 oldest→newest 순으로 EMA 적용.
-  //
-  // fix v3: history 6→10 으로 확장 + falling smoothing 0.92 로 baseline 강화
-  // (형님 sensitivity 슬라이더 값과 max 비교, 더 부드러운 쪽 선택).
-  const SMOOTHING_HISTORY = 10;
-  const FALLING_SMOOTHING_BASE = 0.92;
-
   let heights: Float32Array;
   if (!audioData) {
     heights = new Float32Array(N);
   } else {
-    const seriesHeights: Float32Array[] = [];
-    for (let k = SMOOTHING_HISTORY - 1; k >= 0; k--) {
-      const f = Math.max(0, localFrame - k);
-      const samples = visualizeAudio({
-        fps,
-        frame: f,
-        audioData,
-        numberOfSamples: 1024,
-        optimizeFor: 'speed',
-      });
-      seriesHeights.push(rawToBarHeights(samples, opts, 'remotion'));
+    // 1) 현재 frame 의 raw spectrum (1024 bin)
+    const visualization = visualizeAudio({
+      fps,
+      frame: localFrame,
+      audioData,
+      numberOfSamples: 1024,
+      optimizeFor: 'speed',
+    });
+
+    // 2) 현재 frame peak
+    let currentPeak = 0;
+    for (let i = 0; i < visualization.length; i++) {
+      const v = visualization[i];
+      if (v > currentPeak) currentPeak = v;
     }
-    // Editor 의 smoothing 정확 재현: rising 빠름 (prev*0.3 + raw*0.7),
-    // falling 만 smoothing 적용. 사용자 slider (opts.smoothing, default 0.85) 와
-    // 0.92 baseline 중 더 큰 값 (= 더 부드러운 쪽) 사용.
-    const smoothed = new Float32Array(N);
-    const effectiveSmoothing = Math.max(FALLING_SMOOTHING_BASE, opts.smoothing);
-    for (const h of seriesHeights) {
-      for (let i = 0; i < N; i++) {
-        const prev = smoothed[i];
-        const raw = h[i];
-        smoothed[i] = raw > prev
-          ? prev * 0.3 + raw * 0.7
-          : prev * effectiveSmoothing + raw * (1 - effectiveSmoothing);
+
+    // 3) peak history 갱신 (최근 60 frame = 2 sec)
+    peakHistoryRef.current.push(currentPeak);
+    if (peakHistoryRef.current.length > AGC_LOOKBACK_FRAMES) {
+      peakHistoryRef.current.shift();
+    }
+
+    // 4) running max
+    let runningMaxPeak = AGC_MIN_PEAK;
+    for (const p of peakHistoryRef.current) {
+      if (p > runningMaxPeak) runningMaxPeak = p;
+    }
+
+    // 5) auto gain — peak 가 AGC_TARGET_PEAK 가 되도록
+    const autoGain = AGC_TARGET_PEAK / runningMaxPeak;
+
+    // 6) 사용자 sensitivity multiplier (Editor default 0.15 = 1.0 multiplier)
+    const sensitivityMultiplier = opts.sensitivity / SENSITIVITY_BASELINE;
+
+    const finalGain = autoGain * sensitivityMultiplier;
+
+    // 7) AGC 적용
+    const normalized = new Float32Array(visualization.length);
+    for (let i = 0; i < visualization.length; i++) {
+      normalized[i] = visualization[i] * finalGain;
+    }
+
+    // 8) 시간 스무딩 (EMA — refs 로 frame 간 persist).
+    //    Editor: rising fast (prev*0.3 + curr*0.7), falling smooth.
+    //    falling 은 사용자 slider 와 0.92 baseline 중 더 부드러운 값 사용.
+    const sm = Math.max(FALLING_SMOOTHING_BASE, opts.smoothing);
+    const prev = prevAmpsRef.current;
+    const smoothed = new Float32Array(normalized.length);
+    if (!prev || prev.length !== normalized.length) {
+      // 곡 시작 / 첫 frame: smoothing 없이 normalized 그대로
+      for (let i = 0; i < normalized.length; i++) smoothed[i] = normalized[i];
+    } else {
+      for (let i = 0; i < normalized.length; i++) {
+        const p = prev[i];
+        const c = normalized[i];
+        smoothed[i] = c >= p ? p * 0.3 + c * 0.7 : p * sm + c * (1 - sm);
       }
     }
-    heights = smoothed;
+    prevAmpsRef.current = smoothed;
+
+    // 9) 디버그 로그 (1초마다 — 30fps 기준)
+    if (frame % 30 === 0) {
+      let mxS = 0;
+      for (let i = 0; i < smoothed.length; i++) if (smoothed[i] > mxS) mxS = smoothed[i];
+      // eslint-disable-next-line no-console
+      console.log(
+        `[AGC] frame=${frame} runningPeak=${runningMaxPeak.toFixed(3)} ` +
+        `autoGain=${autoGain.toFixed(2)} sensMul=${sensitivityMultiplier.toFixed(2)} ` +
+        `smoothedMax=${mxS.toFixed(3)}`
+      );
+    }
+
+    // 10) bin → bar amplitude (rawToBarHeights 의 'remotion' 모드는
+    //     fixed sensitivity baseline + EQ 만 적용. AGC + 사용자 sensitivity
+    //     는 이미 위에서 처리됨)
+    heights = rawToBarHeights(smoothed, opts, 'remotion');
   }
 
   const barWidth = Math.max(1, comp.barWidth | 0 || 6);

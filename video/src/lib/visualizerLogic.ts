@@ -12,23 +12,22 @@ export type VisOpts = {
 };
 
 /**
- * Editor 의 AnalyserNode.getByteFrequencyData 와 Remotion 의 visualizeAudio
- * 는 amplitude scale 이 크게 다름. 실측:
- *   - Editor:   byte freq data (0~255) ÷ 255 → 평균 ~0.15, peak ~0.6
- *   - Remotion: visualizeAudio              → 평균 ~0.002, peak ~0.076
+ * v4: Auto Gain Control 도입.
+ * 이전 (v1~v3) 의 fixed REMOTION_AMPLITUDE_BOOST 는 곡마다 음량 다른 문제로
+ * 단일 값 매칭 불가 → 폐기. 대신 caller (VisualizerComponent) 가 매 frame 의
+ * peak 를 추적하면서 자동 gain 곱해서 0~AGC_TARGET_PEAK 범위로 정규화한 후
+ * 본 함수에 전달.
  *
- * fix v2 에서 75 로 시작 → 형님 검증 결과 "여전히 너무 격렬, 천장 박힘".
- * fix v3: 25 로 하향. peak × 25 ≈ 1.0 으로 자연 클램프 직전 → dynamic range 보존.
- *
- * 'editor' 모드: scale 1
- * 'remotion' 모드: scale REMOTION_AMPLITUDE_BOOST
+ * 'editor' 모드: opts.sensitivity 로 사용자 슬라이더 적용 (정규화 X)
+ * 'remotion' 모드: caller 가 AGC 로 이미 정규화 + sensitivity multiplier 적용.
+ *                  여기선 fixed baseline 0.15 로 bar height 스케일만 .
  */
-const REMOTION_AMPLITUDE_BOOST = 25;
+const REMOTION_BAR_SCALE = 0.15;
 let _debugLoggedFrames = 0;
 
 /**
- * 0~1 frequency amplitudes → N개 막대의 amplitude (legacy 식 적용 후).
- * 시간축 smoothing 은 호출자가 처리 (Editor 는 lastData, Remotion 은 X).
+ * 0~1 frequency amplitudes → N개 막대의 bar 높이 (legacy 식 적용 후).
+ * 'remotion' 모드는 입력이 이미 AGC 정규화된 상태라 가정.
  */
 export function rawToBarHeights(
   raw: Float32Array | number[],
@@ -40,7 +39,8 @@ export function rawToBarHeights(
   const out = new Float32Array(N);
   const cc = Math.max(0, opts.centerCut | 0);
   const ts = Math.max(0, opts.trimStart | 0);
-  const scale = source === 'remotion' ? REMOTION_AMPLITUDE_BOOST : 1;
+  // remotion 은 caller (AGC) 가 sensitivity 곱했음 → 여기선 fixed baseline.
+  const sens = source === 'remotion' ? REMOTION_BAR_SCALE : opts.sensitivity;
 
   // 디버그 — 짧은 mp4 렌더 시 첫 5 프레임만 raw 분포 로그
   if (source === 'remotion' && _debugLoggedFrames < 5) {
@@ -53,7 +53,7 @@ export function rawToBarHeights(
     }
     const avg = raw.length ? sm / raw.length : 0;
     // eslint-disable-next-line no-console
-    console.log(`[remotion-vis] frame#${_debugLoggedFrames} bins=${raw.length} max=${mx.toFixed(4)} avg=${avg.toFixed(4)} sample=${sample.join(',')}`);
+    console.log(`[remotion-vis] frame#${_debugLoggedFrames} (post-AGC) bins=${raw.length} max=${mx.toFixed(4)} avg=${avg.toFixed(4)} sample=${sample.join(',')}`);
     _debugLoggedFrames++;
   }
 
@@ -71,10 +71,10 @@ export function rawToBarHeights(
         cnt++;
       }
     }
-    const rawAvg = (cnt > 0 ? sum / cnt : 0) * scale;
-    // boost 후 inner clamp X — bar 높이는 컴포넌트의 heightCap 에서 자연스럽게 클램프됨.
+    const rawAvg = cnt > 0 ? sum / cnt : 0;
+    // bar 높이는 컴포넌트의 heightCap 에서 자연스럽게 클램프됨 (inner clamp X).
     const eq = opts.midBoost * (1 - percent) + opts.highBoost * percent;
-    out[i] = rawAvg * 2000 * opts.sensitivity * eq;
+    out[i] = rawAvg * 2000 * sens * eq;
   }
   return out;
 }
