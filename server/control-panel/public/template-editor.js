@@ -94,6 +94,7 @@ function defaultsFor(type) {
         lineHeight: 1.2,
         textTransform: 'none',
         glowIntensity: 1.0,         // 0~2, textShadow 강도. 어두운 색이면 자동 비활성.
+        autoWrap: true,             // true: 박스 폭 넘으면 자동 wrap, false: 고정 (overflow ellipsis)
       };
     case 'image':
       return { ...base, src: '', fit: 'contain', width: 400, height: 400 };
@@ -230,8 +231,10 @@ function loadConfigToCanvas(cfg) {
       fontSize: cfg.title.fontSize ?? 72,
       fontFamily: cfg.title.fontFamily || 'Playfair Display, serif',
       color: cfg.title.color || '#FFFFFF',
-      textShadow: cfg.title.textShadow || '0 0 20px rgba(212,175,55,0.8)',
       textAlign: 'center',
+      bold: false, italic: false, underline: false, strikethrough: false,
+      letterSpacing: 0, lineHeight: 1.2, textTransform: 'none',
+      glowIntensity: 1.0, autoWrap: true,
     });
   }
   if (cfg?.visualizer) {
@@ -304,6 +307,32 @@ function renderBars(c) {
   return `<canvas class="te-vis-canvas" data-vis-id="${c.id}" style="width:100%;height:100%;display:block;"></canvas>`;
 }
 
+// ─── Audio preview (real spectrum tap) ──────────────────────
+// Editor 미리듣기 곡 — Web Audio API 의 AnalyserNode 로 실제 주파수 데이터 추출.
+// 곡 미선택 시 fake spectrum 으로 fallback.
+const audio = {
+  context: null,
+  analyser: null,
+  element: null,
+  source: null,
+  bytes: null,            // Uint8Array (fftBinCount)
+  trackId: null,
+  duration: 0,
+  cachedTracks: null,     // [{ id, label }]
+};
+
+const FFT_SIZE = 4096;    // legacy 와 동일
+
+function audioHasRealData() {
+  return !!(audio.analyser && audio.element && audio.bytes && !audio.element.paused);
+}
+
+function getRealSpectrum() {
+  if (!audioHasRealData()) return null;
+  audio.analyser.getByteFrequencyData(audio.bytes);
+  return audio.bytes;
+}
+
 // 컴포넌트별 smoothing 상태. barCount 변경 시 길이 다시 맞춤.
 const visState = new Map(); // id → { lastData: Float32Array, raw: Float32Array, len: number }
 
@@ -348,13 +377,35 @@ function drawVisualizer(canvas, c, time) {
   const state = getVisState(c);
   const N = state.len;
 
-  // 1) Fake spectrum — sine + 약간 랜덤. 부드럽게 oscillate.
-  const t = time * 0.001;
-  for (let i = 0; i < N; i++) {
-    const base = 0.45 + 0.35 * Math.sin(i * 0.28 + t * 1.2);
-    const wave2 = 0.20 * Math.sin(i * 0.7 + t * 0.7);
-    const noise = (Math.random() - 0.5) * 0.18;
-    state.raw[i] = Math.max(0.05, Math.min(1, base + wave2 + noise));
+  // 1) Spectrum 채우기 — 실제 오디오면 AnalyserNode 의 byte data 를 legacy 의
+  //    log mapping (centerCut + trimStart + pow(percent, 2)) 으로 N 개 막대 amplitude 로 변환.
+  //    아니면 fake (sine + 랜덤).
+  const real = getRealSpectrum();
+  if (real) {
+    const fftSize = audio.analyser.fftSize;
+    const binCount = real.length;
+    const ccLocal = Math.max(0, c.centerCut | 0);
+    const tsLocal = Math.max(0, c.trimStart | 0);
+    for (let i = 0; i < N; i++) {
+      const denom = N + ccLocal - 1;
+      const percent = denom > 0 ? (i + ccLocal) / denom : 0;
+      const logIndex = Math.pow(percent, 2.0);
+      const rawIdx = Math.floor(tsLocal + logIndex * (fftSize / 5));
+      const start = Math.max(0, Math.min(binCount - 1, rawIdx));
+      const end = Math.max(start + 1, Math.min(binCount, rawIdx + 4));
+      let sum = 0;
+      const cnt = end - start;
+      for (let j = start; j < end; j++) sum += real[j];
+      state.raw[i] = cnt > 0 ? (sum / cnt) / 255 : 0;
+    }
+  } else {
+    const t = time * 0.001;
+    for (let i = 0; i < N; i++) {
+      const base = 0.45 + 0.35 * Math.sin(i * 0.28 + t * 1.2);
+      const wave2 = 0.20 * Math.sin(i * 0.7 + t * 0.7);
+      const noise = (Math.random() - 0.5) * 0.18;
+      state.raw[i] = Math.max(0.05, Math.min(1, base + wave2 + noise));
+    }
   }
 
   // 2) Legacy 그리기 setup
@@ -381,10 +432,6 @@ function drawVisualizer(canvas, c, time) {
   const midBoost = c.midBoost ?? 1.5;
   const highBoost = c.highBoost ?? 0.8;
   const centerCut = Math.max(0, c.centerCut | 0);
-  // trimStart 는 FFT bin offset — Editor 미리보기에서는 raw 가 fake 라 직접 영향 약함.
-  // legacy 식을 흉내 내기 위해 raw 인덱스에 +trimStart 만큼 시프트해서 다른 영역 sample.
-  const trimStart = Math.max(0, c.trimStart | 0);
-
   // 한쪽(반쪽) 에 들어갈 수 있는 max 막대 수
   const maxHalfBars = Math.max(1, Math.floor((w / 2) / Math.max(1, ew)));
   const drawCount = Math.min(N, maxHalfBars);
@@ -397,9 +444,9 @@ function drawVisualizer(canvas, c, time) {
     const denom = c.barCount + centerCut - 1;
     const percent = denom > 0 ? (i + centerCut) / denom : 0;
     const eq = midBoost * (1 - percent) + highBoost * percent;
-    // raw 인덱스에 trimStart 시프트 (out-of-range 면 wrap)
-    const rawIdx = (i + trimStart) % N;
-    const adjusted = state.raw[rawIdx] * 2000 * sensitivity * eq;
+    // state.raw[i] 가 이미 i-th 막대의 amplitude (real: bin-mapped, fake: 직접).
+    // trimStart/centerCut 은 real 일 때 fillRawSpectrum 에서 적용됐고, fake 는 무관.
+    const adjusted = state.raw[i] * 2000 * sensitivity * eq;
 
     // smoothing — legacy: rising 은 빠르게 (prev*0.3 + raw*0.7), 떨어질 때만 smoothing
     const prev = state.lastData[i];
@@ -480,6 +527,12 @@ function buildTextDecoration(c) {
 
 function renderTextInner(c) {
   const shadow = buildTextShadow(c);
+  // autoWrap=true:  pre-line  → 형님 입력 \n 만 줄바꿈, 박스 폭 넘으면 자동 wrap
+  // autoWrap=false: pre       → \n 만 줄바꿈, 박스 폭 넘으면 hidden + ellipsis
+  const autoWrap = c.autoWrap !== false; // default true
+  const whiteSpace = autoWrap ? 'pre-line' : 'pre';
+  const overflow = autoWrap ? 'visible' : 'hidden';
+  const wordWrap = autoWrap ? 'break-word' : 'normal';
   return `<div class="text-render" style="
     color: ${c.color || '#FFFFFF'};
     font-size: ${c.fontSize || 72}px;
@@ -492,6 +545,10 @@ function renderTextInner(c) {
     text-decoration: ${buildTextDecoration(c)};
     letter-spacing: ${c.letterSpacing ?? 0}px;
     text-transform: ${c.textTransform || 'none'};
+    white-space: ${whiteSpace};
+    overflow: ${overflow};
+    word-wrap: ${wordWrap};
+    width: 100%;
   ">${escapeHtml(placeholderText(c.content || ''))}</div>`;
 }
 
@@ -760,7 +817,7 @@ function renderProps() {
     typeFields = `
       <div class="te-prop full">
         <label>Content (변수: {{trackTitle}}, {{trackNumber}}, {{totalTracks}})</label>
-        <input type="text" data-prop="content" value="${escapeHtml(c.content || '')}" />
+        <textarea data-prop="content" rows="3" style="resize:vertical;font-family:inherit;">${escapeHtml(c.content || '')}</textarea>
       </div>
       <div class="te-prop"><label>Font Size</label><input type="number" data-prop="fontSize" value="${c.fontSize || 72}" min="8" max="500" /></div>
       <div class="te-prop"><label>Font Family</label>
@@ -798,6 +855,13 @@ function renderProps() {
           <option value="lowercase" ${c.textTransform === 'lowercase' ? 'selected' : ''}>lower</option>
           <option value="capitalize" ${c.textTransform === 'capitalize' ? 'selected' : ''}>Capitalize</option>
         </select>
+      </div>
+      <div class="te-prop">
+        <label>Auto Wrap</label>
+        <label class="vocal-check" style="font-size:12px; cursor:pointer;">
+          <input type="checkbox" data-prop-bool="autoWrap" ${c.autoWrap !== false ? 'checked' : ''} />
+          박스 폭 넘으면 자동 줄바꿈
+        </label>
       </div>
       ${slider('letterSpacing', 'Letter Spacing', -5, 20, 0.5, c.letterSpacing ?? 0, 'px')}
       ${slider('lineHeight', 'Line Height', 0.8, 3.0, 0.05, c.lineHeight ?? 1.2, '')}
@@ -928,6 +992,12 @@ function renderProps() {
         valEl.textContent = `${val}${suffix}`;
       }
       updateComponent(c.id, { [prop]: val });
+    });
+  });
+  // Boolean 체크박스 (Auto Wrap 등)
+  wrap.querySelectorAll('[data-prop-bool]').forEach((inp) => {
+    inp.addEventListener('change', () => {
+      updateComponent(c.id, { [inp.dataset.propBool]: inp.checked });
     });
   });
   // 이미지 재업로드 버튼
@@ -1246,14 +1316,164 @@ async function deleteTemplate(id) {
 async function templatesOnEnter() {
   if (!te.initialized) {
     te.initialized = true;
-    await refreshTemplateList();
+    await Promise.all([refreshTemplateList(), refreshPreviewTracks()]);
     renderCanvas();
     startVisualizerTicker();
+    bindPreviewControls();
   } else {
-    // 재진입 시 리스트 만 갱신 (다른 탭에서 변경 가능성)
     refreshTemplateList();
+    // preview 곡 리스트 — 새 곡 업로드 가능성 → 리프레시
+    refreshPreviewTracks();
   }
 }
+
+// ─── Audio preview controls ─────────────────────────────────
+async function refreshPreviewTracks() {
+  try {
+    const j = await apiGet('/api/tracks?limit=100&orderBy=newest');
+    audio.cachedTracks = (j.tracks || []).map((t) => ({
+      id: t.id,
+      label: t.title?.title_en || t.original_filename || `Track #${t.id}`,
+    }));
+    const sel = $('#tePreviewTrack');
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— 곡 선택 (없으면 가짜 데이터) —</option>';
+    for (const t of audio.cachedTracks) {
+      const o = document.createElement('option');
+      o.value = String(t.id);
+      o.textContent = t.label;
+      sel.appendChild(o);
+    }
+    if (cur) sel.value = cur;
+  } catch (e) {
+    console.warn('preview tracks 로드 실패:', e.message);
+  }
+}
+
+function ensureAudioContext() {
+  if (audio.context) return;
+  audio.context = new (window.AudioContext || window.webkitAudioContext)();
+  audio.analyser = audio.context.createAnalyser();
+  audio.analyser.fftSize = FFT_SIZE;
+  audio.analyser.smoothingTimeConstant = 0.85;
+  audio.bytes = new Uint8Array(audio.analyser.frequencyBinCount);
+  audio.analyser.connect(audio.context.destination);
+}
+
+function disposePreview() {
+  if (audio.element) {
+    try { audio.element.pause(); } catch {}
+    try { audio.element.removeAttribute('src'); audio.element.load(); } catch {}
+    audio.element = null;
+  }
+  if (audio.source) {
+    try { audio.source.disconnect(); } catch {}
+    audio.source = null;
+  }
+  audio.trackId = null;
+  audio.duration = 0;
+  setPreviewUiState({ ready: false, playing: false, time: 0, duration: 0 });
+}
+
+async function loadPreviewTrack(trackId) {
+  try {
+    setPreviewStatus(`signed URL 발급 중…`);
+    const r = await fetch(`/api/tracks/${trackId}/audio-url`);
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`);
+
+    disposePreview();
+    ensureAudioContext();
+
+    const el = new Audio();
+    el.crossOrigin = 'anonymous';   // 반드시 src 전에 set (CORS)
+    el.preload = 'auto';
+    el.src = j.url;
+    audio.element = el;
+    audio.trackId = trackId;
+
+    // mediaElementSource 는 audio element 마다 1회만.
+    audio.source = audio.context.createMediaElementSource(el);
+    audio.source.connect(audio.analyser);
+
+    el.addEventListener('loadedmetadata', () => {
+      audio.duration = el.duration || 0;
+      setPreviewUiState({ ready: true, playing: false, time: 0, duration: audio.duration });
+      setPreviewStatus(`${j.title || ''} (${fmtTime(audio.duration)})`.trim() || '로드 완료');
+    });
+    el.addEventListener('timeupdate', () => {
+      setPreviewUiState({ ready: true, playing: !el.paused, time: el.currentTime, duration: audio.duration });
+    });
+    el.addEventListener('ended', () => {
+      setPreviewUiState({ ready: true, playing: false, time: el.duration || 0, duration: audio.duration });
+    });
+    el.addEventListener('error', () => {
+      setPreviewStatus(`오디오 로드 실패 — Storage CORS 확인 필요 (Supabase Dashboard → Storage → Settings → CORS)`);
+      toast('오디오 로드 실패. CORS 설정 확인.', 'error', 6000);
+    });
+  } catch (e) {
+    setPreviewStatus(`로드 실패: ${e.message}`);
+    toast(`미리듣기 로드 실패: ${e.message}`, 'error');
+  }
+}
+
+function fmtTime(sec) {
+  if (!sec || !Number.isFinite(sec)) return '0:00';
+  const m = Math.floor(sec / 60);
+  const s = String(Math.floor(sec % 60)).padStart(2, '0');
+  return `${m}:${s}`;
+}
+
+function setPreviewUiState({ ready, playing, time, duration }) {
+  $('#tePreviewPlay').disabled = !ready || playing;
+  $('#tePreviewPause').disabled = !ready || !playing;
+  $('#tePreviewStop').disabled = !ready;
+  $('#tePreviewTime').textContent = `${fmtTime(time)} / ${fmtTime(duration)}`;
+  const pct = duration > 0 ? Math.max(0, Math.min(100, (time / duration) * 100)) : 0;
+  $('#tePreviewProgress').style.width = `${pct}%`;
+}
+
+function setPreviewStatus(msg) {
+  const el = $('#tePreviewStatus');
+  if (el) el.textContent = msg;
+}
+
+function bindPreviewControls() {
+  $('#tePreviewTrack')?.addEventListener('change', (ev) => {
+    const v = ev.target.value;
+    if (!v) {
+      disposePreview();
+      setPreviewStatus('(선택 안 됨 → 가짜 스펙트럼)');
+      return;
+    }
+    loadPreviewTrack(parseInt(v, 10));
+  });
+  $('#tePreviewPlay')?.addEventListener('click', async () => {
+    if (!audio.element) return;
+    try {
+      if (audio.context.state === 'suspended') await audio.context.resume();
+      await audio.element.play();
+      setPreviewUiState({ ready: true, playing: true, time: audio.element.currentTime, duration: audio.duration });
+    } catch (e) {
+      toast(`재생 실패: ${e.message}`, 'error');
+    }
+  });
+  $('#tePreviewPause')?.addEventListener('click', () => {
+    if (!audio.element) return;
+    audio.element.pause();
+    setPreviewUiState({ ready: true, playing: false, time: audio.element.currentTime, duration: audio.duration });
+  });
+  $('#tePreviewStop')?.addEventListener('click', () => {
+    if (!audio.element) return;
+    audio.element.pause();
+    audio.element.currentTime = 0;
+    setPreviewUiState({ ready: true, playing: false, time: 0, duration: audio.duration });
+  });
+}
+
+// 페이지 언로드 시 정리
+window.addEventListener('beforeunload', () => disposePreview());
 
 // app.js 의 switchTab 이 hook 하는 전역
 window.templatesOnEnter = templatesOnEnter;

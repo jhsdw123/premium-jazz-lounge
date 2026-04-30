@@ -891,6 +891,19 @@
       padding: 6px 10px;
       border-radius: 3px;
     }
+    /* Audio preview progress */
+    .te-preview-progress {
+      width: 100%; height: 4px;
+      background: var(--bg-input);
+      border-radius: 2px; margin-top: 6px;
+      overflow: hidden;
+    }
+    .te-preview-progress-fill {
+      width: 0%; height: 100%;
+      background: var(--jazz-gold);
+      transition: width 0.1s linear;
+    }
+
     /* Toggle group — Bold/Italic/Underline/Strike, Align */
     .te-toggle-group {
       display: inline-flex; gap: 0;
@@ -1207,6 +1220,23 @@
       <div class="te-grid">
         <!-- 좌측: 사이드 -->
         <div class="te-side">
+          <div class="te-card">
+            <h3>🎵 미리듣기 곡 (옵션)</h3>
+            <select id="tePreviewTrack" style="width:100%;">
+              <option value="">— 곡 선택 (없으면 가짜 데이터) —</option>
+            </select>
+            <div class="row" style="margin-top:6px;">
+              <button class="te-btn" id="tePreviewPlay" type="button" disabled>▶</button>
+              <button class="te-btn" id="tePreviewPause" type="button" disabled>⏸</button>
+              <button class="te-btn" id="tePreviewStop" type="button" disabled>⏹</button>
+              <span id="tePreviewTime" style="margin-left:auto;font-size:11px;color:var(--text-dim);font-variant-numeric:tabular-nums;">0:00 / 0:00</span>
+            </div>
+            <div class="te-preview-progress">
+              <div class="te-preview-progress-fill" id="tePreviewProgress"></div>
+            </div>
+            <div id="tePreviewStatus" class="te-bg-status">(선택 안 됨 → 가짜 스펙트럼)</div>
+          </div>
+
           <div class="te-card">
             <h3>🖼 배경 이미지</h3>
             <div class="row">
