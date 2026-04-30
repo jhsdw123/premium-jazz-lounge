@@ -13,17 +13,17 @@ export type VisOpts = {
 
 /**
  * Editor 의 AnalyserNode.getByteFrequencyData 와 Remotion 의 visualizeAudio
- * 는 amplitude scale 이 크게 다름. 실측 (10s test render):
+ * 는 amplitude scale 이 크게 다름. 실측:
  *   - Editor:   byte freq data (0~255) ÷ 255 → 평균 ~0.15, peak ~0.6
  *   - Remotion: visualizeAudio              → 평균 ~0.002, peak ~0.076
- *   → 평균 기준 ~75x 차이. Editor 와 동일한 sensitivity 슬라이더 값에서
- *     비슷한 활발함을 얻으려면 Remotion 측에 boost 75 곱.
- *   bar 높이의 최종 클램프는 컴포넌트의 heightCap 이 처리하므로 inner clamp X.
+ *
+ * fix v2 에서 75 로 시작 → 형님 검증 결과 "여전히 너무 격렬, 천장 박힘".
+ * fix v3: 25 로 하향. peak × 25 ≈ 1.0 으로 자연 클램프 직전 → dynamic range 보존.
  *
  * 'editor' 모드: scale 1
  * 'remotion' 모드: scale REMOTION_AMPLITUDE_BOOST
  */
-const REMOTION_AMPLITUDE_BOOST = 75;
+const REMOTION_AMPLITUDE_BOOST = 25;
 let _debugLoggedFrames = 0;
 
 /**

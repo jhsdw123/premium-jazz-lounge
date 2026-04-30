@@ -42,8 +42,11 @@ export const VisualizerComponent: React.FC<{
   // 시간 스무딩 — Remotion 은 frame 간 state 가 없어서 매 frame 독립 계산이라
   // 시각적으로 jittery. Editor 의 rising-fast / falling-smooth 패턴을 흉내내려고
   // 최근 K frame 을 sample 한 뒤 oldest→newest 순으로 EMA 적용.
-  // K 는 falling 시 smoothing=0.85 가 충분히 수렴하기 위해 6 권장.
-  const SMOOTHING_HISTORY = 6;
+  //
+  // fix v3: history 6→10 으로 확장 + falling smoothing 0.92 로 baseline 강화
+  // (형님 sensitivity 슬라이더 값과 max 비교, 더 부드러운 쪽 선택).
+  const SMOOTHING_HISTORY = 10;
+  const FALLING_SMOOTHING_BASE = 0.92;
 
   let heights: Float32Array;
   if (!audioData) {
@@ -62,16 +65,17 @@ export const VisualizerComponent: React.FC<{
       seriesHeights.push(rawToBarHeights(samples, opts, 'remotion'));
     }
     // Editor 의 smoothing 정확 재현: rising 빠름 (prev*0.3 + raw*0.7),
-    // falling 만 smoothing 적용 (prev*smoothing + raw*(1-smoothing))
+    // falling 만 smoothing 적용. 사용자 slider (opts.smoothing, default 0.85) 와
+    // 0.92 baseline 중 더 큰 값 (= 더 부드러운 쪽) 사용.
     const smoothed = new Float32Array(N);
-    const sm = opts.smoothing;
+    const effectiveSmoothing = Math.max(FALLING_SMOOTHING_BASE, opts.smoothing);
     for (const h of seriesHeights) {
       for (let i = 0; i < N; i++) {
         const prev = smoothed[i];
         const raw = h[i];
         smoothed[i] = raw > prev
           ? prev * 0.3 + raw * 0.7
-          : prev * sm + raw * (1 - sm);
+          : prev * effectiveSmoothing + raw * (1 - effectiveSmoothing);
       }
     }
     heights = smoothed;
