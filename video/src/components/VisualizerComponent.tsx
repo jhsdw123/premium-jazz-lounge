@@ -51,7 +51,7 @@ export const VisualizerComponent: React.FC<{
       numberOfSamples: 1024,
       optimizeFor: 'speed',
     });
-    heights = rawToBarHeights(samples, opts);
+    heights = rawToBarHeights(samples, opts, 'remotion');
   }
 
   const barWidth = Math.max(1, comp.barWidth | 0 || 6);

@@ -1,5 +1,16 @@
+/**
+ * Premium Jazz Lounge — Remotion HUD 영상 생성기
+ *
+ * 출력: 1920×1080 30fps mp4 (배경 이미지 + 비주얼라이저 + 텍스트 + Progress 등)
+ * 용도: Filmora 에서 라인드로잉 Loop 영상과 마스킹 합성
+ *       (Filmora 합성 자동화 X — 사용자 워크플로우의 일부)
+ *
+ * 배경: template.background_image_url
+ *       (라인드로잉 영상 첫 프레임 또는 정적 이미지)
+ * 컴포넌트: components 배열 또는 옛 schema 자동 변환 (adaptTemplate)
+ */
 import React from 'react';
-import { AbsoluteFill, Audio, Sequence, staticFile, useCurrentFrame, useVideoConfig } from 'remotion';
+import { AbsoluteFill, Audio, Img, Sequence, staticFile, useCurrentFrame, useVideoConfig } from 'remotion';
 import type { TPlaylist } from './types';
 import { adaptTemplate } from './lib/templateAdapter';
 import { TextComponent } from './components/TextComponent';
@@ -37,10 +48,11 @@ export const JazzVideo: React.FC<{ playlist: TPlaylist }> = ({ playlist }) => {
     : 0;
 
   // 옛/새 schema 모두 지원
-  const tpl = playlist.template || {};
+  const tpl: any = playlist.template || {};
   const adapted = adaptTemplate(tpl);
   const components = adapted.components;
   const bgColor = adapted.canvas?.bgColor || '#0A0A0A';
+  const bgImageUrl: string | null = tpl.background_image_url || null;
 
   // 변수 치환 컨텍스트
   const ctx = {
@@ -53,6 +65,21 @@ export const JazzVideo: React.FC<{ playlist: TPlaylist }> = ({ playlist }) => {
 
   return (
     <AbsoluteFill style={{ background: bgColor }}>
+      {/* 배경 이미지 (Filmora 마스킹용 HUD 영상의 베이스 레이어) */}
+      {bgImageUrl && (
+        <Img
+          src={bgImageUrl}
+          style={{
+            position: 'absolute',
+            inset: 0,
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            zIndex: 0,
+          }}
+        />
+      )}
+
       {/* 모든 트랙 오디오 — Sequence 로 시간 분리 */}
       {playlist.tracks.map((track) => (
         <Sequence
