@@ -85,13 +85,20 @@ function defaultsFor(type) {
         fontSize: 72,
         fontFamily: 'Playfair Display, serif',
         color: '#FFFFFF',
-        textShadow: '0 0 20px rgba(212,175,55,0.8)',
         textAlign: 'center',
+        bold: false,
+        italic: false,
+        underline: false,
+        strikethrough: false,
+        letterSpacing: 0,
+        lineHeight: 1.2,
+        textTransform: 'none',
+        glowIntensity: 1.0,         // 0~2, textShadow 강도. 어두운 색이면 자동 비활성.
       };
     case 'image':
       return { ...base, src: '', fit: 'contain', width: 400, height: 400 };
     case 'visualizer':
-      // Legacy 13 옵션 (기본값은 legacy original).
+      // Legacy 13 옵션 (기본값은 legacy original) + color mode (solid / gradient).
       return {
         ...base,
         width: 1200, height: 240,
@@ -108,7 +115,14 @@ function defaultsFor(type) {
         splitGap: 0,                // 위/아래 미러 사이 수직 gap (px)
         trimStart: 3,               // FFT bin trim
         glow: 20,
+        // 색상
+        colorMode: 'solid',         // 'solid' | 'gradient'
         color: '#D4AF37',
+        gradientStops: [
+          { position: 0,   color: '#FFFFFF' },
+          { position: 50,  color: '#D4AF37' },
+          { position: 100, color: '#A04000' },
+        ],
       };
     case 'progress':
       return {
@@ -121,6 +135,66 @@ function defaultsFor(type) {
       };
   }
   return base;
+}
+
+// ─── 색상 유틸 ───────────────────────────────────────────────
+function hexToRgb(hex) {
+  if (!hex || typeof hex !== 'string') return { r: 0, g: 0, b: 0 };
+  let m = hex.replace('#', '');
+  if (m.length === 3) m = m.split('').map((c) => c + c).join('');
+  if (m.length !== 6) return { r: 0, g: 0, b: 0 };
+  return {
+    r: parseInt(m.slice(0, 2), 16),
+    g: parseInt(m.slice(2, 4), 16),
+    b: parseInt(m.slice(4, 6), 16),
+  };
+}
+
+function rgbToCss(c) { return `rgb(${c.r},${c.g},${c.b})`; }
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function interpolateColor(hex1, hex2, t) {
+  const c1 = hexToRgb(hex1);
+  const c2 = hexToRgb(hex2);
+  return {
+    r: Math.round(lerp(c1.r, c2.r, t)),
+    g: Math.round(lerp(c1.g, c2.g, t)),
+    b: Math.round(lerp(c1.b, c2.b, t)),
+  };
+}
+
+// position 0~100 에서의 그라데이션 색을 RGB 객체로 반환.
+function gradientColorAt(stops, pct) {
+  if (!stops || !stops.length) return { r: 212, g: 175, b: 55 };
+  const sorted = [...stops].sort((a, b) => a.position - b.position);
+  if (pct <= sorted[0].position) return hexToRgb(sorted[0].color);
+  if (pct >= sorted[sorted.length - 1].position) return hexToRgb(sorted[sorted.length - 1].color);
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i], b = sorted[i + 1];
+    if (pct >= a.position && pct <= b.position) {
+      const span = Math.max(0.0001, b.position - a.position);
+      const t = (pct - a.position) / span;
+      return interpolateColor(a.color, b.color, t);
+    }
+  }
+  return hexToRgb(sorted[sorted.length - 1].color);
+}
+
+// 막대 인덱스(좌우 미러 인덱스, 0..N-1) 에 대한 색상.
+function getBarColor(c, barIndex, totalBars) {
+  if (c.colorMode !== 'gradient' || !c.gradientStops?.length) {
+    return hexToRgb(c.color || '#D4AF37');
+  }
+  const pct = (barIndex / Math.max(1, totalBars - 1)) * 100;
+  return gradientColorAt(c.gradientStops, pct);
+}
+
+// CSS 그라데이션 미리보기 문자열
+function gradientCss(stops) {
+  if (!stops || !stops.length) return '#D4AF37';
+  const sorted = [...stops].sort((a, b) => a.position - b.position);
+  return `linear-gradient(90deg, ${sorted.map((s) => `${s.color} ${s.position}%`).join(', ')})`;
 }
 
 // ─── 어두운 텍스트 색상 → 그림자 자동 약화 ───────────────────
@@ -285,9 +359,14 @@ function drawVisualizer(canvas, c, time) {
 
   // 2) Legacy 그리기 setup
   ctx.save();
-  ctx.fillStyle = c.color || '#D4AF37';
-  ctx.shadowColor = c.color || '#D4AF37';
   ctx.shadowBlur = Math.max(0, c.glow ?? 20);
+  // solid 모드면 전역 stroke/shadow 색 한 번만, gradient 모드면 막대마다 갱신.
+  const isGradient = c.colorMode === 'gradient' && Array.isArray(c.gradientStops) && c.gradientStops.length >= 2;
+  if (!isGradient) {
+    const rgb = hexToRgb(c.color || '#D4AF37');
+    ctx.fillStyle = rgbToCss(rgb);
+    ctx.shadowColor = rgbToCss(rgb);
+  }
 
   const barWidth = Math.max(1, c.barWidth | 0 || 6);
   const barGap = Math.max(0, c.barGap | 0 || 0);
@@ -333,6 +412,15 @@ function drawVisualizer(canvas, c, time) {
     const halfH = barH / 2;
     const r = barWidth / 2;
 
+    // gradient: 좌우 대칭이라 양쪽이 같은 인덱스 i. 가운데에서 가장자리로 갈수록 i 가 커짐.
+    // 좌우를 합친 시각적 mapping 으로는 i=0 이 가운데, i=drawCount-1 이 가장자리.
+    // 가장자리(좌우)~가운데 방향 그라데이션을 원하니 stop 0% = 가운데, 100% = 가장자리.
+    if (isGradient) {
+      const rgb = getBarColor(c, i, drawCount);
+      ctx.fillStyle = rgbToCss(rgb);
+      ctx.shadowColor = rgbToCss(rgb);
+    }
+
     if (c.verticalMode === 'symmetric' && splitGap === 0) {
       // 단일 블록 — 좌우 대칭, 가운데 oy 기준 위/아래 동시
       roundedRect(ctx, ox + i * ew, oy - halfH, barWidth, barH, r);
@@ -374,15 +462,36 @@ function renderProgress(c) {
   </div>`;
 }
 
+function buildTextShadow(c) {
+  if (isDarkColor(c.color)) return 'none';
+  const intensity = c.glowIntensity ?? 1.0;
+  if (intensity <= 0) return 'none';
+  const blur = Math.round(20 * intensity);
+  const alpha = Math.min(1, 0.5 + intensity * 0.3);
+  return `0 0 ${blur}px rgba(212,175,55,${alpha.toFixed(2)})`;
+}
+
+function buildTextDecoration(c) {
+  const parts = [];
+  if (c.underline) parts.push('underline');
+  if (c.strikethrough) parts.push('line-through');
+  return parts.length ? parts.join(' ') : 'none';
+}
+
 function renderTextInner(c) {
-  const shadow = isDarkColor(c.color) ? 'none' : (c.textShadow || 'none');
+  const shadow = buildTextShadow(c);
   return `<div class="text-render" style="
     color: ${c.color || '#FFFFFF'};
     font-size: ${c.fontSize || 72}px;
     font-family: ${c.fontFamily || 'Playfair Display, serif'};
     text-align: ${c.textAlign || 'center'};
     text-shadow: ${shadow};
-    line-height: 1.1;
+    line-height: ${c.lineHeight ?? 1.2};
+    font-weight: ${c.bold ? 700 : 400};
+    font-style: ${c.italic ? 'italic' : 'normal'};
+    text-decoration: ${buildTextDecoration(c)};
+    letter-spacing: ${c.letterSpacing ?? 0}px;
+    text-transform: ${c.textTransform || 'none'};
   ">${escapeHtml(placeholderText(c.content || ''))}</div>`;
 }
 
@@ -641,8 +750,15 @@ function renderProps() {
   wrap.classList.remove('empty');
   let typeFields = '';
   if (c.type === 'text') {
+    const slider = (key, label, min, max, step, val, suffix = '') => `
+      <div class="slider-row">
+        <label>${label}</label>
+        <input type="range" data-prop="${key}" min="${min}" max="${max}" step="${step}" value="${val}" />
+        <span class="val" data-val-for="${key}">${val}${suffix}</span>
+      </div>
+    `;
     typeFields = `
-      <div class="te-prop" style="grid-column: 1 / -1;">
+      <div class="te-prop full">
         <label>Content (변수: {{trackTitle}}, {{trackNumber}}, {{totalTracks}})</label>
         <input type="text" data-prop="content" value="${escapeHtml(c.content || '')}" />
       </div>
@@ -657,17 +773,35 @@ function renderProps() {
         </select>
       </div>
       <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#FFFFFF'}" /></div>
-      <div class="te-prop"><label>Text Align</label>
-        <select data-prop="textAlign">
-          <option value="left" ${c.textAlign === 'left' ? 'selected' : ''}>Left</option>
-          <option value="center" ${(!c.textAlign || c.textAlign === 'center') ? 'selected' : ''}>Center</option>
-          <option value="right" ${c.textAlign === 'right' ? 'selected' : ''}>Right</option>
+      <div class="te-prop">
+        <label>Style</label>
+        <div class="te-toggle-group">
+          <button type="button" class="te-toggle-btn ${c.bold ? 'active' : ''}" data-toggle="bold" style="font-weight:700;">B</button>
+          <button type="button" class="te-toggle-btn ${c.italic ? 'active' : ''}" data-toggle="italic" style="font-style:italic;">I</button>
+          <button type="button" class="te-toggle-btn ${c.underline ? 'active' : ''}" data-toggle="underline" style="text-decoration:underline;">U</button>
+          <button type="button" class="te-toggle-btn ${c.strikethrough ? 'active' : ''}" data-toggle="strikethrough" style="text-decoration:line-through;">S</button>
+        </div>
+      </div>
+      <div class="te-prop">
+        <label>Align</label>
+        <div class="te-toggle-group">
+          <button type="button" class="te-toggle-btn ${c.textAlign === 'left' ? 'active' : ''}" data-align="left">≡ L</button>
+          <button type="button" class="te-toggle-btn ${(!c.textAlign || c.textAlign === 'center') ? 'active' : ''}" data-align="center">≡ C</button>
+          <button type="button" class="te-toggle-btn ${c.textAlign === 'right' ? 'active' : ''}" data-align="right">≡ R</button>
+        </div>
+      </div>
+      <div class="te-prop">
+        <label>Transform</label>
+        <select data-prop="textTransform">
+          <option value="none" ${(!c.textTransform || c.textTransform === 'none') ? 'selected' : ''}>None</option>
+          <option value="uppercase" ${c.textTransform === 'uppercase' ? 'selected' : ''}>UPPER</option>
+          <option value="lowercase" ${c.textTransform === 'lowercase' ? 'selected' : ''}>lower</option>
+          <option value="capitalize" ${c.textTransform === 'capitalize' ? 'selected' : ''}>Capitalize</option>
         </select>
       </div>
-      <div class="te-prop" style="grid-column: 1 / -1;">
-        <label>Text Shadow (글로우)</label>
-        <input type="text" data-prop="textShadow" value="${escapeHtml(c.textShadow || '')}" placeholder="0 0 20px rgba(212,175,55,0.8)" />
-      </div>
+      ${slider('letterSpacing', 'Letter Spacing', -5, 20, 0.5, c.letterSpacing ?? 0, 'px')}
+      ${slider('lineHeight', 'Line Height', 0.8, 3.0, 0.05, c.lineHeight ?? 1.2, '')}
+      ${slider('glowIntensity', 'Glow', 0, 2, 0.05, c.glowIntensity ?? 1.0, '')}
       ${isDarkColor(c.color) ? `<div class="te-prop-warn">⚠ 어두운 텍스트 컬러 — 그림자 자동 비활성. 밝은 색을 권장합니다.</div>` : ''}
     `;
   } else if (c.type === 'image') {
@@ -690,7 +824,6 @@ function renderProps() {
       </div>
     `;
   } else if (c.type === 'visualizer') {
-    // Legacy 13 옵션 — Pos/Opacity 는 공통 grid 에서 처리.
     const slider = (key, label, min, max, step, val, suffix = '') => `
       <div class="slider-row">
         <label>${label}</label>
@@ -698,8 +831,42 @@ function renderProps() {
         <span class="val" data-val-for="${key}">${val}${suffix}</span>
       </div>
     `;
+    const stops = Array.isArray(c.gradientStops) && c.gradientStops.length
+      ? c.gradientStops
+      : [{ position: 0, color: '#FFFFFF' }, { position: 100, color: '#D4AF37' }];
+    const colorBlock = c.colorMode === 'gradient'
+      ? `
+        <div class="te-prop full">
+          <div class="te-radio-row" style="margin-bottom:6px;">
+            <label><input type="radio" name="vmcolor" data-mode="solid" /> Solid</label>
+            <label><input type="radio" name="vmcolor" data-mode="gradient" checked /> Gradient</label>
+          </div>
+          <div class="te-gradient-preview" style="background:${gradientCss(stops)};"></div>
+          <div id="teGradientStops">
+            ${stops.map((s, i) => `
+              <div class="te-stop-row" data-stop-idx="${i}">
+                <input type="number" min="0" max="100" step="1" value="${s.position}" data-stop-pos />
+                <input type="color" value="${s.color}" data-stop-color />
+                <span class="stop-text">${s.color.toUpperCase()} @ ${s.position}%</span>
+                <button type="button" class="te-btn danger" data-stop-del title="삭제">✕</button>
+              </div>
+            `).join('')}
+          </div>
+          <button type="button" class="te-btn" id="teGradientAddBtn" style="margin-top:4px;">+ Add Stop</button>
+        </div>
+      `
+      : `
+        <div class="te-prop">
+          <label>Color Mode</label>
+          <div class="te-radio-row">
+            <label><input type="radio" name="vmcolor" data-mode="solid" checked /> Solid</label>
+            <label><input type="radio" name="vmcolor" data-mode="gradient" /> Gradient</label>
+          </div>
+        </div>
+        <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#D4AF37'}" /></div>
+      `;
     typeFields = `
-      <div class="te-prop full">
+      <div class="te-prop">
         <label>Mode</label>
         <select data-prop="verticalMode">
           <option value="symmetric" ${c.verticalMode === 'symmetric' ? 'selected' : ''}>↕ Symmetric</option>
@@ -707,7 +874,7 @@ function renderProps() {
           <option value="down" ${c.verticalMode === 'down' ? 'selected' : ''}>↓ Down only</option>
         </select>
       </div>
-      <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#D4AF37'}" /></div>
+      ${colorBlock}
       ${slider('glow', 'Glow', 0, 80, 1, c.glow ?? 20, 'px')}
       ${slider('barCount', 'Bar Count', 4, 200, 1, c.barCount ?? 80, '')}
       ${slider('barWidth', 'Bar Width', 1, 30, 1, c.barWidth ?? 6, 'px')}
@@ -718,7 +885,7 @@ function renderProps() {
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
         <label style="color:var(--jazz-gold)">— 주파수 —</label>
       </div>
-      ${slider('sensitivity', 'Sensitivity', 0, 1, 0.005, c.sensitivity ?? 0.15, '')}
+      ${slider('sensitivity', 'Sensitivity', 0, 0.3, 0.005, c.sensitivity ?? 0.15, '')}
       ${slider('smoothing', 'Smoothing', 0, 1, 0.01, c.smoothing ?? 0.85, '')}
       ${slider('midBoost', 'Mid Boost', 0, 10, 0.05, c.midBoost ?? 1.5, '')}
       ${slider('highBoost', 'High Boost', 0, 10, 0.05, c.highBoost ?? 0.8, '')}
@@ -771,6 +938,107 @@ function renderProps() {
         updateComponent(c.id, { src: url });
         renderProps();
       });
+    });
+  }
+
+  // Text — Bold / Italic / Underline / Strikethrough 토글
+  wrap.querySelectorAll('[data-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.toggle;
+      const cur = te.components.find((x) => x.id === c.id);
+      if (!cur) return;
+      updateComponent(cur.id, { [key]: !cur[key] });
+      renderProps();
+    });
+  });
+  // Text — Align 토글
+  wrap.querySelectorAll('[data-align]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      updateComponent(c.id, { textAlign: btn.dataset.align });
+      renderProps();
+    });
+  });
+
+  // Visualizer — Color Mode 라디오
+  wrap.querySelectorAll('input[name="vmcolor"][data-mode]').forEach((r) => {
+    r.addEventListener('change', () => {
+      if (!r.checked) return;
+      const cur = te.components.find((x) => x.id === c.id);
+      if (!cur) return;
+      const mode = r.dataset.mode;
+      const patch = { colorMode: mode };
+      // gradient 로 첫 전환 시 기본 stops 보장
+      if (mode === 'gradient' && (!cur.gradientStops || cur.gradientStops.length < 2)) {
+        patch.gradientStops = [
+          { position: 0, color: '#FFFFFF' },
+          { position: 50, color: cur.color || '#D4AF37' },
+          { position: 100, color: '#A04000' },
+        ];
+      }
+      updateComponent(cur.id, patch);
+      renderProps();
+    });
+  });
+
+  // Visualizer — Gradient stop 편집
+  wrap.querySelectorAll('.te-stop-row').forEach((row) => {
+    const idx = parseInt(row.dataset.stopIdx, 10);
+    const posIn = row.querySelector('[data-stop-pos]');
+    const colIn = row.querySelector('[data-stop-color]');
+    const delBtn = row.querySelector('[data-stop-del]');
+    const updateStop = (patch) => {
+      const cur = te.components.find((x) => x.id === c.id);
+      if (!cur) return;
+      const stops = [...(cur.gradientStops || [])];
+      if (idx < 0 || idx >= stops.length) return;
+      stops[idx] = { ...stops[idx], ...patch };
+      updateComponent(cur.id, { gradientStops: stops });
+      renderProps();
+    };
+    posIn?.addEventListener('input', () => {
+      const v = Math.max(0, Math.min(100, parseInt(posIn.value, 10) || 0));
+      updateStop({ position: v });
+    });
+    colIn?.addEventListener('input', () => updateStop({ color: colIn.value }));
+    delBtn?.addEventListener('click', () => {
+      const cur = te.components.find((x) => x.id === c.id);
+      if (!cur) return;
+      const stops = [...(cur.gradientStops || [])];
+      if (stops.length <= 2) {
+        toast('Gradient stop 은 최소 2개는 유지해야 합니다', 'info');
+        return;
+      }
+      stops.splice(idx, 1);
+      updateComponent(cur.id, { gradientStops: stops });
+      renderProps();
+    });
+  });
+
+  // Visualizer — Add Stop
+  const addStopBtn = wrap.querySelector('#teGradientAddBtn');
+  if (addStopBtn) {
+    addStopBtn.addEventListener('click', () => {
+      const cur = te.components.find((x) => x.id === c.id);
+      if (!cur) return;
+      const stops = [...(cur.gradientStops || [])].sort((a, b) => a.position - b.position);
+      // 가장 큰 gap 의 가운데에 새 stop 삽입
+      let bestGap = 0, bestPos = 50, bestColor = '#FFFFFF';
+      for (let i = 0; i < stops.length - 1; i++) {
+        const gap = stops[i + 1].position - stops[i].position;
+        if (gap > bestGap) {
+          bestGap = gap;
+          bestPos = Math.round((stops[i].position + stops[i + 1].position) / 2);
+          // 두 색의 중간
+          const c1 = hexToRgb(stops[i].color), c2 = hexToRgb(stops[i + 1].color);
+          const r = Math.round((c1.r + c2.r) / 2);
+          const g = Math.round((c1.g + c2.g) / 2);
+          const b = Math.round((c1.b + c2.b) / 2);
+          bestColor = `#${[r, g, b].map((x) => x.toString(16).padStart(2, '0')).join('')}`;
+        }
+      }
+      stops.push({ position: bestPos, color: bestColor });
+      updateComponent(cur.id, { gradientStops: stops });
+      renderProps();
     });
   }
 }

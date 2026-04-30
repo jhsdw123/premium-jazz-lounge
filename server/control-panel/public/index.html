@@ -601,20 +601,24 @@
     .ai-loading { color: var(--text-dim); font-size: 12px; margin-top: 6px; }
 
     /* ─── Template Editor ─── */
+    /* main 의 max-width 제약을 풀어서 캔버스가 가로로 펼쳐지게.
+       작업 영역만 풀폭으로 쓰고 다른 탭은 그대로. */
+    main:has(#tab-templates.active) { max-width: none; padding-right: 18px; padding-left: 18px; }
     .te-grid {
       display: grid;
-      grid-template-columns: 300px 1fr 320px;
+      grid-template-columns: 300px minmax(720px, 1fr);
       gap: 12px;
       align-items: start;
     }
-    @media (max-width: 1280px) {
+    .te-canvas-col { display: flex; flex-direction: column; gap: 12px; min-width: 720px; }
+    @media (max-width: 1080px) {
       .te-grid { grid-template-columns: 280px 1fr; }
-      .te-props-col { grid-column: 1 / -1; }
+      .te-canvas-col { min-width: 0; }
     }
     @media (max-width: 800px) {
       .te-grid { grid-template-columns: 1fr; }
+      .te-canvas-col { min-width: 0; }
     }
-    .te-props-col { position: sticky; top: 14px; }
     .te-side {
       display: flex; flex-direction: column; gap: 12px;
     }
@@ -714,13 +718,11 @@
     .te-canvas-frame {
       position: relative;
       width: 100%;
-      max-width: 1280px;
       aspect-ratio: 16 / 9;
       background: #000;
       border: 1px solid var(--border-strong);
       border-radius: 4px;
       overflow: hidden;
-      margin: 0 auto;
     }
     .te-canvas-bg {
       position: absolute; inset: 0;
@@ -828,7 +830,7 @@
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 12px 14px;
-      max-height: calc(100vh - 60px);
+      max-height: 320px;
       overflow-y: auto;
     }
     .te-props.empty {
@@ -841,14 +843,16 @@
       color: var(--jazz-gold);
       text-transform: uppercase; letter-spacing: 0.06em;
     }
+    /* 하단 배치 — 가로로 넓으니 2~4 컬럼 자동 */
     .te-prop-grid {
-      display: grid; grid-template-columns: 1fr 1fr;
-      gap: 8px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 8px 14px;
     }
     .te-prop-grid .te-prop.full { grid-column: 1 / -1; }
+    .te-prop-grid .te-prop.span2 { grid-column: span 2; }
     .te-prop-grid .slider-row {
-      grid-column: 1 / -1;
-      display: grid; grid-template-columns: 110px 1fr 50px;
+      display: grid; grid-template-columns: 100px 1fr 50px;
       gap: 6px; align-items: center;
     }
     .te-prop-grid .slider-row label {
@@ -887,6 +891,42 @@
       padding: 6px 10px;
       border-radius: 3px;
     }
+    /* Toggle group — Bold/Italic/Underline/Strike, Align */
+    .te-toggle-group {
+      display: inline-flex; gap: 0;
+      border: 1px solid var(--border); border-radius: 4px;
+      overflow: hidden;
+    }
+    .te-toggle-btn {
+      background: var(--bg-input); color: var(--text-dim);
+      border: none; padding: 5px 10px;
+      font-family: inherit; font-size: 12px; cursor: pointer;
+      border-right: 1px solid var(--border);
+    }
+    .te-toggle-btn:last-child { border-right: none; }
+    .te-toggle-btn:hover { background: var(--bg-hover); color: var(--text); }
+    .te-toggle-btn.active { background: var(--jazz-gold-dim); color: #000; font-weight: 600; }
+    /* Radio inline */
+    .te-radio-row {
+      display: inline-flex; gap: 12px; align-items: center;
+      font-size: 12px;
+    }
+    .te-radio-row label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+    .te-radio-row input[type="radio"] { accent-color: var(--jazz-gold); }
+    /* Gradient stops list */
+    .te-gradient-preview {
+      width: 100%; height: 18px; border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      margin: 4px 0 6px;
+    }
+    .te-stop-row {
+      display: grid; grid-template-columns: 60px 32px 1fr 24px;
+      gap: 4px; align-items: center; margin-bottom: 4px;
+    }
+    .te-stop-row input[type="number"] { width: 100%; }
+    .te-stop-row input[type="color"] { width: 100%; height: 24px; padding: 0; cursor: pointer; }
+    .te-stop-row .stop-text { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+    .te-stop-row .te-btn { padding: 3px 6px; font-size: 11px; }
 
     /* Toaster */
     #toaster {
@@ -1210,21 +1250,19 @@
           </div>
         </div>
 
-        <!-- 가운데: Canvas -->
-        <div class="te-canvas-wrap">
-          <div class="te-canvas-meta">
-            <span>편집 중: <span class="strong" id="teEditingName">(새 템플릿)</span></span>
-            <span style="margin-left:auto;">캔버스: <span class="strong">1920 × 1080</span></span>
-            <span>컴포넌트: <span class="strong" id="teCompCount">0</span></span>
+        <!-- 우측 (가로 큼직): Canvas + 그 밑에 속성 패널 -->
+        <div class="te-canvas-col">
+          <div class="te-canvas-wrap">
+            <div class="te-canvas-meta">
+              <span>편집 중: <span class="strong" id="teEditingName">(새 템플릿)</span></span>
+              <span style="margin-left:auto;">캔버스: <span class="strong">1920 × 1080</span></span>
+              <span>컴포넌트: <span class="strong" id="teCompCount">0</span></span>
+            </div>
+            <div class="te-canvas-frame" id="teCanvasFrame">
+              <div class="te-canvas-bg empty" id="teCanvasBg"></div>
+              <div class="te-canvas-inner" id="teCanvasInner"></div>
+            </div>
           </div>
-          <div class="te-canvas-frame" id="teCanvasFrame">
-            <div class="te-canvas-bg empty" id="teCanvasBg"></div>
-            <div class="te-canvas-inner" id="teCanvasInner"></div>
-          </div>
-        </div>
-
-        <!-- 우측: Properties -->
-        <div class="te-props-col">
           <div class="te-props empty" id="teProps">
             컴포넌트를 클릭하면 여기서 속성을 편집합니다.
           </div>
