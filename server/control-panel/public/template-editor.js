@@ -91,15 +91,24 @@ function defaultsFor(type) {
     case 'image':
       return { ...base, src: '', fit: 'contain', width: 400, height: 400 };
     case 'visualizer':
+      // Legacy 13 옵션 (기본값은 legacy original).
       return {
         ...base,
-        width: 1200, height: 200,
-        x: (CANVAS_W - 1200) / 2, y: 800,
-        style: 'bars',
+        width: 1200, height: 240,
+        x: (CANVAS_W - 1200) / 2, y: 760,
+        verticalMode: 'symmetric',  // 'symmetric' | 'up' | 'down' (legacy vMirror 0/1/2)
+        barWidth: 6,
+        barGap: 2,
+        barCount: 80,
+        sensitivity: 0.15,          // legacy barGain
+        smoothing: 0.85,
+        midBoost: 1.5,
+        highBoost: 0.8,
+        centerCut: 0,               // Low Cut — FFT bin offset
+        splitGap: 0,                // 위/아래 미러 사이 수직 gap (px)
+        trimStart: 3,               // FFT bin trim
+        glow: 20,
         color: '#D4AF37',
-        glowIntensity: 0.6,
-        barCount: 64,
-        barGap: 4,
       };
     case 'progress':
       return {
@@ -154,19 +163,32 @@ function loadConfigToCanvas(cfg) {
   if (cfg?.visualizer) {
     const v = cfg.visualizer;
     const w = v.width ?? 1200;
-    const h = v.height ?? 200;
+    const h = v.height ?? 240;
+    // legacy vMirror 0/1/2 → verticalMode 'symmetric'/'up'/'down'
+    const vmMap = ['symmetric', 'up', 'down'];
+    const verticalMode = typeof v.vMirror === 'number'
+      ? (vmMap[v.vMirror] || 'symmetric')
+      : (v.verticalMode || 'symmetric');
     result.push({
       id: nextId(),
       type: 'visualizer',
       x: (v.position?.x ?? CANVAS_W / 2) - w / 2,
-      y: (v.position?.y ?? 800) - h / 2,
+      y: (v.position?.y ?? 880) - h / 2,
       width: w, height: h,
       rotation: 0, opacity: 1.0,
-      style: v.style || 'bars',
+      verticalMode,
+      barWidth: v.barWidth ?? 6,
+      barGap: v.barGap ?? 2,
+      barCount: v.barCount ?? 80,
+      sensitivity: v.sensitivity ?? v.barGain ?? 0.15,
+      smoothing: v.smoothing ?? 0.85,
+      midBoost: v.midBoost ?? 1.5,
+      highBoost: v.highBoost ?? 0.8,
+      centerCut: v.centerCut ?? 0,
+      splitGap: v.splitGap ?? 0,
+      trimStart: v.trimStart ?? 3,
+      glow: v.glow ?? (typeof v.glowIntensity === 'number' ? Math.round(v.glowIntensity * 30) : 20),
       color: v.color || '#D4AF37',
-      glowIntensity: v.glowIntensity ?? 0.6,
-      barCount: v.barCount ?? 64,
-      barGap: v.barGap ?? 4,
     });
   }
   if (cfg?.progressBar) {
@@ -203,26 +225,147 @@ function placeholderText(content) {
     .replace(/\{\{totalTracks\}\}/g, '14');
 }
 
+// Visualizer 는 canvas 로 그림. inner HTML 은 빈 캔버스만 — 실제 그리기는 tickVisualizers.
 function renderBars(c) {
-  const count = Math.max(1, Math.min(120, parseInt(c.barCount, 10) || 64));
-  const gap = Math.max(0, parseInt(c.barGap, 10) || 4);
-  const totalGap = gap * (count - 1);
-  const innerW = c.width - totalGap;
-  const barW = Math.max(1, innerW / count);
-  const colorRgba = (c.color || '#D4AF37');
-  let html = `<div class="te-comp-visualizer" style="
-    color: ${colorRgba};
-    width: 100%; height: 100%;
-    filter: drop-shadow(0 0 ${4 + (c.glowIntensity ?? 0.6) * 6}px ${colorRgba});
-  ">`;
-  for (let i = 0; i < count; i++) {
-    // pseudo-random heights (균등하지 않게 — 미리보기 느낌)
-    const seed = (i * 9301 + 49297) % 233280 / 233280;
-    const h = 20 + Math.round(seed * 80);
-    html += `<span class="te-bar" style="width:${barW}px; height:${h}%; margin-right:${i === count - 1 ? 0 : gap}px;"></span>`;
+  return `<canvas class="te-vis-canvas" data-vis-id="${c.id}" style="width:100%;height:100%;display:block;"></canvas>`;
+}
+
+// 컴포넌트별 smoothing 상태. barCount 변경 시 길이 다시 맞춤.
+const visState = new Map(); // id → { lastData: Float32Array, raw: Float32Array, len: number }
+
+function getVisState(c) {
+  const need = Math.max(1, c.barCount | 0);
+  let s = visState.get(c.id);
+  if (!s || s.len !== need) {
+    s = { lastData: new Float32Array(need), raw: new Float32Array(need), len: need };
+    visState.set(c.id, s);
   }
-  html += `</div>`;
-  return html;
+  return s;
+}
+
+function roundedRect(ctx, x, y, w, h, r) {
+  if (w <= 0 || h <= 0) return;
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawVisualizer(canvas, c, time) {
+  // canvas 의 백킹 픽셀 크기 = 컴포넌트 박스 크기 (DPR 무시 — Editor 미리보기 우선)
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (w === 0 || h === 0) return;
+  if (canvas.width !== w) canvas.width = w;
+  if (canvas.height !== h) canvas.height = h;
+
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, w, h);
+
+  const state = getVisState(c);
+  const N = state.len;
+
+  // 1) Fake spectrum — sine + 약간 랜덤. 부드럽게 oscillate.
+  const t = time * 0.001;
+  for (let i = 0; i < N; i++) {
+    const base = 0.45 + 0.35 * Math.sin(i * 0.28 + t * 1.2);
+    const wave2 = 0.20 * Math.sin(i * 0.7 + t * 0.7);
+    const noise = (Math.random() - 0.5) * 0.18;
+    state.raw[i] = Math.max(0.05, Math.min(1, base + wave2 + noise));
+  }
+
+  // 2) Legacy 그리기 setup
+  ctx.save();
+  ctx.fillStyle = c.color || '#D4AF37';
+  ctx.shadowColor = c.color || '#D4AF37';
+  ctx.shadowBlur = Math.max(0, c.glow ?? 20);
+
+  const barWidth = Math.max(1, c.barWidth | 0 || 6);
+  const barGap = Math.max(0, c.barGap | 0 || 0);
+  const ew = barWidth + barGap;
+  const splitGap = Math.max(0, c.splitGap | 0 || 0);
+  const halfSplit = splitGap / 2;
+  const ox = w / 2;
+  const oy = h / 2;
+
+  const sensitivity = Math.max(0, c.sensitivity ?? 0.15);
+  const smoothing = Math.max(0, Math.min(0.999, c.smoothing ?? 0.85));
+  const midBoost = c.midBoost ?? 1.5;
+  const highBoost = c.highBoost ?? 0.8;
+  const centerCut = Math.max(0, c.centerCut | 0);
+  // trimStart 는 FFT bin offset — Editor 미리보기에서는 raw 가 fake 라 직접 영향 약함.
+  // legacy 식을 흉내 내기 위해 raw 인덱스에 +trimStart 만큼 시프트해서 다른 영역 sample.
+  const trimStart = Math.max(0, c.trimStart | 0);
+
+  // 한쪽(반쪽) 에 들어갈 수 있는 max 막대 수
+  const maxHalfBars = Math.max(1, Math.floor((w / 2) / Math.max(1, ew)));
+  const drawCount = Math.min(N, maxHalfBars);
+
+  // 영상 막대 max 높이 — legacy 는 (sum/count)*2000*barGain*eq 식.
+  // Editor 에선 raw 를 0~1 로 만들고 동일 식 사용. height 는 컴포넌트 height 의 80% 클램프.
+  const heightCap = h * 0.8;
+
+  for (let i = 0; i < drawCount; i++) {
+    const denom = c.barCount + centerCut - 1;
+    const percent = denom > 0 ? (i + centerCut) / denom : 0;
+    const eq = midBoost * (1 - percent) + highBoost * percent;
+    // raw 인덱스에 trimStart 시프트 (out-of-range 면 wrap)
+    const rawIdx = (i + trimStart) % N;
+    const adjusted = state.raw[rawIdx] * 2000 * sensitivity * eq;
+
+    // smoothing — legacy: rising 은 빠르게 (prev*0.3 + raw*0.7), 떨어질 때만 smoothing
+    const prev = state.lastData[i];
+    state.lastData[i] = adjusted > prev
+      ? prev * 0.3 + adjusted * 0.7
+      : prev * smoothing + adjusted * (1 - smoothing);
+
+    let barH = Math.min(state.lastData[i], heightCap);
+    if (barH < 2) barH = 2;
+    const halfH = barH / 2;
+    const r = barWidth / 2;
+
+    if (c.verticalMode === 'symmetric' && splitGap === 0) {
+      // 단일 블록 — 좌우 대칭, 가운데 oy 기준 위/아래 동시
+      roundedRect(ctx, ox + i * ew, oy - halfH, barWidth, barH, r);
+      roundedRect(ctx, ox - (i + 1) * ew, oy - halfH, barWidth, barH, r);
+    } else {
+      // splitGap>0 또는 vMirror up/down → 위/아래 분리
+      if (c.verticalMode !== 'down') {
+        roundedRect(ctx, ox + i * ew, oy - halfSplit - halfH, barWidth, halfH, r);
+        roundedRect(ctx, ox - (i + 1) * ew, oy - halfSplit - halfH, barWidth, halfH, r);
+      }
+      if (c.verticalMode !== 'up') {
+        roundedRect(ctx, ox + i * ew, oy + halfSplit, barWidth, halfH, r);
+        roundedRect(ctx, ox - (i + 1) * ew, oy + halfSplit, barWidth, halfH, r);
+      }
+    }
+  }
+  ctx.restore();
+}
+
+// 50ms 마다 모든 visualizer 를 갱신.
+let _visTickerStarted = false;
+function startVisualizerTicker() {
+  if (_visTickerStarted) return;
+  _visTickerStarted = true;
+  setInterval(() => {
+    if (!te.initialized) return;
+    const now = performance.now();
+    for (const c of te.components) {
+      if (c.type !== 'visualizer') continue;
+      const cv = document.querySelector(`#teCanvasInner [data-id="${c.id}"] canvas[data-vis-id="${c.id}"]`);
+      if (cv) drawVisualizer(cv, c, now);
+    }
+  }, 50);
 }
 
 function renderProgress(c) {
@@ -377,8 +520,14 @@ function bindComponentInteractions(el, c) {
         const cur = te.components.find((x) => x.id === c.id);
         if (!cur) return;
         const s = scale();
+        const oldW = cur.width;
         cur.width = Math.max(20, Math.round(cur.width + ev.deltaRect.width / s));
         cur.height = Math.max(10, Math.round(cur.height + ev.deltaRect.height / s));
+        // Text 는 폭에 비례해 폰트 크기 함께 스케일
+        if (cur.type === 'text' && oldW > 0 && cur.width !== oldW) {
+          const factor = cur.width / oldW;
+          cur.fontSize = Math.max(8, Math.round((cur.fontSize || 72) * factor));
+        }
         applyComponentTransform(el, cur);
         // 비주얼라이저는 width/height 변경 시 bar 다시 그리기
         if (cur.type === 'visualizer' || cur.type === 'progress' || cur.type === 'image' || cur.type === 'text') {
@@ -403,6 +552,8 @@ function bindComponentInteractions(el, c) {
           while (newInner.firstChild) {
             el.insertBefore(newInner.firstChild, el.firstChild);
           }
+          // Text 의 .text-render fontSize 를 화면 스케일에 맞춤 (rebuild 후 한 번 더)
+          applyComponentTransform(el, cur);
         }
         if (te.selectedId === cur.id) renderProps();
       },
@@ -435,11 +586,9 @@ function updateComponent(id, patch) {
   const idx = te.components.findIndex((c) => c.id === id);
   if (idx < 0) return;
   te.components[idx] = { ...te.components[idx], ...patch };
-  // 시각 갱신 — transform 만 바뀐 게 아니라면 inner re-render
   const el = $(`#teCanvasInner [data-id="${id}"]`);
   if (!el) return;
-  // inner 다시 그리기
-  const old = el.querySelectorAll('.te-del, .te-handle, .te-opacity');
+  // inner 다시 그리기 (control 들 보존)
   [...el.children].forEach((ch) => {
     if (!ch.classList.contains('te-del') && !ch.classList.contains('te-handle') && !ch.classList.contains('te-opacity')) {
       ch.remove();
@@ -451,11 +600,13 @@ function updateComponent(id, patch) {
   while (inner.firstChild) {
     el.insertBefore(inner.firstChild, el.firstChild);
   }
+  // .text-render fontSize 스케일 + 좌표 재적용 (rebuild 후)
   applyComponentTransform(el, te.components[idx]);
 }
 
 function removeComponent(id) {
   te.components = te.components.filter((c) => c.id !== id);
+  visState.delete(id);
   if (te.selectedId === id) te.selectedId = null;
   renderCanvas();
 }
@@ -539,16 +690,38 @@ function renderProps() {
       </div>
     `;
   } else if (c.type === 'visualizer') {
+    // Legacy 13 옵션 — Pos/Opacity 는 공통 grid 에서 처리.
+    const slider = (key, label, min, max, step, val, suffix = '') => `
+      <div class="slider-row">
+        <label>${label}</label>
+        <input type="range" data-prop="${key}" min="${min}" max="${max}" step="${step}" value="${val}" />
+        <span class="val" data-val-for="${key}">${val}${suffix}</span>
+      </div>
+    `;
     typeFields = `
-      <div class="te-prop"><label>Style</label>
-        <select data-prop="style">
-          <option value="bars" selected>Bars</option>
+      <div class="te-prop full">
+        <label>Mode</label>
+        <select data-prop="verticalMode">
+          <option value="symmetric" ${c.verticalMode === 'symmetric' ? 'selected' : ''}>↕ Symmetric</option>
+          <option value="up" ${c.verticalMode === 'up' ? 'selected' : ''}>↑ Up only</option>
+          <option value="down" ${c.verticalMode === 'down' ? 'selected' : ''}>↓ Down only</option>
         </select>
       </div>
       <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#D4AF37'}" /></div>
-      <div class="te-prop"><label>Bar Count</label><input type="number" data-prop="barCount" value="${c.barCount || 64}" min="4" max="120" /></div>
-      <div class="te-prop"><label>Bar Gap</label><input type="number" data-prop="barGap" value="${c.barGap || 4}" min="0" max="40" /></div>
-      <div class="te-prop"><label>Glow Intensity (0-1)</label><input type="number" step="0.1" data-prop="glowIntensity" value="${c.glowIntensity ?? 0.6}" min="0" max="2" /></div>
+      ${slider('glow', 'Glow', 0, 80, 1, c.glow ?? 20, 'px')}
+      ${slider('barCount', 'Bar Count', 4, 200, 1, c.barCount ?? 80, '')}
+      ${slider('barWidth', 'Bar Width', 1, 30, 1, c.barWidth ?? 6, 'px')}
+      ${slider('barGap', 'Bar Gap', 0, 30, 1, c.barGap ?? 2, 'px')}
+      ${slider('splitGap', 'Split Gap', 0, 200, 1, c.splitGap ?? 0, 'px')}
+      ${slider('centerCut', 'Low Cut', 0, 200, 1, c.centerCut ?? 0, '')}
+      ${slider('trimStart', 'Trim Start', 0, 50, 1, c.trimStart ?? 3, '')}
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 주파수 —</label>
+      </div>
+      ${slider('sensitivity', 'Sensitivity', 0, 1, 0.005, c.sensitivity ?? 0.15, '')}
+      ${slider('smoothing', 'Smoothing', 0, 1, 0.01, c.smoothing ?? 0.85, '')}
+      ${slider('midBoost', 'Mid Boost', 0, 10, 0.05, c.midBoost ?? 1.5, '')}
+      ${slider('highBoost', 'High Boost', 0, 10, 0.05, c.highBoost ?? 0.8, '')}
     `;
   } else if (c.type === 'progress') {
     typeFields = `
@@ -578,8 +751,15 @@ function renderProps() {
     inp.addEventListener('input', () => {
       const prop = inp.dataset.prop;
       let val = inp.value;
-      if (inp.type === 'number') val = parseFloat(val);
-      if (Number.isNaN(val) && inp.type === 'number') return;
+      const numericInput = inp.type === 'number' || inp.type === 'range';
+      if (numericInput) val = parseFloat(val);
+      if (Number.isNaN(val) && numericInput) return;
+      // 슬라이더 값 표시 갱신
+      const valEl = wrap.querySelector(`[data-val-for="${prop}"]`);
+      if (valEl) {
+        const suffix = valEl.textContent.replace(/^[\d.\-]+/, '') || '';
+        valEl.textContent = `${val}${suffix}`;
+      }
       updateComponent(c.id, { [prop]: val });
     });
   });
@@ -800,6 +980,7 @@ async function templatesOnEnter() {
     te.initialized = true;
     await refreshTemplateList();
     renderCanvas();
+    startVisualizerTicker();
   } else {
     // 재진입 시 리스트 만 갱신 (다른 탭에서 변경 가능성)
     refreshTemplateList();

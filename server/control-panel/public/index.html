@@ -603,11 +603,18 @@
     /* ─── Template Editor ─── */
     .te-grid {
       display: grid;
-      grid-template-columns: 320px 1fr;
-      gap: 14px;
+      grid-template-columns: 300px 1fr 320px;
+      gap: 12px;
       align-items: start;
     }
-    @media (max-width: 1080px) { .te-grid { grid-template-columns: 1fr; } }
+    @media (max-width: 1280px) {
+      .te-grid { grid-template-columns: 280px 1fr; }
+      .te-props-col { grid-column: 1 / -1; }
+    }
+    @media (max-width: 800px) {
+      .te-grid { grid-template-columns: 1fr; }
+    }
+    .te-props-col { position: sticky; top: 14px; }
     .te-side {
       display: flex; flex-direction: column; gap: 12px;
     }
@@ -821,7 +828,8 @@
       border: 1px solid var(--border);
       border-radius: 8px;
       padding: 12px 14px;
-      margin-top: 12px;
+      max-height: calc(100vh - 60px);
+      overflow-y: auto;
     }
     .te-props.empty {
       text-align: center; color: var(--text-muted);
@@ -834,8 +842,25 @@
       text-transform: uppercase; letter-spacing: 0.06em;
     }
     .te-prop-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      display: grid; grid-template-columns: 1fr 1fr;
       gap: 8px;
+    }
+    .te-prop-grid .te-prop.full { grid-column: 1 / -1; }
+    .te-prop-grid .slider-row {
+      grid-column: 1 / -1;
+      display: grid; grid-template-columns: 110px 1fr 50px;
+      gap: 6px; align-items: center;
+    }
+    .te-prop-grid .slider-row label {
+      font-size: 10px; color: var(--text-dim);
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .te-prop-grid .slider-row input[type="range"] {
+      width: 100%; accent-color: var(--jazz-gold);
+    }
+    .te-prop-grid .slider-row .val {
+      font-size: 11px; color: var(--jazz-gold);
+      font-variant-numeric: tabular-nums; text-align: right;
     }
     .te-prop {
       display: flex; flex-direction: column; gap: 3px;
@@ -1185,19 +1210,21 @@
           </div>
         </div>
 
-        <!-- 우측: Canvas + Properties -->
-        <div>
-          <div class="te-canvas-wrap">
-            <div class="te-canvas-meta">
-              <span>편집 중: <span class="strong" id="teEditingName">(새 템플릿)</span></span>
-              <span style="margin-left:auto;">캔버스: <span class="strong">1920 × 1080</span></span>
-              <span>컴포넌트: <span class="strong" id="teCompCount">0</span></span>
-            </div>
-            <div class="te-canvas-frame" id="teCanvasFrame">
-              <div class="te-canvas-bg empty" id="teCanvasBg"></div>
-              <div class="te-canvas-inner" id="teCanvasInner"></div>
-            </div>
+        <!-- 가운데: Canvas -->
+        <div class="te-canvas-wrap">
+          <div class="te-canvas-meta">
+            <span>편집 중: <span class="strong" id="teEditingName">(새 템플릿)</span></span>
+            <span style="margin-left:auto;">캔버스: <span class="strong">1920 × 1080</span></span>
+            <span>컴포넌트: <span class="strong" id="teCompCount">0</span></span>
           </div>
+          <div class="te-canvas-frame" id="teCanvasFrame">
+            <div class="te-canvas-bg empty" id="teCanvasBg"></div>
+            <div class="te-canvas-inner" id="teCanvasInner"></div>
+          </div>
+        </div>
+
+        <!-- 우측: Properties -->
+        <div class="te-props-col">
           <div class="te-props empty" id="teProps">
             컴포넌트를 클릭하면 여기서 속성을 편집합니다.
           </div>
