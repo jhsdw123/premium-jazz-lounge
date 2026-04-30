@@ -10,7 +10,8 @@ export const TrackInput = z.object({
 });
 export type TTrackInput = z.infer<typeof TrackInput>;
 
-// Phase 4-A: 느슨한 정의. Phase 4-C 에서 본격 z.object({...}) 로 좁힘.
+// Template config — 옛/새 schema 모두 지원해야 하므로 loose. adaptTemplate 가
+// 양쪽 모두 새 schema (canvas + components[]) 로 정규화.
 export const TemplateConfig = z.any();
 export type TTemplateConfig = z.infer<typeof TemplateConfig>;
 

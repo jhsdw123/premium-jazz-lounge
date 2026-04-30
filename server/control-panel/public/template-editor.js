@@ -1290,9 +1290,11 @@ async function refreshTemplateList() {
 
 // ─── 갤러리 / 리스트 모드 ────────────────────────────────────
 const VIEW_MODE_KEY = 'pjl.te.viewMode';
+const BG_MODE_KEY = 'pjl.te.galleryBgMode';
 
 const gallery = {
   mode: localStorage.getItem(VIEW_MODE_KEY) || 'list',
+  bgMode: localStorage.getItem(BG_MODE_KEY) || 'image',  // 'image' | 'dark' | 'light'
   imgCache: new Map(),       // url → { img: Image, ready: bool }
   observer: null,            // IntersectionObserver — 화면 진입 시점에만 카드 그리기
   drawnTids: new Set(),      // 이미 그린 카드 id (캐싱)
@@ -1300,10 +1302,19 @@ const gallery = {
 
 function applyModeToggleUI() {
   const wrap = $('#teModeToggle');
-  if (!wrap) return;
-  wrap.querySelectorAll('button').forEach((b) => {
-    b.classList.toggle('active', b.dataset.mode === gallery.mode);
-  });
+  if (wrap) {
+    wrap.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.mode === gallery.mode);
+    });
+  }
+  // 배경 토글은 갤러리 모드에서만 표시
+  const bgWrap = $('#teGalleryBgToggle');
+  if (bgWrap) {
+    bgWrap.hidden = gallery.mode !== 'gallery';
+    bgWrap.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.bgmode === gallery.bgMode);
+    });
+  }
 }
 
 function bindModeToggle() {
@@ -1312,6 +1323,16 @@ function bindModeToggle() {
       gallery.mode = b.dataset.mode;
       localStorage.setItem(VIEW_MODE_KEY, gallery.mode);
       applyModeToggleUI();
+      renderTemplateList();
+    });
+  });
+  $('#teGalleryBgToggle')?.querySelectorAll('button').forEach((b) => {
+    b.addEventListener('click', () => {
+      gallery.bgMode = b.dataset.bgmode;
+      localStorage.setItem(BG_MODE_KEY, gallery.bgMode);
+      applyModeToggleUI();
+      // 모든 카드 썸네일 재드로우 (캐시 무효화)
+      gallery.drawnTids.clear();
       renderTemplateList();
     });
   });
@@ -1479,35 +1500,43 @@ function drawCardThumbnail(canvas, template) {
   const ctx = canvas.getContext('2d');
   const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
-  // 배경
-  ctx.fillStyle = '#0A0A0A';
-  ctx.fillRect(0, 0, W, H);
-  if (template.background_image_url) {
-    const img = loadGalleryImage(template.background_image_url, () => {
-      // 이미지 로드 후 다시 그리기 — 카드가 아직 DOM 에 있는지 확인
-      const card = document.querySelector(`.te-tcard[data-tid="${template.id}"]`);
-      if (card) {
-        const cv = card.querySelector('canvas.te-tcard-thumb');
-        if (cv) drawCardThumbnail(cv, template);
-      }
-    });
-    if (img) {
-      // cover 핏 — 비율 맞춰 채우고 잘라냄
-      const ar = img.naturalWidth / img.naturalHeight;
-      const target = W / H;
-      let dw = W, dh = H, dx = 0, dy = 0;
-      if (ar > target) { dw = H * ar; dx = (W - dw) / 2; }
-      else { dh = W / ar; dy = (H - dh) / 2; }
-      ctx.drawImage(img, dx, dy, dw, dh);
-    } else {
-      // 로딩 중 — 체크 패턴
-      ctx.fillStyle = '#161616';
-      ctx.fillRect(0, 0, W, H);
-      ctx.fillStyle = '#0E0E0E';
-      const cs = 8;
-      for (let y = 0; y < H; y += cs) {
-        for (let x = (y / cs) % 2 === 0 ? 0 : cs; x < W; x += cs * 2) {
-          ctx.fillRect(x, y, cs, cs);
+
+  // 배경 — gallery.bgMode 분기
+  if (gallery.bgMode === 'dark') {
+    ctx.fillStyle = '#0A0A0A';
+    ctx.fillRect(0, 0, W, H);
+  } else if (gallery.bgMode === 'light') {
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, W, H);
+  } else {
+    // image 모드 — 템플릿의 배경 이미지 사용
+    ctx.fillStyle = '#0A0A0A';
+    ctx.fillRect(0, 0, W, H);
+    if (template.background_image_url) {
+      const img = loadGalleryImage(template.background_image_url, () => {
+        const card = document.querySelector(`.te-tcard[data-tid="${template.id}"]`);
+        if (card) {
+          const cv = card.querySelector('canvas.te-tcard-thumb');
+          if (cv) drawCardThumbnail(cv, template);
+        }
+      });
+      if (img) {
+        const ar = img.naturalWidth / img.naturalHeight;
+        const target = W / H;
+        let dw = W, dh = H, dx = 0, dy = 0;
+        if (ar > target) { dw = H * ar; dx = (W - dw) / 2; }
+        else { dh = W / ar; dy = (H - dh) / 2; }
+        ctx.drawImage(img, dx, dy, dw, dh);
+      } else {
+        // 로딩 중 — 체크 패턴
+        ctx.fillStyle = '#161616';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = '#0E0E0E';
+        const cs = 8;
+        for (let y = 0; y < H; y += cs) {
+          for (let x = (y / cs) % 2 === 0 ? 0 : cs; x < W; x += cs * 2) {
+            ctx.fillRect(x, y, cs, cs);
+          }
         }
       }
     }
