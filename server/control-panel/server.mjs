@@ -943,6 +943,196 @@ app.post('/api/titles/bulk-generate', async (req, res) => {
   }
 });
 
+// ─── Templates: CRUD + duplicate (Phase 4-A) ─────────────────────────────
+
+app.get('/api/templates', async (_req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('pjl_templates')
+      .select('id, name, description, is_default, config_json, thumbnail_url, use_count, created_at, updated_at')
+      .order('is_default', { ascending: false })
+      .order('use_count', { ascending: false })
+      .order('id', { ascending: true });
+    if (error) throw error;
+    res.json({ ok: true, templates: data || [] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/templates/:id', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    if (id == null) return res.status(400).json({ ok: false, error: 'invalid id' });
+    const { data, error } = await supabase
+      .from('pjl_templates')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: 'template not found' });
+    res.json({ ok: true, template: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/templates', async (req, res) => {
+  try {
+    const { name, description = null, config_json, is_default = false } = req.body || {};
+    if (!name || typeof name !== 'string') {
+      return res.status(400).json({ ok: false, error: 'name 필수' });
+    }
+    if (!config_json || typeof config_json !== 'object') {
+      return res.status(400).json({ ok: false, error: 'config_json 객체 필수' });
+    }
+
+    // is_default 켜면 기존 default 들 모두 false
+    if (is_default) {
+      const { error: uerr } = await supabase
+        .from('pjl_templates')
+        .update({ is_default: false })
+        .eq('is_default', true);
+      if (uerr) throw uerr;
+    }
+
+    const { data, error } = await supabase
+      .from('pjl_templates')
+      .insert({ name: name.trim(), description, config_json, is_default: !!is_default })
+      .select('*')
+      .single();
+    if (error) throw error;
+    res.json({ ok: true, template: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.put('/api/templates/:id', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    if (id == null) return res.status(400).json({ ok: false, error: 'invalid id' });
+
+    const patch = {};
+    const { name, description, config_json, is_default, thumbnail_url } = req.body || {};
+    if (name !== undefined) patch.name = String(name).trim();
+    if (description !== undefined) patch.description = description;
+    if (config_json !== undefined) {
+      if (!config_json || typeof config_json !== 'object') {
+        return res.status(400).json({ ok: false, error: 'config_json 객체여야 함' });
+      }
+      patch.config_json = config_json;
+    }
+    if (thumbnail_url !== undefined) patch.thumbnail_url = thumbnail_url;
+    if (is_default !== undefined) patch.is_default = !!is_default;
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ ok: false, error: '변경할 필드 없음' });
+    }
+
+    if (patch.is_default === true) {
+      const { error: uerr } = await supabase
+        .from('pjl_templates')
+        .update({ is_default: false })
+        .neq('id', id)
+        .eq('is_default', true);
+      if (uerr) throw uerr;
+    }
+
+    const { data, error } = await supabase
+      .from('pjl_templates')
+      .update(patch)
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: 'template not found' });
+    res.json({ ok: true, template: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete('/api/templates/:id', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    if (id == null) return res.status(400).json({ ok: false, error: 'invalid id' });
+
+    // 마지막 default 보호: 지우려는 게 default 이고 default 가 1개뿐이면 거부
+    const { data: target, error: terr } = await supabase
+      .from('pjl_templates')
+      .select('id, is_default')
+      .eq('id', id)
+      .maybeSingle();
+    if (terr) throw terr;
+    if (!target) return res.status(404).json({ ok: false, error: 'template not found' });
+
+    if (target.is_default) {
+      const { count, error: cerr } = await supabase
+        .from('pjl_templates')
+        .select('id', { count: 'exact', head: true })
+        .eq('is_default', true);
+      if (cerr) throw cerr;
+      if ((count ?? 0) <= 1) {
+        return res.status(409).json({
+          ok: false,
+          error: '기본 템플릿(is_default=true)은 항상 1개 이상 유지되어야 합니다. 다른 템플릿을 default 로 먼저 지정하세요.',
+        });
+      }
+    }
+
+    const { error } = await supabase.from('pjl_templates').delete().eq('id', id);
+    if (error) throw error;
+    res.json({ ok: true, deletedId: id });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/templates/:id/duplicate', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    if (id == null) return res.status(400).json({ ok: false, error: 'invalid id' });
+
+    const { data: src, error: serr } = await supabase
+      .from('pjl_templates')
+      .select('name, description, config_json')
+      .eq('id', id)
+      .maybeSingle();
+    if (serr) throw serr;
+    if (!src) return res.status(404).json({ ok: false, error: 'template not found' });
+
+    // unique name 충돌 회피: " (copy)", " (copy 2)" ...
+    let candidate = `${src.name} (copy)`;
+    let suffix = 2;
+    while (true) {
+      const { data: hit } = await supabase
+        .from('pjl_templates')
+        .select('id')
+        .eq('name', candidate)
+        .maybeSingle();
+      if (!hit) break;
+      candidate = `${src.name} (copy ${suffix++})`;
+      if (suffix > 50) throw new Error('복제 이름 후보 50개 초과');
+    }
+
+    const { data, error } = await supabase
+      .from('pjl_templates')
+      .insert({
+        name: candidate,
+        description: src.description,
+        config_json: src.config_json,
+        is_default: false,
+      })
+      .select('*')
+      .single();
+    if (error) throw error;
+    res.json({ ok: true, template: data });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── Start ───────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => {

@@ -10,7 +10,9 @@
   "scripts": {
     "dev": "node server/control-panel/server.mjs",
     "start": "node server/control-panel/server.mjs",
-    "studio": "cd video && npx remotion studio --port=3001"
+    "studio": "cd video && npm run studio",
+    "video:install": "cd video && npm install",
+    "video:render": "cd video && npm run render"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",

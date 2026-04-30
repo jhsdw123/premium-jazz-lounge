@@ -1,0 +1,24 @@
+{
+  "name": "premium-jazz-lounge-video",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Remotion 영상 컴포지션 (Phase 4-A bootstrap, Phase 4-C 부터 본격 구현)",
+  "scripts": {
+    "studio": "remotion studio --port=3001",
+    "render": "remotion render JazzVideo out/video.mp4",
+    "build": "remotion bundle"
+  },
+  "dependencies": {
+    "remotion": "^4.0.0",
+    "@remotion/cli": "^4.0.0",
+    "@remotion/media-utils": "^4.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "zod": "^3.22.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "typescript": "^5.0.0"
+  }
+}
