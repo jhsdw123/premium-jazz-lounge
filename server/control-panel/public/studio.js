@@ -9,6 +9,11 @@
 //   - WebCodecs (Chrome 102+, Edge 102+)
 
 import AudioMotionAnalyzer from 'https://cdn.jsdelivr.net/npm/audiomotion-analyzer@4/+esm';
+import {
+  createController as createNPController,
+  applyStateToElement as applyNPState,
+  drawStateOnCanvas as drawNPState,
+} from './now-playing-animations.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -35,6 +40,12 @@ const studio = {
   // 비주얼라이저
   visInstances: new Map(),   // compId → AudioMotionAnalyzer
   visCanvases: new Map(),    // compId → AudioMotion 의 canvas (composite 용)
+
+  // NowPlaying (한 영상에 1개만)
+  npComp: null,              // template 의 nowplaying 컴포넌트
+  npCtrl: null,               // animation controller
+  npElement: null,            // DOM overlay div (live preview 용)
+  npLastTrackIdx: -1,         // 곡 변경 감지용
 
   // 재생 상태
   playing: false,
@@ -265,7 +276,107 @@ function renderFrame() {
     else if (c.type === 'image') drawImageComponent(ctx, c);
     else if (c.type === 'progress') drawProgressComponent(ctx, c, varsCtx);
     else if (c.type === 'visualizer') drawVisualizerComponent(ctx, c);
+    // NowPlaying 은 항상 마지막 (overlay) — 별도 처리 (DOM + canvas 동기화)
   }
+
+  // 4) NowPlaying — DOM overlay 갱신 + canvas 에 동시 그리기
+  if (studio.npComp && studio.npCtrl) {
+    const state = studio.npCtrl.stateAt();
+    if (studio.npElement) applyNPState(studio.npElement, state, studio.npComp);
+    drawNPState(ctx, state, studio.npComp);
+  }
+}
+
+// ─── NowPlaying 셋업 / 트리거 ─────────────────────────────────────
+function setupNowPlaying() {
+  destroyNowPlaying();
+  const npComp = studio.components.find((c) => c.type === 'nowplaying');
+  if (!npComp) return;
+  studio.npComp = npComp;
+  studio.npCtrl = createNPController(npComp);
+
+  // DOM overlay div — 캔버스 위에 absolute. 캔버스 표시 크기와 동일 비율로 좌표 매핑.
+  // host: #studioVisHost (이미 absolute 로 캔버스 위 덮음, pointer-events:none)
+  const host = $('#studioVisHost');
+  if (!host) return;
+  const div = document.createElement('div');
+  div.dataset.npRole = 'overlay';
+  // canvas world coords 1920×1080 → host % 좌표로 변환
+  const leftPct = (npComp.x / CANVAS_W) * 100;
+  const topPct = (npComp.y / CANVAS_H) * 100;
+  const wPct = (npComp.width / CANVAS_W) * 100;
+  const hPct = (npComp.height / CANVAS_H) * 100;
+  // fontSize 도 host 의 % 폭 기준으로 스케일 (대략 — 정확한 1:1 은 아니지만 미리보기용)
+  const align = npComp.textAlign || 'center';
+  const justify = align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center';
+  div.style.cssText = `
+    position:absolute;
+    left:${leftPct}%; top:${topPct}%;
+    width:${wPct}%; height:${hPct}%;
+    display:flex; align-items:center; justify-content:${justify};
+    font-family:${npComp.fontFamily || 'system-ui, sans-serif'};
+    font-weight:${npComp.bold ? '700' : '400'};
+    font-style:${npComp.italic ? 'italic' : 'normal'};
+    text-decoration:${npComp.underline ? 'underline' : 'none'};
+    color:${npComp.color || '#FFFFFF'};
+    text-transform:${npComp.textTransform || 'none'};
+    letter-spacing:${npComp.letterSpacing ?? 0}px;
+    white-space:nowrap; overflow:visible;
+    pointer-events:none; user-select:none;
+    opacity:0;
+  `;
+  // fontSize 는 컨테이너 % 와 무관하게 절대 px (canvas world 기준).
+  // 실제 화면 표시는 host 가 캔버스 width 에 맞게 스케일 되므로 vw 로 환산.
+  // host 의 width = canvas 의 표시 width. font-size 는 (npComp.fontSize / 1920) * host.clientWidth.
+  // 정확한 것은 ResizeObserver 로 해야 하지만, 우선 vw 단위로 근사:
+  div.style.fontSize = `calc((${npComp.fontSize || 48} / ${CANVAS_W}) * 100cqw)`;
+  div.style.containerType = 'inline-size';
+
+  // host 자체가 container — div 안에 못 두니 host 의 contentBox 를 컨테이너로 쓰려면
+  // host 에 containerType 적용. 하지만 host 는 다른 용도로도 쓰임 → 별도 wrapper.
+  const wrap = document.createElement('div');
+  wrap.style.cssText = 'position:absolute;inset:0;container-type:inline-size;pointer-events:none;';
+  wrap.appendChild(div);
+  host.appendChild(wrap);
+  studio.npElement = div;
+  studio._npWrap = wrap;
+}
+
+function destroyNowPlaying() {
+  if (studio._npWrap) {
+    try { studio._npWrap.remove(); } catch {}
+    studio._npWrap = null;
+  }
+  studio.npElement = null;
+  studio.npComp = null;
+  studio.npCtrl = null;
+  studio.npLastTrackIdx = -1;
+}
+
+// 곡 변경 시 NowPlaying 트리거 — loadTrack 에서 호출.
+function onTrackChangeForNP(newIdx) {
+  if (!studio.npCtrl || !studio.npComp) return;
+  const tracks = studio.session?.tracks || [];
+  const newTrack = tracks[newIdx];
+  if (!newTrack) return;
+  const now = performance.now();
+
+  // 첫 곡: 바로 in. 그 외: out → in (out 끝나면 자동으로 in 시작)
+  if (studio.npLastTrackIdx < 0 || studio.npCtrl.phase === 'idle') {
+    studio.npCtrl.startIn(newTrack.title, now);
+  } else {
+    // out 시작 → out 끝나면 in 시작 (chained)
+    studio.npCtrl.startOut(now);
+    const outDur = studio.npComp.fadeOutMs ?? 500;
+    setTimeout(() => {
+      // 트랙이 그 사이 또 바뀌었어도 최신 idx 의 title 사용
+      const cur = studio.session?.tracks?.[studio.currentTrackIdx];
+      const t = cur?.title || newTrack.title;
+      studio.npCtrl.startIn(t, performance.now());
+    }, outDur);
+  }
+
+  studio.npLastTrackIdx = newIdx;
 }
 
 // ─── AudioMotion 인스턴스 (visualizer 컴포넌트마다) ──────────────
@@ -360,6 +471,8 @@ function loadTrack(idx) {
   studio.audioElement.load();
   studio.trackElapsed = 0;
   updateProgressUI();
+  // NowPlaying 트리거 — out → in chained
+  onTrackChangeForNP(idx);
   return true;
 }
 
@@ -369,6 +482,8 @@ function onTrackEnded() {
   if (next >= tracks.length) {
     studio.playing = false;
     setStatus('전체 곡 재생 완료');
+    // 마지막 곡 — NowPlaying 페이드아웃
+    if (studio.npCtrl) studio.npCtrl.startOut();
     if (studio.recording) {
       finishRecording().catch((e) => console.error('녹화 완료 실패:', e));
     }
@@ -442,6 +557,10 @@ function stop() {
   studio.currentTrackIdx = -1;
   studio.trackElapsed = 0;
   studio.globalElapsed = 0;
+  if (studio.npCtrl) {
+    studio.npCtrl.reset();
+    studio.npLastTrackIdx = -1;
+  }
   setStatus('⏹ 정지');
   updateProgressUI();
   updateButtons();
@@ -513,10 +632,11 @@ async function bootSession(session) {
   $('#studioMetaTemplate').textContent = tpl.name || '(기본)';
   $('#studioCanvasTitle').textContent = session.title || '(미리보기)';
 
-  // 이미지 + AudioMotion 준비
+  // 이미지 + AudioMotion + NowPlaying 준비
   await preloadImages();
   ensureAudioElement();
   attachVisualizers();
+  setupNowPlaying();
   updateProgressUI();
   updateButtons();
   startRenderLoop();
@@ -562,6 +682,7 @@ function teardown() {
   }
   studio.visInstances.clear();
   studio.visCanvases.clear();
+  destroyNowPlaying();
   studio.session = null;
   studio.components = [];
   studio.bgImg = null;

@@ -2,6 +2,12 @@
 // vanilla ES module. interact.js 는 글로벌 (CDN 으로 로드).
 // AudioMotion-analyzer ESM 을 jsdelivr CDN 으로 import (오프라인이면 패키지 dist 로 교체).
 import AudioMotionAnalyzer from 'https://cdn.jsdelivr.net/npm/audiomotion-analyzer@4/+esm';
+import {
+  ANIMATION_TYPES,
+  createController as createNPController,
+  applyStateToElement as applyNPState,
+  runPreview as runNPPreview,
+} from './now-playing-animations.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -149,8 +155,39 @@ function defaultsFor(type) {
         bgColor: 'rgba(255,255,255,0.1)',
         fillColor: '#D4AF37',
       };
+    case 'nowplaying':
+      // Phase 4-D-3-A — 곡 제목 자동 표시 + 5종 애니메이션. 한 영상에 1개만.
+      return {
+        ...base,
+        width: 800, height: 80,
+        x: (CANVAS_W - 800) / 2, y: 950,
+        // 텍스트 디자인
+        fontFamily: 'system-ui, sans-serif',
+        fontSize: 48,
+        bold: true,
+        italic: false,
+        underline: false,
+        color: '#FFFFFF',
+        textAlign: 'center',
+        textTransform: 'none',
+        letterSpacing: 0,
+        // glow
+        glow: 20,
+        glowColor: '#D4AF37',
+        // 애니메이션
+        animation: 'fade',           // 'fade' | 'slide' | 'typewriter' | 'glow' | 'blur'
+        animationDurationMs: 800,
+        fadeOutMs: 500,
+        // Editor 미리보기 텍스트
+        previewText: '곡 제목 미리보기',
+      };
   }
   return base;
+}
+
+// 한 영상에 NowPlaying 1개 제약 — 추가 시 기존 존재 여부 검사.
+function hasNowPlaying() {
+  return te.components.some((c) => c.type === 'nowplaying');
 }
 
 // ─── 색상 유틸 ───────────────────────────────────────────────
@@ -573,8 +610,29 @@ function renderComponentInner(c) {
     case 'image':      return renderImageInner(c);
     case 'visualizer': return renderBars(c);
     case 'progress':   return renderProgress(c);
+    case 'nowplaying': return renderNowPlayingInner(c);
   }
   return '';
+}
+
+// NowPlaying inner — Editor 미리보기는 plain div. 애니메이션 미리보기 시 inline style 갱신.
+function renderNowPlayingInner(c) {
+  const align = c.textAlign || 'center';
+  const justify = align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center';
+  const fs = `${c.italic ? 'italic ' : ''}${c.bold ? '700 ' : '400 '}${c.fontSize || 48}px ${c.fontFamily || 'system-ui, sans-serif'}`;
+  const color = c.color || '#FFFFFF';
+  const glow = Math.max(0, c.glow ?? 0);
+  const glowColor = c.glowColor || '#D4AF37';
+  const shadow = glow > 0 ? `0 0 ${glow}px ${glowColor}, 0 0 ${glow * 2}px ${glowColor}` : 'none';
+  return `<div class="te-np-text" data-np-id="${c.id}" style="
+    width:100%;height:100%;display:flex;align-items:center;justify-content:${justify};
+    font:${fs};color:${color};text-shadow:${shadow};
+    text-transform:${c.textTransform || 'none'};
+    text-decoration:${c.underline ? 'underline' : 'none'};
+    letter-spacing:${c.letterSpacing ?? 0}px;
+    white-space:nowrap;overflow:visible;
+    pointer-events:none;user-select:none;
+  ">${escapeHtml(c.previewText || '곡 제목 미리보기')}</div>`;
 }
 
 function applyComponentTransform(el, c) {
@@ -628,6 +686,7 @@ function renderCanvas() {
   $('#teCompCount').textContent = String(te.components.length);
   renderBg();
   renderProps();
+  updateAddNowPlayingBtn();
 }
 
 function renderBg() {
@@ -813,6 +872,11 @@ function removeComponent(id) {
 }
 
 function addComponent(type) {
+  // NowPlaying 은 한 영상에 1개만
+  if (type === 'nowplaying' && hasNowPlaying()) {
+    toast('NowPlaying 컴포넌트는 한 영상에 1개만 추가할 수 있습니다', 'info');
+    return;
+  }
   const c = defaultsFor(type);
   if (type === 'image') {
     // 이미지는 src 가 있어야 의미 있음 — 업로드 dialog 띄우기
@@ -827,6 +891,17 @@ function addComponent(type) {
   te.components.push(c);
   te.selectedId = c.id;
   renderCanvas();
+  updateAddNowPlayingBtn();
+}
+
+function updateAddNowPlayingBtn() {
+  const btn = document.getElementById('teAddNowPlayingBtn');
+  if (!btn) return;
+  const exists = hasNowPlaying();
+  btn.disabled = exists;
+  btn.title = exists
+    ? '한 영상에 1개만 추가 가능 (이미 추가됨)'
+    : '곡 제목 자동 표시 (한 영상에 1개)';
 }
 
 // ─── Properties panel ─────────────────────────────────────────
@@ -1082,6 +1157,93 @@ function renderProps() {
       <div class="te-prop"><label>BG Color</label><input type="text" data-prop="bgColor" value="${escapeHtml(c.bgColor || 'rgba(255,255,255,0.1)')}" /></div>
       <div class="te-prop"><label>Fill Color</label><input type="color" data-prop="fillColor" value="${c.fillColor || '#D4AF37'}" /></div>
     `;
+  } else if (c.type === 'nowplaying') {
+    const slider = (key, label, min, max, step, val, suffix = '') => `
+      <div class="slider-row">
+        <label>${label}</label>
+        <input type="range" data-prop="${key}" min="${min}" max="${max}" step="${step}" value="${val}" />
+        <span class="val" data-val-for="${key}">${val}${suffix}</span>
+      </div>
+    `;
+    typeFields = `
+      <div class="te-prop full" style="background:var(--bg-input);padding:8px;border-radius:4px;border-left:3px solid var(--jazz-gold);">
+        <div style="font-size:10px;color:var(--jazz-gold);font-weight:700;margin-bottom:4px;">📺 NOW PLAYING — 자동 표시</div>
+        <div style="font-size:10px;color:var(--text-muted);line-height:1.5;">곡 바뀔 때마다 자동으로 곡 제목 갱신 + 애니메이션. 한 영상에 1개만.</div>
+      </div>
+
+      <div class="te-prop full">
+        <label>미리보기 텍스트 (Editor 만)</label>
+        <input type="text" data-prop="previewText" value="${escapeHtml(c.previewText || '곡 제목 미리보기')}" />
+      </div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 텍스트 —</label>
+      </div>
+      <div class="te-prop"><label>Font Family</label>
+        <select data-prop="fontFamily">
+          <option ${c.fontFamily === 'system-ui, sans-serif' ? 'selected' : ''} value="system-ui, sans-serif">System</option>
+          <option ${c.fontFamily?.startsWith('Playfair') ? 'selected' : ''} value="Playfair Display, serif">Playfair Display</option>
+          <option ${c.fontFamily?.startsWith('Inter') ? 'selected' : ''} value="Inter, sans-serif">Inter</option>
+          <option ${c.fontFamily?.startsWith('Georgia') ? 'selected' : ''} value="Georgia, serif">Georgia</option>
+          <option ${c.fontFamily?.startsWith('Cinzel') ? 'selected' : ''} value="Cinzel, serif">Cinzel</option>
+          <option ${c.fontFamily?.includes('monospace') ? 'selected' : ''} value="SF Mono, Menlo, monospace">Mono</option>
+        </select>
+      </div>
+      <div class="te-prop"><label>Font Size</label><input type="number" data-prop="fontSize" value="${c.fontSize || 48}" min="8" max="200" /></div>
+      <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#FFFFFF'}" /></div>
+      <div class="te-prop">
+        <label>Style</label>
+        <div class="te-toggle-group">
+          <button type="button" class="te-toggle-btn ${c.bold ? 'active' : ''}" data-toggle="bold" style="font-weight:700;">B</button>
+          <button type="button" class="te-toggle-btn ${c.italic ? 'active' : ''}" data-toggle="italic" style="font-style:italic;">I</button>
+          <button type="button" class="te-toggle-btn ${c.underline ? 'active' : ''}" data-toggle="underline" style="text-decoration:underline;">U</button>
+        </div>
+      </div>
+      <div class="te-prop">
+        <label>Align</label>
+        <div class="te-toggle-group">
+          <button type="button" class="te-toggle-btn ${c.textAlign === 'left' ? 'active' : ''}" data-align="left">≡ L</button>
+          <button type="button" class="te-toggle-btn ${(!c.textAlign || c.textAlign === 'center') ? 'active' : ''}" data-align="center">≡ C</button>
+          <button type="button" class="te-toggle-btn ${c.textAlign === 'right' ? 'active' : ''}" data-align="right">≡ R</button>
+        </div>
+      </div>
+      <div class="te-prop">
+        <label>Transform</label>
+        <select data-prop="textTransform">
+          <option value="none" ${(!c.textTransform || c.textTransform === 'none') ? 'selected' : ''}>None</option>
+          <option value="uppercase" ${c.textTransform === 'uppercase' ? 'selected' : ''}>UPPER</option>
+          <option value="lowercase" ${c.textTransform === 'lowercase' ? 'selected' : ''}>lower</option>
+          <option value="capitalize" ${c.textTransform === 'capitalize' ? 'selected' : ''}>Capitalize</option>
+        </select>
+      </div>
+      ${slider('letterSpacing', 'Letter Spacing', -5, 20, 0.5, c.letterSpacing ?? 0, 'px')}
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— Glow —</label>
+      </div>
+      ${slider('glow', 'Glow', 0, 80, 1, c.glow ?? 20, 'px')}
+      <div class="te-prop"><label>Glow Color</label><input type="color" data-prop="glowColor" value="${c.glowColor || '#D4AF37'}" /></div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 애니메이션 —</label>
+      </div>
+      <div class="te-prop full">
+        <label>종류</label>
+        <select data-prop="animation">
+          <option value="fade" ${c.animation === 'fade' ? 'selected' : ''}>Fade</option>
+          <option value="slide" ${c.animation === 'slide' ? 'selected' : ''}>Slide (위로)</option>
+          <option value="typewriter" ${c.animation === 'typewriter' ? 'selected' : ''}>Typewriter</option>
+          <option value="glow" ${c.animation === 'glow' ? 'selected' : ''}>Glow Pulse</option>
+          <option value="blur" ${c.animation === 'blur' ? 'selected' : ''}>Blur Reveal</option>
+        </select>
+      </div>
+      ${slider('animationDurationMs', 'Duration', 200, 2000, 50, c.animationDurationMs ?? 800, 'ms')}
+      ${slider('fadeOutMs', 'Fade Out', 0, 1500, 50, c.fadeOutMs ?? 500, 'ms')}
+
+      <div class="te-prop full" style="margin-top:8px;">
+        <button type="button" id="teNpPreviewBtn" class="te-btn gold" style="width:100%;height:36px;">▶ 애니메이션 미리보기</button>
+      </div>
+    `;
   }
 
   wrap.innerHTML = `
@@ -1231,6 +1393,43 @@ function renderProps() {
       renderProps();
     });
   }
+
+  // NowPlaying — 미리보기 버튼
+  const npBtn = wrap.querySelector('#teNpPreviewBtn');
+  if (npBtn && c.type === 'nowplaying') {
+    npBtn.addEventListener('click', () => playNowPlayingPreview(c.id));
+  }
+}
+
+// NowPlaying 미리보기 — 캔버스 위에 임시 overlay div 띄워 애니메이션 1회 시연.
+const _npPreviewState = new Map();   // compId → { ctrl, rafId, host }
+function playNowPlayingPreview(compId) {
+  const cur = te.components.find((x) => x.id === compId);
+  if (!cur) return;
+  // 기존 RAF 정지
+  const prev = _npPreviewState.get(compId);
+  if (prev?.rafId) cancelAnimationFrame(prev.rafId);
+  if (prev?.host) prev.host.remove();
+
+  // 컴포넌트 인너의 div 자체를 사용 — 임시로 inline style 갱신해 애니메이션
+  const compEl = document.querySelector(`#teCanvasInner [data-id="${compId}"] [data-np-id="${compId}"]`);
+  if (!compEl) return;
+
+  const ctrl = createNPController(cur);
+  ctrl.startIn(cur.previewText || '곡 제목 미리보기');
+
+  const tick = () => {
+    const state = ctrl.stateAt();
+    applyNPState(compEl, state, cur);
+    if (ctrl.phase === 'in') {
+      const rafId = requestAnimationFrame(tick);
+      _npPreviewState.set(compId, { ctrl, rafId, host: null });
+    } else {
+      // hold — 끝까지 표시. 추가 RAF 불필요.
+      _npPreviewState.set(compId, { ctrl, rafId: null, host: null });
+    }
+  };
+  tick();
 }
 
 // ─── Background upload ────────────────────────────────────────
