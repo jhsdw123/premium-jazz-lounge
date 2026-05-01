@@ -13,7 +13,6 @@ import { drawClock } from './clock-renderer.js';
 import {
   getAmplitudes,
   drawCustomVisualizer,
-  clearLegacyVisState,
 } from './visualizer-styles.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -116,27 +115,16 @@ function defaultsFor(type) {
     case 'visualizer':
       // AudioMotion-analyzer 기반 (Phase 4-C-2 v5).
       // Phase 4-D-3-D-1 — visualizerStyle 추가 (5가지 디자인).
-      // Phase 4-D-3-D-3 — Legacy Bars 복구 (옛 index.html 시그니처 + AnalyserNode 활용).
+      // legacy (sensitivity/midBoost/highBoost/smoothing-old/centerCut/trimStart/barCount) 폐기.
       return {
         ...base,
         width: 1200, height: 240,
         x: (CANVAS_W - 1200) / 2, y: 760,
         // ── Style ──
-        visualizerStyle: 'bars',    // 'bars' | 'line' | 'wave-time' | 'mirror' | 'mirror-fill' | 'legacy-bars'
+        visualizerStyle: 'bars',    // 'bars' | 'line' | 'wave-time' | 'mirror' | 'mirror-fill'
         lineWidth: 3,               // wave-time/mirror/mirror-fill 용 stroke 두께
         smoothness: 0.5,            // 0=각진 / 1=매우 부드러움 (Catmull-Rom tension)
         fillOpacity: 0.3,           // mirror-fill 의 영역 채움 alpha
-        // ── Legacy Bars 옵션 (visualizerStyle='legacy-bars' 일 때만 의미 있음) ──
-        barCount: 80,
-        barWidth: 6,
-        barGap: 2,
-        sensitivity: 0.15,          // legacy barGain
-        legacySmoothing: 0.85,      // smoothing 별도 — AM smoothing 과 혼동 방지용 별 이름
-        midBoost: 1.5,
-        highBoost: 0.8,
-        centerCut: 0,               // Low Cut bins
-        trimStart: 3,               // FFT bin offset
-        // verticalMode/splitGap 은 아래 디자인 섹션 (legacy 와 공유)
         // ── AudioMotion 옵션 ──
         mode: 3,                    // 1/8 octave / 80 bands (default)
         gradient: 'rainbow',        // classic / prism / rainbow / orangered / steelblue / ...
@@ -606,16 +594,15 @@ function attachVisualizerInstance(c) {
   applyVisualizerStyleVisibility(c);
 }
 
-// Phase 4-D-3-D-1 / Phase 4-D-3-D-3: visualizerStyle 따라 AM canvas vs custom canvas 표시 토글.
+// Phase 4-D-3-D-1: visualizerStyle 따라 AM canvas vs custom canvas 표시 토글.
 // - 'bars' / 'line' : AM canvas 보임, custom 숨김. AM 자체 RAF 로 작동.
-// - 'wave-time' / 'mirror' / 'mirror-fill' / 'legacy-bars' : AM canvas 숨김, custom 보임 + custom RAF 시작.
+// - 'wave-time' / 'mirror' / 'mirror-fill' : AM canvas 숨김, custom 보임 + custom RAF 시작.
 function applyVisualizerStyleVisibility(c) {
   const am = c._audioMotion;
   const customCv = document.querySelector(`canvas[data-vis-custom-id="${c.id}"]`);
   const useCustom = c.visualizerStyle === 'wave-time'
     || c.visualizerStyle === 'mirror'
-    || c.visualizerStyle === 'mirror-fill'
-    || c.visualizerStyle === 'legacy-bars';
+    || c.visualizerStyle === 'mirror-fill';
 
   if (am?.canvas) {
     am.canvas.style.display = useCustom ? 'none' : '';
@@ -651,8 +638,7 @@ function startCustomVisualizerLoop(c) {
     const ctx = cv.getContext('2d');
     ctx.clearRect(0, 0, cv.width, cv.height);
     const amps = getAmplitudes(am);
-    // legacy-bars 는 amplitudes 안 쓰고 audioMotion 의 _analyzer 직접 접근.
-    drawCustomVisualizer(ctx, c, amps, 0, 0, cv.width, cv.height, am);
+    drawCustomVisualizer(ctx, c, amps, 0, 0, cv.width, cv.height);
     c._customLoopRaf = requestAnimationFrame(tick);
   };
   c._customLoopRaf = requestAnimationFrame(tick);
@@ -667,7 +653,6 @@ function stopCustomVisualizerLoop(c) {
 
 function destroyVisualizerInstance(c) {
   stopCustomVisualizerLoop(c);
-  if (c?.id) clearLegacyVisState(c.id);
   if (c?._audioMotion) {
     try { c._audioMotion.destroy(); } catch {}
     delete c._audioMotion;
@@ -1334,7 +1319,6 @@ function renderProps() {
     // visualizerStyle 변수 (colorBlock 이 사용)
     const vstyle = c.visualizerStyle || 'bars';
     const isCustom = vstyle === 'wave-time' || vstyle === 'mirror' || vstyle === 'mirror-fill';
-    const isLegacy = vstyle === 'legacy-bars';
     const isLine = vstyle === 'line';
     const isBars = vstyle === 'bars';
     // Phase 4-D-3-D-1 polish — 3 modes:
@@ -1423,7 +1407,6 @@ function renderProps() {
           <option value="wave-time" ${vstyle === 'wave-time' ? 'selected' : ''}>Wave Time (시간축 부드러운 곡선)</option>
           <option value="mirror" ${vstyle === 'mirror' ? 'selected' : ''}>Mirror (좌우 대칭)</option>
           <option value="mirror-fill" ${vstyle === 'mirror-fill' ? 'selected' : ''}>Mirror Fill (좌우 대칭 + 채움)</option>
-          <option value="legacy-bars" ${vstyle === 'legacy-bars' ? 'selected' : ''}>Legacy Bars (옛 시그니처 — 좌우 대칭 + EQ)</option>
         </select>
       </div>
 
@@ -1434,33 +1417,6 @@ function renderProps() {
         ${slider('lineWidth', 'Line Width', 1, 10, 0.5, c.lineWidth ?? 3, 'px')}
         ${isCustom ? slider('smoothness', 'Smoothness', 0, 1, 0.05, c.smoothness ?? 0.5, '') : ''}
         ${(isLine || vstyle === 'mirror-fill') ? slider('fillOpacity', 'Fill Opacity', 0, 1, 0.05, c.fillOpacity ?? 0.3, '') : ''}
-      ` : ''}
-
-      ${isLegacy ? `
-        <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
-          <label style="color:var(--jazz-gold)">— Legacy Bars 옵션 —</label>
-        </div>
-        <div class="te-prop full" style="font-size:10px;color:var(--text-muted);line-height:1.5;margin-bottom:4px;">
-          옛 index.html 의 시그니처 디자인 — log mapping + adaptive bin range + EQ + 좌우 대칭.
-        </div>
-        ${slider('barCount', 'Bar Count (per side)', 4, 200, 1, c.barCount ?? 80, '')}
-        ${slider('barWidth', 'Bar Width', 1, 30, 1, c.barWidth ?? 6, 'px')}
-        ${slider('barGap', 'Bar Gap', 0, 20, 1, c.barGap ?? 2, 'px')}
-        ${slider('centerCut', 'Low Cut (bins)', 0, 200, 1, c.centerCut ?? 0, '')}
-        ${slider('trimStart', 'Trim Start (bins)', 0, 50, 1, c.trimStart ?? 3, '')}
-        ${slider('sensitivity', 'Sensitivity', 0, 1, 0.005, c.sensitivity ?? 0.15, '')}
-        ${slider('legacySmoothing', 'Legacy Smoothing', 0, 0.99, 0.01, c.legacySmoothing ?? 0.85, '')}
-        ${slider('midBoost', 'Mid Boost', 0, 10, 0.05, c.midBoost ?? 1.5, '')}
-        ${slider('highBoost', 'High Boost', 0, 10, 0.05, c.highBoost ?? 0.8, '')}
-        <div class="te-prop">
-          <label>Vertical Mode</label>
-          <select data-prop="verticalMode">
-            <option value="symmetric" ${(c.verticalMode || 'symmetric') === 'symmetric' ? 'selected' : ''}>↕ Symmetric</option>
-            <option value="up" ${c.verticalMode === 'up' ? 'selected' : ''}>↑ Up only</option>
-            <option value="down" ${c.verticalMode === 'down' ? 'selected' : ''}>↓ Down only</option>
-          </select>
-        </div>
-        ${slider('splitGap', 'Split Gap', 0, 200, 1, c.splitGap ?? 0, 'px')}
       ` : ''}
 
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
@@ -1535,20 +1491,18 @@ function renderProps() {
       ${slider('glow', 'Glow', 0, 80, 1, c.glow ?? 20, 'px')}
       <div class="te-prop"><label>Glow Color</label><input type="color" data-prop="glowColor" value="${c.glowColor || '#D4AF37'}" /></div>
 
-      ${!isLegacy ? `
-        <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
-          <label style="color:var(--text-muted);font-size:10px;">⚠ verticalMode/splitGap 은 카드 썸네일 정적 표시용 (실시간 비주얼라이저는 AudioMotion 옵션 사용)</label>
-        </div>
-        <div class="te-prop">
-          <label>Card Mode</label>
-          <select data-prop="verticalMode">
-            <option value="symmetric" ${c.verticalMode === 'symmetric' ? 'selected' : ''}>↕ Symmetric</option>
-            <option value="up" ${c.verticalMode === 'up' ? 'selected' : ''}>↑ Up only</option>
-            <option value="down" ${c.verticalMode === 'down' ? 'selected' : ''}>↓ Down only</option>
-          </select>
-        </div>
-        ${slider('splitGap', 'Card Split Gap', 0, 200, 1, c.splitGap ?? 0, 'px')}
-      ` : ''}
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--text-muted);font-size:10px;">⚠ verticalMode/splitGap 은 카드 썸네일 정적 표시용 (실시간 비주얼라이저는 AudioMotion 옵션 사용)</label>
+      </div>
+      <div class="te-prop">
+        <label>Card Mode</label>
+        <select data-prop="verticalMode">
+          <option value="symmetric" ${c.verticalMode === 'symmetric' ? 'selected' : ''}>↕ Symmetric</option>
+          <option value="up" ${c.verticalMode === 'up' ? 'selected' : ''}>↑ Up only</option>
+          <option value="down" ${c.verticalMode === 'down' ? 'selected' : ''}>↓ Down only</option>
+        </select>
+      </div>
+      ${slider('splitGap', 'Card Split Gap', 0, 200, 1, c.splitGap ?? 0, 'px')}
     `;
   } else if (c.type === 'progress') {
     typeFields = `

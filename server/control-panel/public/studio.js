@@ -16,7 +16,7 @@ import {
 } from './now-playing-animations.js';
 import { drawPlaylist } from './playlist-renderer.js';
 import { drawClock } from './clock-renderer.js';
-import { getAmplitudes, drawCustomVisualizer, clearLegacyVisState } from './visualizer-styles.js';
+import { getAmplitudes, drawCustomVisualizer } from './visualizer-styles.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -231,19 +231,17 @@ function roundedRect(ctx, x, y, w, h, r) {
 // ─── Visualizer 컴포지팅 ──────────────────────────────────────────
 function drawVisualizerComponent(ctx, c) {
   const am = studio.visInstances.get(c.id);
-  // Phase 4-D-3-D-1 / Phase 4-D-3-D-3: visualizerStyle 따라 분기.
+  // Phase 4-D-3-D-1: visualizerStyle 따라 분기.
   // - bars / line : AudioMotion 자체 그리기 결과 (am.canvas) 를 drawImage.
   // - wave-time / mirror / mirror-fill : am.getBars() 데이터로 메인 canvas 에 직접 그리기.
-  // - legacy-bars : am._analyzer.getByteFrequencyData() 로 옛 시그니처 막대 그리기.
   const isCustom = c.visualizerStyle === 'wave-time'
     || c.visualizerStyle === 'mirror'
-    || c.visualizerStyle === 'mirror-fill'
-    || c.visualizerStyle === 'legacy-bars';
+    || c.visualizerStyle === 'mirror-fill';
 
   if (isCustom) {
     if (!am) return;
     const amps = getAmplitudes(am);
-    drawCustomVisualizer(ctx, c, amps, c.x, c.y, c.width, c.height, am);
+    drawCustomVisualizer(ctx, c, amps, c.x, c.y, c.width, c.height);
     return;
   }
 
@@ -529,10 +527,6 @@ function attachVisualizers() {
   // 기존 인스턴스 모두 destroy
   for (const am of studio.visInstances.values()) {
     try { am.destroy(); } catch {}
-  }
-  // legacy state 도 cleanup (이전 컴포넌트 id 의 smoothing 잔여물 제거)
-  for (const c of studio.components) {
-    if (c.type === 'visualizer') clearLegacyVisState(c.id);
   }
   studio.visInstances.clear();
   studio.visCanvases.clear();
