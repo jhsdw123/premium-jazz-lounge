@@ -344,54 +344,74 @@ function setupNowPlaying() {
   studio.npComp = npComp;
   studio.npCtrl = createNPController(npComp);
 
-  // DOM overlay div — 캔버스 위에 absolute. 캔버스 표시 크기와 동일 비율로 좌표 매핑.
-  // host: #studioVisHost (이미 absolute 로 캔버스 위 덮음, pointer-events:none)
+  // Phase 4-D-4 fix: DOM 좌표 시스템을 canvas 와 통일 (1920×1080 world coords).
+  // 이전엔 % + cqw 변환이라 canvas 와 미세하게 어긋났음. 게다가 state.translateX/Y 가
+  // canvas 에선 world unit, DOM 에선 CSS px 로 다르게 해석되어 애니메이션 위치 불일치.
+  //
+  // 새 구조:
+  //   - wrap: width:1920px; height:1080px; transform: scale(displayWidth/1920);
+  //     transform-origin: top left → wrap 안의 모든 좌표 = world coords (1920×1080).
+  //   - div: comp.x/y/width/height/fontSize 직접 px → world unit 1:1.
+  //   - state.translateX/Y 도 CSS px → world unit (parent scale 가 처리).
+  //
+  // → DOM 과 canvas 가 동일 좌표계에서 작동. 미리보기 = 녹화 결과 보장.
+
   const host = $('#studioVisHost');
   if (!host) return;
+
+  const wrap = document.createElement('div');
+  wrap.style.cssText = `
+    position:absolute; left:0; top:0;
+    width:${CANVAS_W}px; height:${CANVAS_H}px;
+    transform-origin: top left;
+    pointer-events: none;
+    overflow: visible;
+  `;
+
   const div = document.createElement('div');
   div.dataset.npRole = 'overlay';
-  // canvas world coords 1920×1080 → host % 좌표로 변환
-  const leftPct = (npComp.x / CANVAS_W) * 100;
-  const topPct = (npComp.y / CANVAS_H) * 100;
-  const wPct = (npComp.width / CANVAS_W) * 100;
-  const hPct = (npComp.height / CANVAS_H) * 100;
-  // fontSize 도 host 의 % 폭 기준으로 스케일 (대략 — 정확한 1:1 은 아니지만 미리보기용)
   const align = npComp.textAlign || 'center';
   const justify = align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center';
   div.style.cssText = `
-    position:absolute;
-    left:${leftPct}%; top:${topPct}%;
-    width:${wPct}%; height:${hPct}%;
-    display:flex; align-items:center; justify-content:${justify};
-    font-family:${npComp.fontFamily || 'system-ui, sans-serif'};
-    font-weight:${npComp.bold ? '700' : '400'};
-    font-style:${npComp.italic ? 'italic' : 'normal'};
-    text-decoration:${npComp.underline ? 'underline' : 'none'};
-    color:${npComp.color || '#FFFFFF'};
-    text-transform:${npComp.textTransform || 'none'};
-    letter-spacing:${npComp.letterSpacing ?? 0}px;
-    white-space:nowrap; overflow:visible;
-    pointer-events:none; user-select:none;
-    opacity:0;
+    position: absolute;
+    left: ${npComp.x}px; top: ${npComp.y}px;
+    width: ${npComp.width}px; height: ${npComp.height}px;
+    display: flex; align-items: center; justify-content: ${justify};
+    font-family: ${npComp.fontFamily || 'system-ui, sans-serif'};
+    font-weight: ${npComp.bold ? '700' : '400'};
+    font-style: ${npComp.italic ? 'italic' : 'normal'};
+    text-decoration: ${npComp.underline ? 'underline' : 'none'};
+    color: ${npComp.color || '#FFFFFF'};
+    text-transform: ${npComp.textTransform || 'none'};
+    letter-spacing: ${npComp.letterSpacing ?? 0}px;
+    font-size: ${npComp.fontSize || 48}px;
+    white-space: nowrap; overflow: visible;
+    pointer-events: none; user-select: none;
+    opacity: 0;
   `;
-  // fontSize 는 컨테이너 % 와 무관하게 절대 px (canvas world 기준).
-  // 실제 화면 표시는 host 가 캔버스 width 에 맞게 스케일 되므로 vw 로 환산.
-  // host 의 width = canvas 의 표시 width. font-size 는 (npComp.fontSize / 1920) * host.clientWidth.
-  // 정확한 것은 ResizeObserver 로 해야 하지만, 우선 vw 단위로 근사:
-  div.style.fontSize = `calc((${npComp.fontSize || 48} / ${CANVAS_W}) * 100cqw)`;
-  div.style.containerType = 'inline-size';
-
-  // host 자체가 container — div 안에 못 두니 host 의 contentBox 를 컨테이너로 쓰려면
-  // host 에 containerType 적용. 하지만 host 는 다른 용도로도 쓰임 → 별도 wrapper.
-  const wrap = document.createElement('div');
-  wrap.style.cssText = 'position:absolute;inset:0;container-type:inline-size;pointer-events:none;';
   wrap.appendChild(div);
   host.appendChild(wrap);
+
   studio.npElement = div;
   studio._npWrap = wrap;
+
+  // ResizeObserver — host (= 캔버스 표시 영역) 크기 변화 따라 wrap scale 갱신.
+  const updateScale = () => {
+    const dispW = host.clientWidth;
+    if (!dispW) return;
+    wrap.style.transform = `scale(${dispW / CANVAS_W})`;
+  };
+  updateScale();
+  const ro = new ResizeObserver(updateScale);
+  ro.observe(host);
+  studio._npResizeObserver = ro;
 }
 
 function destroyNowPlaying() {
+  if (studio._npResizeObserver) {
+    try { studio._npResizeObserver.disconnect(); } catch {}
+    studio._npResizeObserver = null;
+  }
   if (studio._npWrap) {
     try { studio._npWrap.remove(); } catch {}
     studio._npWrap = null;
@@ -870,12 +890,30 @@ async function startRecording() {
   $('#studioStopRecBtn').hidden = false;
 
   const cv = $('#studioCanvas');
-  const muxerTarget = new globalThis.Mp4Muxer.ArrayBufferTarget();
+
+  // Phase 4-D-4 fix: ArrayBufferTarget + 'in-memory' 는 ~1.5GB+ 영상에서
+  // finalize 시 단일 ArrayBuffer 합치기 실패 (RangeError). StreamTarget 으로
+  // 청크별 누적 + Blob 변환 — 큰 파일도 메모리 안정.
+  // fastStart:false → metadata at end (sequential append-only writes).
+  const muxerChunks = [];
+  let muxerMaxEnd = 0;
+  const muxerTarget = new globalThis.Mp4Muxer.StreamTarget({
+    onData(data, position) {
+      // muxer 가 buffer 재사용 가능 → 즉시 복사
+      const copy = new Uint8Array(data.byteLength);
+      copy.set(data);
+      muxerChunks.push({ data: copy, position });
+      const end = position + data.byteLength;
+      if (end > muxerMaxEnd) muxerMaxEnd = end;
+    },
+    chunked: true,
+    chunkSize: 16 * 1024 * 1024,  // default 16 MiB
+  });
   const muxer = new globalThis.Mp4Muxer.Muxer({
     target: muxerTarget,
     video: { codec: 'avc', width: CANVAS_W, height: CANVAS_H },
     audio: { codec: 'aac', numberOfChannels: 2, sampleRate: 48000 },
-    fastStart: 'in-memory',
+    fastStart: false,
     firstTimestampBehavior: 'offset',
   });
 
@@ -903,7 +941,7 @@ async function startRecording() {
     bitrate: 128_000,
   });
 
-  studio._enc = { muxer, muxerTarget, vEnc, aEnc };
+  studio._enc = { muxer, muxerChunks, getMuxerMaxEnd: () => muxerMaxEnd, vEnc, aEnc };
 
   const tracks = studio.session.tracks;
   const totalDur = studio.session.totalDurationSec;
@@ -1024,7 +1062,31 @@ async function finishRecording() {
     await enc.aEnc.flush();
     enc.muxer.finalize();
 
-    const blob = new Blob([enc.muxerTarget.buffer], { type: 'video/mp4' });
+    // Phase 4-D-4 fix: StreamTarget 청크 → Blob (메모리 효율 — 단일 ArrayBuffer 합치지 않음).
+    // fastStart:false 이므로 sequential append-only 가 보장되지만, 안전을 위해 정렬 + 검증.
+    const writes = enc.muxerChunks;
+    writes.sort((a, b) => a.position - b.position);
+
+    let sequential = true;
+    let expectedPos = 0;
+    for (const w of writes) {
+      if (w.position !== expectedPos) { sequential = false; break; }
+      expectedPos += w.data.byteLength;
+    }
+
+    let blob;
+    if (sequential) {
+      // 정상 경로 — Blob 이 Uint8Array 배열을 받아 내부적으로 효율 처리 (디스크 백업 가능).
+      blob = new Blob(writes.map((w) => w.data), { type: 'video/mp4' });
+    } else {
+      // 비정상 (이론상 fastStart:false 에선 발생 X) — sparse 버퍼 fallback.
+      console.warn('[muxer] non-sequential writes 감지 — sparse buffer fallback');
+      const total = enc.getMuxerMaxEnd();
+      const buf = new Uint8Array(total);
+      for (const w of writes) buf.set(w.data, w.position);
+      blob = new Blob([buf], { type: 'video/mp4' });
+    }
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
