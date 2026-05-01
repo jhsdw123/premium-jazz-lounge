@@ -8,6 +8,7 @@ import {
   applyStateToElement as applyNPState,
   runPreview as runNPPreview,
 } from './now-playing-animations.js';
+import { drawPlaylist } from './playlist-renderer.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -181,6 +182,43 @@ function defaultsFor(type) {
         // Editor 미리보기 텍스트
         previewText: 'Sample Track Title',
       };
+    case 'playlist':
+      // Phase 4-D-3-B — 곡 전체 목록 표시 + 현재 곡 강조. 한 영상에 1개만.
+      return {
+        ...base,
+        width: 1600, height: 200,
+        x: (CANVAS_W - 1600) / 2, y: 200,
+        // 레이아웃
+        layout: 'slash',  // 'numbered' | 'dot' | 'slash' | 'box' | 'timecode'
+        // 텍스트 디자인
+        fontFamily: 'system-ui, sans-serif',
+        fontSize: 28,
+        bold: false,
+        italic: true,            // 형님 시그니처
+        color: '#FFFFFF',
+        textAlign: 'center',
+        letterSpacing: 0,
+        lineHeight: 1.5,
+        glow: 10,
+        glowColor: '#D4AF37',
+        // 강조 (토글)
+        highlightEnabled: true,
+        highlightColor: '#D4AF37',
+        highlightBold: true,
+        highlightItalic: false,
+        highlightUnderline: false,
+        highlightFontSize: null,  // null = 동일 크기, 숫자면 그 크기
+        // 미리보기 (Editor 만)
+        previewTracks: [
+          'Sample Track One',
+          'Sample Track Two',
+          'Sample Track Three',
+          'Sample Track Four',
+          'Sample Track Five',
+          'Sample Track Six',
+        ],
+        previewCurrentIdx: 1,
+      };
   }
   return base;
 }
@@ -188,6 +226,11 @@ function defaultsFor(type) {
 // 한 영상에 NowPlaying 1개 제약 — 추가 시 기존 존재 여부 검사.
 function hasNowPlaying() {
   return te.components.some((c) => c.type === 'nowplaying');
+}
+
+// 한 영상에 Playlist 1개 제약. NowPlaying 과 별개 (둘 다 추가 가능).
+function hasPlaylist() {
+  return te.components.some((c) => c.type === 'playlist');
 }
 
 // ─── 색상 유틸 ───────────────────────────────────────────────
@@ -611,8 +654,46 @@ function renderComponentInner(c) {
     case 'visualizer': return renderBars(c);
     case 'progress':   return renderProgress(c);
     case 'nowplaying': return renderNowPlayingInner(c);
+    case 'playlist':   return renderPlaylistInner(c);
   }
   return '';
+}
+
+// Playlist inner — Editor 도 canvas 로 그림 (Studio 의 미리보기 = 녹화 일치 보장 패턴 동일).
+// 컴포넌트 div 안에 canvas 하나. comp.width × comp.height (real px). CSS 로 100% 채움.
+function renderPlaylistInner(c) {
+  return `<canvas
+    class="te-playlist-canvas"
+    data-playlist-id="${c.id}"
+    width="${Math.round(c.width)}"
+    height="${Math.round(c.height)}"
+    style="width:100%;height:100%;pointer-events:none;display:block;"
+  ></canvas>`;
+}
+
+// 컴포넌트가 캔버스에 attach 된 후 호출 — 한 번 그리기 (정적 미리보기).
+// 속성 변경 / 리사이즈 후엔 다시 호출 필요.
+function renderPlaylistOnCanvas(c) {
+  const cv = document.querySelector(`canvas[data-playlist-id="${c.id}"]`);
+  if (!cv) return;
+  // resize 시 width/height 속성도 갱신 (CSS 만으론 cv 픽셀 해상도 안 바뀜)
+  if (cv.width !== Math.round(c.width)) cv.width = Math.round(c.width);
+  if (cv.height !== Math.round(c.height)) cv.height = Math.round(c.height);
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  // playlist-renderer 는 comp.x/y 를 absolute world 로 다룸. Editor 의 컴포넌트 canvas 는
+  // 자체 origin (0,0) 기준 → comp 의 x/y 를 0,0 으로 임시 치환해 전달.
+  // opacity 는 parent .te-comp div 가 CSS 로 이미 적용 → canvas 안에선 1 로 (이중 적용 방지).
+  const localComp = { ...c, x: 0, y: 0, opacity: 1 };
+  const tracks = (c.previewTracks || []).map((t) => {
+    if (typeof t === 'string') return { title: t, durationSec: 180 };
+    return { title: t.title || '', durationSec: t.durationSec || 180 };
+  });
+  const curIdx = Math.min(
+    Math.max(0, c.previewCurrentIdx ?? 0),
+    Math.max(0, tracks.length - 1)
+  );
+  drawPlaylist(ctx, localComp, tracks, curIdx);
 }
 
 // NowPlaying inner — Editor 미리보기는 plain div. 애니메이션 미리보기 시 inline style 갱신.
@@ -683,10 +764,15 @@ function renderCanvas() {
   for (const c of te.components) {
     if (c.type === 'visualizer') attachVisualizerInstance(c);
   }
+  // playlist 캔버스 그리기 (DOM 이 들어간 다음에)
+  for (const c of te.components) {
+    if (c.type === 'playlist') renderPlaylistOnCanvas(c);
+  }
   $('#teCompCount').textContent = String(te.components.length);
   renderBg();
   renderProps();
   updateAddNowPlayingBtn();
+  updateAddPlaylistBtn();
 }
 
 function renderBg() {
@@ -801,6 +887,10 @@ function bindComponentInteractions(el, c) {
             el.insertBefore(newInner.firstChild, el.firstChild);
           }
           applyComponentTransform(el, cur);
+        } else if (cur.type === 'playlist') {
+          // canvas 픽셀 해상도 갱신 + 재그리기 (HTML 교체 X — canvas 보존).
+          renderPlaylistOnCanvas(cur);
+          applyComponentTransform(el, cur);
         }
         if (te.selectedId === cur.id) renderProps();
       },
@@ -861,6 +951,7 @@ function updateComponent(id, patch) {
     el.insertBefore(inner.firstChild, el.firstChild);
   }
   applyComponentTransform(el, cur);
+  if (cur.type === 'playlist') renderPlaylistOnCanvas(cur);
 }
 
 function removeComponent(id) {
@@ -875,6 +966,11 @@ function addComponent(type) {
   // NowPlaying 은 한 영상에 1개만
   if (type === 'nowplaying' && hasNowPlaying()) {
     toast('NowPlaying 컴포넌트는 한 영상에 1개만 추가할 수 있습니다', 'info');
+    return;
+  }
+  // Playlist 도 한 영상에 1개만 (NowPlaying 과는 별개 — 둘 다 추가 가능)
+  if (type === 'playlist' && hasPlaylist()) {
+    toast('Playlist 컴포넌트는 한 영상에 1개만 추가할 수 있습니다', 'info');
     return;
   }
   const c = defaultsFor(type);
@@ -892,6 +988,7 @@ function addComponent(type) {
   te.selectedId = c.id;
   renderCanvas();
   updateAddNowPlayingBtn();
+  updateAddPlaylistBtn();
 }
 
 function updateAddNowPlayingBtn() {
@@ -902,6 +999,16 @@ function updateAddNowPlayingBtn() {
   btn.title = exists
     ? '한 영상에 1개만 추가 가능 (이미 추가됨)'
     : '곡 제목 자동 표시 (한 영상에 1개)';
+}
+
+function updateAddPlaylistBtn() {
+  const btn = document.getElementById('teAddPlaylistBtn');
+  if (!btn) return;
+  const exists = hasPlaylist();
+  btn.disabled = exists;
+  btn.title = exists
+    ? '한 영상에 1개만 추가 가능 (이미 추가됨)'
+    : '전체 곡 목록 + 현재 곡 강조 (한 영상에 1개)';
 }
 
 // ─── Properties panel ─────────────────────────────────────────
@@ -1244,6 +1351,115 @@ function renderProps() {
         <button type="button" id="teNpPreviewBtn" class="te-btn gold" style="width:100%;height:36px;">▶ 애니메이션 미리보기</button>
       </div>
     `;
+  } else if (c.type === 'playlist') {
+    const slider = (key, label, min, max, step, val, suffix = '') => `
+      <div class="slider-row">
+        <label>${label}</label>
+        <input type="range" data-prop="${key}" min="${min}" max="${max}" step="${step}" value="${val}" />
+        <span class="val" data-val-for="${key}">${val}${suffix}</span>
+      </div>
+    `;
+    const previewMax = Math.max(0, (c.previewTracks?.length || 1) - 1);
+    const previewIdx = Math.min(c.previewCurrentIdx ?? 0, previewMax);
+    const previewTracksText = (c.previewTracks || []).join('\n');
+    typeFields = `
+      <div class="te-prop full" style="background:var(--bg-input);padding:8px;border-radius:4px;border-left:3px solid var(--jazz-gold);">
+        <div style="font-size:10px;color:var(--jazz-gold);font-weight:700;margin-bottom:4px;">📋 PLAYLIST — 자동 표시</div>
+        <div style="font-size:10px;color:var(--text-muted);line-height:1.5;">전체 곡 목록 자동 채움 + 현재 곡 강조. 한 영상에 1개만.</div>
+      </div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 레이아웃 —</label>
+      </div>
+      <div class="te-prop full">
+        <label>Layout</label>
+        <select data-prop="layout">
+          <option value="numbered" ${c.layout === 'numbered' ? 'selected' : ''}>Numbered (1. Track)</option>
+          <option value="dot" ${c.layout === 'dot' ? 'selected' : ''}>Dot (Track · Track)</option>
+          <option value="slash" ${(!c.layout || c.layout === 'slash') ? 'selected' : ''}>Slash (Track | Track)</option>
+          <option value="box" ${c.layout === 'box' ? 'selected' : ''}>Box (current centered)</option>
+          <option value="timecode" ${c.layout === 'timecode' ? 'selected' : ''}>Timecode (00:00 - Track)</option>
+        </select>
+      </div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 텍스트 —</label>
+      </div>
+      <div class="te-prop"><label>Font Family</label>
+        <select data-prop="fontFamily">
+          <option ${c.fontFamily === 'system-ui, sans-serif' ? 'selected' : ''} value="system-ui, sans-serif">System</option>
+          <option ${c.fontFamily?.startsWith('Playfair') ? 'selected' : ''} value="Playfair Display, serif">Playfair Display</option>
+          <option ${c.fontFamily?.startsWith('Inter') ? 'selected' : ''} value="Inter, sans-serif">Inter</option>
+          <option ${c.fontFamily?.startsWith('Georgia') ? 'selected' : ''} value="Georgia, serif">Georgia</option>
+          <option ${c.fontFamily?.startsWith('Cinzel') ? 'selected' : ''} value="Cinzel, serif">Cinzel</option>
+          <option ${c.fontFamily?.includes('monospace') ? 'selected' : ''} value="SF Mono, Menlo, monospace">Mono</option>
+        </select>
+      </div>
+      <div class="te-prop"><label>Font Size</label><input type="number" data-prop="fontSize" value="${c.fontSize || 28}" min="10" max="120" /></div>
+      <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#FFFFFF'}" /></div>
+      <div class="te-prop">
+        <label>Style</label>
+        <div class="te-toggle-group">
+          <button type="button" class="te-toggle-btn ${c.bold ? 'active' : ''}" data-toggle="bold" style="font-weight:700;">B</button>
+          <button type="button" class="te-toggle-btn ${c.italic ? 'active' : ''}" data-toggle="italic" style="font-style:italic;">I</button>
+        </div>
+      </div>
+      <div class="te-prop">
+        <label>Align</label>
+        <div class="te-toggle-group">
+          <button type="button" class="te-toggle-btn ${c.textAlign === 'left' ? 'active' : ''}" data-align="left">≡ L</button>
+          <button type="button" class="te-toggle-btn ${(!c.textAlign || c.textAlign === 'center') ? 'active' : ''}" data-align="center">≡ C</button>
+          <button type="button" class="te-toggle-btn ${c.textAlign === 'right' ? 'active' : ''}" data-align="right">≡ R</button>
+        </div>
+      </div>
+      ${slider('letterSpacing', 'Letter Spacing', -5, 20, 0.5, c.letterSpacing ?? 0, 'px')}
+      ${slider('lineHeight', 'Line Height', 1.0, 2.5, 0.05, c.lineHeight ?? 1.5, '')}
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— Glow —</label>
+      </div>
+      ${slider('glow', 'Glow', 0, 50, 1, c.glow ?? 10, 'px')}
+      <div class="te-prop"><label>Glow Color</label><input type="color" data-prop="glowColor" value="${c.glowColor || '#D4AF37'}" /></div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 현재 곡 강조 —</label>
+      </div>
+      <div class="te-prop full">
+        <label class="vocal-check" style="font-size:12px;">
+          <input type="checkbox" data-prop-bool="highlightEnabled" ${c.highlightEnabled !== false ? 'checked' : ''} />
+          Enable Highlight (현재 재생곡 강조)
+        </label>
+      </div>
+      ${c.highlightEnabled !== false ? `
+        <div class="te-prop"><label>HL Color</label><input type="color" data-prop="highlightColor" value="${c.highlightColor || '#D4AF37'}" /></div>
+        <div class="te-prop">
+          <label>HL Style</label>
+          <div class="te-toggle-group">
+            <button type="button" class="te-toggle-btn ${c.highlightBold ? 'active' : ''}" data-toggle="highlightBold" style="font-weight:700;">B</button>
+            <button type="button" class="te-toggle-btn ${c.highlightItalic ? 'active' : ''}" data-toggle="highlightItalic" style="font-style:italic;">I</button>
+            <button type="button" class="te-toggle-btn ${c.highlightUnderline ? 'active' : ''}" data-toggle="highlightUnderline" style="text-decoration:underline;">U</button>
+          </div>
+        </div>
+        <div class="te-prop full">
+          <label class="vocal-check" style="font-size:12px;">
+            <input type="checkbox" id="teHlFontSizeEnable" ${c.highlightFontSize ? 'checked' : ''} />
+            Override Font Size
+          </label>
+        </div>
+        ${c.highlightFontSize ? `
+          <div class="te-prop"><label>HL Size</label><input type="number" data-prop="highlightFontSize" value="${c.highlightFontSize}" min="10" max="200" /></div>
+        ` : ''}
+      ` : ''}
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 미리보기 —</label>
+      </div>
+      <div class="te-prop full">
+        <label>Preview Tracks (한 줄에 1곡)</label>
+        <textarea id="tePlaylistPreviewTracks" rows="6" style="width:100%;font-family:inherit;font-size:12px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);padding:6px;border-radius:4px;">${escapeHtml(previewTracksText)}</textarea>
+      </div>
+      ${slider('previewCurrentIdx', 'Preview Current', 0, previewMax, 1, previewIdx, '')}
+    `;
   }
 
   wrap.innerHTML = `
@@ -1280,8 +1496,42 @@ function renderProps() {
   wrap.querySelectorAll('[data-prop-bool]').forEach((inp) => {
     inp.addEventListener('change', () => {
       updateComponent(c.id, { [inp.dataset.propBool]: inp.checked });
+      // highlightEnabled 토글 시 강조 sub-옵션 show/hide 위해 props 다시 그리기.
+      if (inp.dataset.propBool === 'highlightEnabled') renderProps();
     });
   });
+
+  // Playlist — Preview Tracks textarea (각 줄 = 1 곡)
+  const pTracksEl = wrap.querySelector('#tePlaylistPreviewTracks');
+  if (pTracksEl && c.type === 'playlist') {
+    pTracksEl.addEventListener('input', () => {
+      const arr = pTracksEl.value.split('\n').map((s) => s.trim()).filter(Boolean);
+      const cur = te.components.find((x) => x.id === c.id);
+      if (!cur) return;
+      // previewCurrentIdx 가 새 길이를 초과하면 보정
+      const maxIdx = Math.max(0, arr.length - 1);
+      const newIdx = Math.min(cur.previewCurrentIdx ?? 0, maxIdx);
+      updateComponent(cur.id, { previewTracks: arr, previewCurrentIdx: newIdx });
+    });
+    // textarea 안에서는 props 다시 그리지 않음 — 커서 위치 유지 위해.
+    // 단, 길이가 줄어 슬라이더 max 가 갱신되어야 할 때는 어쩔 수 없이 재렌더 필요 →
+    // change (blur) 시 재렌더.
+    pTracksEl.addEventListener('change', () => {
+      renderProps();
+    });
+  }
+
+  // Playlist — HL Font Size override 체크박스
+  const hlSizeEnable = wrap.querySelector('#teHlFontSizeEnable');
+  if (hlSizeEnable && c.type === 'playlist') {
+    hlSizeEnable.addEventListener('change', () => {
+      const cur = te.components.find((x) => x.id === c.id);
+      if (!cur) return;
+      const next = hlSizeEnable.checked ? Math.round((cur.fontSize || 28) * 1.3) : null;
+      updateComponent(cur.id, { highlightFontSize: next });
+      renderProps();
+    });
+  }
   // 이미지 재업로드 버튼
   const reup = wrap.querySelector('#teReuploadImg');
   if (reup) {

@@ -14,6 +14,7 @@ import {
   applyStateToElement as applyNPState,
   drawStateOnCanvas as drawNPState,
 } from './now-playing-animations.js';
+import { drawPlaylist } from './playlist-renderer.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -46,6 +47,11 @@ const studio = {
   npCtrl: null,               // animation controller
   npElement: null,            // DOM overlay div (live preview 용)
   npLastTrackIdx: -1,         // 곡 변경 감지용
+
+  // Playlist (한 영상에 1개만) — canvas-only.
+  plComp: null,              // template 의 playlist 컴포넌트
+  plTracks: [],              // [{ title, durationSec }, ...] — session 에서 자동 채움
+  plCurrentIdx: 0,
 
   // 재생 상태
   playing: false,
@@ -277,6 +283,12 @@ function renderFrame() {
     else if (c.type === 'progress') drawProgressComponent(ctx, c, varsCtx);
     else if (c.type === 'visualizer') drawVisualizerComponent(ctx, c);
     // NowPlaying 은 항상 마지막 (overlay) — 별도 처리 (DOM + canvas 동기화)
+    // Playlist 도 별도 (canvas-only, 곡 idx 가 state)
+  }
+
+  // 3-b) Playlist — canvas-only. 미리보기/녹화 동일 (DOM overlay 없음).
+  if (studio.plComp && studio.plTracks.length > 0) {
+    drawPlaylist(ctx, studio.plComp, studio.plTracks, studio.plCurrentIdx);
   }
 
   // 4) NowPlaying — 모드별 분기.
@@ -360,6 +372,39 @@ function destroyNowPlaying() {
   studio.npComp = null;
   studio.npCtrl = null;
   studio.npLastTrackIdx = -1;
+}
+
+// ─── Playlist 셋업 / 트리거 (canvas-only) ────────────────────────
+function setupPlaylist() {
+  destroyPlaylist();
+  const plComp = studio.components.find((c) => c.type === 'playlist');
+  if (!plComp) return;
+  studio.plComp = plComp;
+  // session.tracks 에서 { title, durationSec } 추출. 없으면 previewTracks fallback.
+  const sessionTracks = studio.session?.tracks || [];
+  if (sessionTracks.length > 0) {
+    studio.plTracks = sessionTracks.map((t) => ({
+      title: t.title || '',
+      durationSec: t.durationSec || 0,
+    }));
+  } else {
+    studio.plTracks = (plComp.previewTracks || []).map((t) =>
+      typeof t === 'string' ? { title: t, durationSec: 180 } : t
+    );
+  }
+  studio.plCurrentIdx = 0;
+}
+
+function destroyPlaylist() {
+  studio.plComp = null;
+  studio.plTracks = [];
+  studio.plCurrentIdx = 0;
+}
+
+// 곡 변경 — Playlist 의 강조 idx 갱신. renderFrame 다음 frame 에서 자동 반영.
+function onTrackChangeForPlaylist(newIdx) {
+  if (!studio.plComp) return;
+  studio.plCurrentIdx = newIdx;
 }
 
 // 곡 변경 시 NowPlaying 트리거 — loadTrack 에서 호출.
@@ -482,6 +527,8 @@ function loadTrack(idx) {
   updateProgressUI();
   // NowPlaying 트리거 — out → in chained
   onTrackChangeForNP(idx);
+  // Playlist 강조 갱신
+  onTrackChangeForPlaylist(idx);
   return true;
 }
 
@@ -641,11 +688,12 @@ async function bootSession(session) {
   $('#studioMetaTemplate').textContent = tpl.name || '(기본)';
   $('#studioCanvasTitle').textContent = session.title || '(미리보기)';
 
-  // 이미지 + AudioMotion + NowPlaying 준비
+  // 이미지 + AudioMotion + NowPlaying + Playlist 준비
   await preloadImages();
   ensureAudioElement();
   attachVisualizers();
   setupNowPlaying();
+  setupPlaylist();
   updateProgressUI();
   updateButtons();
   startRenderLoop();
@@ -692,6 +740,7 @@ function teardown() {
   studio.visInstances.clear();
   studio.visCanvases.clear();
   destroyNowPlaying();
+  destroyPlaylist();
   studio.session = null;
   studio.components = [];
   studio.bgImg = null;
