@@ -279,11 +279,20 @@ function renderFrame() {
     // NowPlaying 은 항상 마지막 (overlay) — 별도 처리 (DOM + canvas 동기화)
   }
 
-  // 4) NowPlaying — DOM overlay 갱신 + canvas 에 동시 그리기
+  // 4) NowPlaying — 모드별 분기.
+  //    재생(미리보기): DOM overlay 만 갱신 (canvas 에 안 그림 → DOM+canvas 이중 표시 방지).
+  //    녹화: DOM 숨김 + canvas 에 그리기 (mp4 capture 대상은 canvas).
   if (studio.npComp && studio.npCtrl) {
     const state = studio.npCtrl.stateAt();
-    if (studio.npElement) applyNPState(studio.npElement, state, studio.npComp);
-    drawNPState(ctx, state, studio.npComp);
+    if (studio.recording) {
+      if (studio.npElement) studio.npElement.style.visibility = 'hidden';
+      drawNPState(ctx, state, studio.npComp);
+    } else {
+      if (studio.npElement) {
+        studio.npElement.style.visibility = '';
+        applyNPState(studio.npElement, state, studio.npComp);
+      }
+    }
   }
 }
 

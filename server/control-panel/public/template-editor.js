@@ -179,7 +179,7 @@ function defaultsFor(type) {
         animationDurationMs: 800,
         fadeOutMs: 500,
         // Editor 미리보기 텍스트
-        previewText: '곡 제목 미리보기',
+        previewText: 'Sample Track Title',
       };
   }
   return base;
@@ -632,7 +632,7 @@ function renderNowPlayingInner(c) {
     letter-spacing:${c.letterSpacing ?? 0}px;
     white-space:nowrap;overflow:visible;
     pointer-events:none;user-select:none;
-  ">${escapeHtml(c.previewText || '곡 제목 미리보기')}</div>`;
+  ">${escapeHtml(c.previewText || 'Sample Track Title')}</div>`;
 }
 
 function applyComponentTransform(el, c) {
@@ -775,7 +775,7 @@ function bindComponentInteractions(el, c) {
         cur.height = Math.max(10, Math.round(cur.height + ev.deltaRect.height / s));
         // Text 는 폭에 비례해 폰트 크기 함께 스케일.
         // drag start 시점 기준 누적 ratio (per-frame round 누적 X).
-        if (cur.type === 'text' && _dragStart && _dragStart.width > 0) {
+        if ((cur.type === 'text' || cur.type === 'nowplaying') && _dragStart && _dragStart.width > 0) {
           const factor = cur.width / _dragStart.width;
           cur.fontSize = Math.max(8, Math.round(_dragStart.fontSize * factor));
         }
@@ -787,7 +787,7 @@ function bindComponentInteractions(el, c) {
             el.querySelector(`[data-vis-am-id="${cur.id}"]`),
             cur
           );
-        } else if (cur.type === 'progress' || cur.type === 'image' || cur.type === 'text') {
+        } else if (cur.type === 'progress' || cur.type === 'image' || cur.type === 'text' || cur.type === 'nowplaying') {
           // 강제 재렌더 — 본체만 교체
           const newInner = document.createElement('div');
           newInner.style.width = '100%'; newInner.style.height = '100%';
@@ -1173,7 +1173,7 @@ function renderProps() {
 
       <div class="te-prop full">
         <label>미리보기 텍스트 (Editor 만)</label>
-        <input type="text" data-prop="previewText" value="${escapeHtml(c.previewText || '곡 제목 미리보기')}" />
+        <input type="text" data-prop="previewText" value="${escapeHtml(c.previewText || 'Sample Track Title')}" />
       </div>
 
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
@@ -1416,7 +1416,7 @@ function playNowPlayingPreview(compId) {
   if (!compEl) return;
 
   const ctrl = createNPController(cur);
-  ctrl.startIn(cur.previewText || '곡 제목 미리보기');
+  ctrl.startIn(cur.previewText || 'Sample Track Title');
 
   const tick = () => {
     const state = ctrl.stateAt();
