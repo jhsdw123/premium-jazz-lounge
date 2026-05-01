@@ -30,18 +30,12 @@ oauth-token*.json
 out/
 dist/
 build/
-video/out/
-
-# Remotion
-video/.remotion/
 
 # Local data (대용량, 재생성 가능)
 data/tracks/
 data/output/
 data/temp/
 data/cache/
-video/public/tracks/
-video/public/analysis/
 
 # OS files
 .DS_Store

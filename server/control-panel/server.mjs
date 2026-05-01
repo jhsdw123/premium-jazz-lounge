@@ -21,8 +21,6 @@ import { generateTitleCandidates } from '../../lib/llm.mjs';
 import { normalizeTitle, findCollision } from '../../lib/title-utils.mjs';
 import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
-import { buildAndPersistPlaylist } from '../../lib/template-to-remotion.mjs';
-import { analyzeTrack as analyzeTrackForVisualizer, pickVisualizerOptions } from '../../lib/audio-analysis.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -1603,54 +1601,12 @@ app.post('/api/videos', async (req, res) => {
     const { error: vtErr } = await supabase.from('pjl_video_tracks').insert(vtRows);
     if (vtErr) throw vtErr;
 
-    // 6) Remotion 입력 빌드 + 트랙 다운로드 + jazz-playlist.json 쓰기
-    let buildResult;
-    try {
-      buildResult = await buildAndPersistPlaylist({
-        template: templateRow,
-        tracks: orderedTracks,
-        videoTitle: seriesRow ? `${seriesRow.name} Vol.${nextVolume} — ${title}` : title,
-      });
-    } catch (e) {
-      return res.status(500).json({
-        ok: false,
-        error: `playlist/다운로드 실패: ${e.message}`,
-        videoId: video.id,
-        buildId,
-      });
-    }
-
-    // 6.5) AudioMotion 사전 분석 — 비주얼라이저 컴포넌트가 있으면 곡당 .bin 생성.
-    //      (Phase 4-C-2 v5 — Editor 와 동일한 AudioMotion 결과를 Remotion 측에서 재생)
-    const visOpts = pickVisualizerOptions(templateRow);
-    const analyses = [];
-    if (visOpts) {
-      const origin = `http://localhost:${PORT}`;
-      for (const t of orderedTracks) {
-        try {
-          const { data: signed } = await supabase.storage
-            .from(SUPABASE_BUCKET)
-            .createSignedUrl(t.storage_path, 3600);
-          const audioUrl = signed?.signedUrl;
-          if (!audioUrl) throw new Error('signed URL 발급 실패');
-          const r = await analyzeTrackForVisualizer({
-            controlPanelOrigin: origin,
-            audioUrl,
-            trackId: t.id,
-            visOptions: visOpts,
-          });
-          analyses.push({ trackId: t.id, status: 'ok', ...r });
-        } catch (e) {
-          console.warn(`[analysis] track ${t.id} 실패:`, e.message);
-          analyses.push({ trackId: t.id, status: 'error', error: e.message });
-        }
-      }
-    }
-
-    // 7) total_duration_sec 갱신 + template use_count + series.current_vol 증가
+    // 6) total_duration_sec 갱신 + template use_count + series.current_vol 증가
+    //    (Phase 4-D-1 — Remotion 제거. 영상 export 는 브라우저 Studio 탭에서.)
+    const totalDurationSec = cursor;
     await supabase
       .from('pjl_video_projects')
-      .update({ total_duration_sec: Math.round(buildResult.totalDurationSec) })
+      .update({ total_duration_sec: Math.round(totalDurationSec) })
       .eq('id', video.id);
 
     await supabase
@@ -1665,17 +1621,8 @@ app.post('/api/videos', async (req, res) => {
         .eq('id', seriesRow.id);
     }
 
-    // 8) 트랙 사용 카운트 증가
-    for (const t of orderedTracks) {
-      await supabase
-        .from('pjl_tracks')
-        .update({
-          used_count: undefined, // sentinel — 다음 줄에서 RPC 또는 별도 처리
-        })
-        .eq('id', t.id);
-    }
-    // 위는 noop. 아래에서 sequential 실제 증가 — supabase-js 는 increment RPC 별도 필요해서
-    // 간단히 select → update 로.
+    // 7) 트랙 사용 카운트 증가
+    //    supabase-js 는 increment RPC 별도 필요 → 간단히 select → update 로.
     for (const t of orderedTracks) {
       const { data: row } = await supabase
         .from('pjl_tracks')
@@ -1703,11 +1650,8 @@ app.post('/api/videos', async (req, res) => {
       seriesName: seriesRow?.name || null,
       templateId: templateRow.id,
       templateName: templateRow.name,
-      totalDurationSec: buildResult.totalDurationSec,
+      totalDurationSec,
       trackCount: orderedTracks.length,
-      downloads: buildResult.downloads,
-      playlistPath: buildResult.playlistPath,
-      analyses,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
