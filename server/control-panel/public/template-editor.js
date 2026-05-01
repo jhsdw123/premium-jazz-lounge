@@ -9,6 +9,7 @@ import {
   runPreview as runNPPreview,
 } from './now-playing-animations.js';
 import { drawPlaylist } from './playlist-renderer.js';
+import { drawClock } from './clock-renderer.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -182,6 +183,25 @@ function defaultsFor(type) {
         // Editor 미리보기 텍스트
         previewText: 'Sample Track Title',
       };
+    case 'clock':
+      // Phase 4-D-3-C — 현재 곡의 경과 시간 표시. 곡당 리셋. 한 영상에 1개만.
+      return {
+        ...base,
+        width: 280, height: 100,
+        x: (CANVAS_W - 280) / 2, y: 600,
+        // 디자인
+        design: 'legacy',  // 'legacy' | 'neon' | 'flip' | 'minimal'
+        // 텍스트
+        fontFamily: 'monospace',
+        fontSize: 60,
+        color: '#FFFFFF',
+        // glow
+        glow: 10,
+        glowColor: '#D4AF37',
+        // 미리보기 (Editor 만)
+        previewSec: 87,            // 1:27
+        previewDurationSec: 180,   // 3:00
+      };
     case 'playlist':
       // Phase 4-D-3-B — 곡 전체 목록 표시 + 현재 곡 강조. 한 영상에 1개만.
       return {
@@ -231,6 +251,11 @@ function hasNowPlaying() {
 // 한 영상에 Playlist 1개 제약. NowPlaying 과 별개 (둘 다 추가 가능).
 function hasPlaylist() {
   return te.components.some((c) => c.type === 'playlist');
+}
+
+// 한 영상에 Clock 1개 제약. NowPlaying / Playlist 와 별개.
+function hasClock() {
+  return te.components.some((c) => c.type === 'clock');
 }
 
 // ─── 색상 유틸 ───────────────────────────────────────────────
@@ -655,6 +680,7 @@ function renderComponentInner(c) {
     case 'progress':   return renderProgress(c);
     case 'nowplaying': return renderNowPlayingInner(c);
     case 'playlist':   return renderPlaylistInner(c);
+    case 'clock':      return renderClockInner(c);
   }
   return '';
 }
@@ -669,6 +695,30 @@ function renderPlaylistInner(c) {
     height="${Math.round(c.height)}"
     style="width:100%;height:100%;pointer-events:none;display:block;"
   ></canvas>`;
+}
+
+// Clock inner — canvas (Editor 정적 미리보기, previewSec 시점 한 frame).
+function renderClockInner(c) {
+  return `<canvas
+    class="te-clock-canvas"
+    data-clock-id="${c.id}"
+    width="${Math.round(c.width)}"
+    height="${Math.round(c.height)}"
+    style="width:100%;height:100%;pointer-events:none;display:block;"
+  ></canvas>`;
+}
+
+function renderClockOnCanvas(c) {
+  const cv = document.querySelector(`canvas[data-clock-id="${c.id}"]`);
+  if (!cv) return;
+  if (cv.width !== Math.round(c.width)) cv.width = Math.round(c.width);
+  if (cv.height !== Math.round(c.height)) cv.height = Math.round(c.height);
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  // clock-renderer 도 comp.x/y 를 absolute 로 다룸 → 0,0 으로.
+  // opacity 는 parent .te-comp 가 CSS 로 적용 → canvas 안에선 1.
+  const localComp = { ...c, x: 0, y: 0, opacity: 1 };
+  drawClock(ctx, localComp, c.previewSec ?? 87);
 }
 
 // 컴포넌트가 캔버스에 attach 된 후 호출 — 한 번 그리기 (정적 미리보기).
@@ -768,11 +818,16 @@ function renderCanvas() {
   for (const c of te.components) {
     if (c.type === 'playlist') renderPlaylistOnCanvas(c);
   }
+  // clock 캔버스 그리기
+  for (const c of te.components) {
+    if (c.type === 'clock') renderClockOnCanvas(c);
+  }
   $('#teCompCount').textContent = String(te.components.length);
   renderBg();
   renderProps();
   updateAddNowPlayingBtn();
   updateAddPlaylistBtn();
+  updateAddClockBtn();
 }
 
 function renderBg() {
@@ -861,7 +916,7 @@ function bindComponentInteractions(el, c) {
         cur.height = Math.max(10, Math.round(cur.height + ev.deltaRect.height / s));
         // Text 는 폭에 비례해 폰트 크기 함께 스케일.
         // drag start 시점 기준 누적 ratio (per-frame round 누적 X).
-        if ((cur.type === 'text' || cur.type === 'nowplaying') && _dragStart && _dragStart.width > 0) {
+        if ((cur.type === 'text' || cur.type === 'nowplaying' || cur.type === 'clock') && _dragStart && _dragStart.width > 0) {
           const factor = cur.width / _dragStart.width;
           cur.fontSize = Math.max(8, Math.round(_dragStart.fontSize * factor));
         }
@@ -890,6 +945,9 @@ function bindComponentInteractions(el, c) {
         } else if (cur.type === 'playlist') {
           // canvas 픽셀 해상도 갱신 + 재그리기 (HTML 교체 X — canvas 보존).
           renderPlaylistOnCanvas(cur);
+          applyComponentTransform(el, cur);
+        } else if (cur.type === 'clock') {
+          renderClockOnCanvas(cur);
           applyComponentTransform(el, cur);
         }
         if (te.selectedId === cur.id) renderProps();
@@ -952,6 +1010,7 @@ function updateComponent(id, patch) {
   }
   applyComponentTransform(el, cur);
   if (cur.type === 'playlist') renderPlaylistOnCanvas(cur);
+  if (cur.type === 'clock') renderClockOnCanvas(cur);
 }
 
 function removeComponent(id) {
@@ -973,6 +1032,11 @@ function addComponent(type) {
     toast('Playlist 컴포넌트는 한 영상에 1개만 추가할 수 있습니다', 'info');
     return;
   }
+  // Clock 도 한 영상에 1개만
+  if (type === 'clock' && hasClock()) {
+    toast('Clock 컴포넌트는 한 영상에 1개만 추가할 수 있습니다', 'info');
+    return;
+  }
   const c = defaultsFor(type);
   if (type === 'image') {
     // 이미지는 src 가 있어야 의미 있음 — 업로드 dialog 띄우기
@@ -989,6 +1053,7 @@ function addComponent(type) {
   renderCanvas();
   updateAddNowPlayingBtn();
   updateAddPlaylistBtn();
+  updateAddClockBtn();
 }
 
 function updateAddNowPlayingBtn() {
@@ -1009,6 +1074,16 @@ function updateAddPlaylistBtn() {
   btn.title = exists
     ? '한 영상에 1개만 추가 가능 (이미 추가됨)'
     : '전체 곡 목록 + 현재 곡 강조 (한 영상에 1개)';
+}
+
+function updateAddClockBtn() {
+  const btn = document.getElementById('teAddClockBtn');
+  if (!btn) return;
+  const exists = hasClock();
+  btn.disabled = exists;
+  btn.title = exists
+    ? '한 영상에 1개만 추가 가능 (이미 추가됨)'
+    : '현재 곡 경과 시간 + 4종 디자인 (한 영상에 1개)';
 }
 
 // ─── Properties panel ─────────────────────────────────────────
@@ -1459,6 +1534,62 @@ function renderProps() {
         <textarea id="tePlaylistPreviewTracks" rows="6" style="width:100%;font-family:inherit;font-size:12px;background:var(--bg-input);color:var(--text);border:1px solid var(--border);padding:6px;border-radius:4px;">${escapeHtml(previewTracksText)}</textarea>
       </div>
       ${slider('previewCurrentIdx', 'Preview Current', 0, previewMax, 1, previewIdx, '')}
+    `;
+  } else if (c.type === 'clock') {
+    const slider = (key, label, min, max, step, val, suffix = '') => `
+      <div class="slider-row">
+        <label>${label}</label>
+        <input type="range" data-prop="${key}" min="${min}" max="${max}" step="${step}" value="${val}" />
+        <span class="val" data-val-for="${key}">${val}${suffix}</span>
+      </div>
+    `;
+    const previewDur = c.previewDurationSec || 180;
+    const previewSec = Math.min(c.previewSec ?? 87, previewDur);
+    typeFields = `
+      <div class="te-prop full" style="background:var(--bg-input);padding:8px;border-radius:4px;border-left:3px solid var(--jazz-gold);">
+        <div style="font-size:10px;color:var(--jazz-gold);font-weight:700;margin-bottom:4px;">⏱ CLOCK — 곡당 리셋</div>
+        <div style="font-size:10px;color:var(--text-muted);line-height:1.5;">현재 곡 경과 시간 0:00부터. 곡 바뀔 때 자동 리셋. 한 영상에 1개만.</div>
+      </div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 디자인 —</label>
+      </div>
+      <div class="te-prop full">
+        <label>Design</label>
+        <select data-prop="design">
+          <option value="legacy" ${(!c.design || c.design === 'legacy') ? 'selected' : ''}>Legacy (옛 7-segment)</option>
+          <option value="neon" ${c.design === 'neon' ? 'selected' : ''}>Neon (faded 8:88 + glow)</option>
+          <option value="flip" ${c.design === 'flip' ? 'selected' : ''}>3D Flip (fade transition)</option>
+          <option value="minimal" ${c.design === 'minimal' ? 'selected' : ''}>Minimal Pulse</option>
+        </select>
+      </div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 텍스트 —</label>
+      </div>
+      <div class="te-prop"><label>Font Family</label>
+        <select data-prop="fontFamily">
+          <option ${(!c.fontFamily || c.fontFamily === 'monospace') ? 'selected' : ''} value="monospace">Monospace</option>
+          <option ${c.fontFamily?.includes('Courier') ? 'selected' : ''} value='"Courier New", monospace'>Courier New</option>
+          <option ${c.fontFamily?.includes('SF Mono') ? 'selected' : ''} value="SF Mono, Menlo, monospace">SF Mono</option>
+          <option ${c.fontFamily?.includes('Roboto Mono') ? 'selected' : ''} value='"Roboto Mono", monospace'>Roboto Mono</option>
+          <option ${c.fontFamily?.includes('Orbitron') ? 'selected' : ''} value='"Orbitron", "Courier New", monospace'>Orbitron (Neon)</option>
+        </select>
+      </div>
+      ${slider('fontSize', 'Font Size', 20, 160, 1, c.fontSize ?? 60, 'px')}
+      <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#FFFFFF'}" /></div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— Glow —</label>
+      </div>
+      ${slider('glow', 'Glow', 0, 50, 1, c.glow ?? 10, 'px')}
+      <div class="te-prop"><label>Glow Color</label><input type="color" data-prop="glowColor" value="${c.glowColor || '#D4AF37'}" /></div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 미리보기 —</label>
+      </div>
+      ${slider('previewSec', 'Preview Sec', 0, previewDur, 1, previewSec, 's')}
+      <div class="te-prop"><label>Preview Duration</label><input type="number" data-prop="previewDurationSec" value="${previewDur}" min="10" max="3600" /></div>
     `;
   }
 

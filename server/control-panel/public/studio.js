@@ -15,6 +15,7 @@ import {
   drawStateOnCanvas as drawNPState,
 } from './now-playing-animations.js';
 import { drawPlaylist } from './playlist-renderer.js';
+import { drawClock } from './clock-renderer.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -52,6 +53,9 @@ const studio = {
   plComp: null,              // template 의 playlist 컴포넌트
   plTracks: [],              // [{ title, durationSec }, ...] — session 에서 자동 채움
   plCurrentIdx: 0,
+
+  // Clock (한 영상에 1개만) — canvas-only.
+  clockComp: null,           // template 의 clock 컴포넌트
 
   // 재생 상태
   playing: false,
@@ -291,6 +295,14 @@ function renderFrame() {
     drawPlaylist(ctx, studio.plComp, studio.plTracks, studio.plCurrentIdx);
   }
 
+  // 3-c) Clock — canvas-only. 곡당 elapsed = audio.currentTime.
+  //              loadTrack 에서 audio.src 바꾸면 자동으로 0 으로 리셋 → 곡당 리셋.
+  //              녹화 시에도 captureTrackFramesLive 가 실시간 재생하므로 동일하게 정확.
+  if (studio.clockComp) {
+    const elapsed = studio.audioElement?.currentTime || 0;
+    drawClock(ctx, studio.clockComp, elapsed);
+  }
+
   // 4) NowPlaying — 모드별 분기.
   //    재생(미리보기): DOM overlay 만 갱신 (canvas 에 안 그림 → DOM+canvas 이중 표시 방지).
   //    녹화: DOM 숨김 + canvas 에 그리기 (mp4 capture 대상은 canvas).
@@ -405,6 +417,17 @@ function destroyPlaylist() {
 function onTrackChangeForPlaylist(newIdx) {
   if (!studio.plComp) return;
   studio.plCurrentIdx = newIdx;
+}
+
+// ─── Clock 셋업 (canvas-only) ────────────────────────────────────
+// 곡당 리셋: audio.currentTime 이 자동으로 곡 시작 시점에 0 으로 reset 됨
+//             (loadTrack 에서 audio.src 바꾸면서). 별도 state 불필요.
+function setupClock() {
+  destroyClock();
+  studio.clockComp = studio.components.find((c) => c.type === 'clock') || null;
+}
+function destroyClock() {
+  studio.clockComp = null;
 }
 
 // 곡 변경 시 NowPlaying 트리거 — loadTrack 에서 호출.
@@ -688,12 +711,13 @@ async function bootSession(session) {
   $('#studioMetaTemplate').textContent = tpl.name || '(기본)';
   $('#studioCanvasTitle').textContent = session.title || '(미리보기)';
 
-  // 이미지 + AudioMotion + NowPlaying + Playlist 준비
+  // 이미지 + AudioMotion + NowPlaying + Playlist + Clock 준비
   await preloadImages();
   ensureAudioElement();
   attachVisualizers();
   setupNowPlaying();
   setupPlaylist();
+  setupClock();
   updateProgressUI();
   updateButtons();
   startRenderLoop();
@@ -741,6 +765,7 @@ function teardown() {
   studio.visCanvases.clear();
   destroyNowPlaying();
   destroyPlaylist();
+  destroyClock();
   studio.session = null;
   studio.components = [];
   studio.bgImg = null;
