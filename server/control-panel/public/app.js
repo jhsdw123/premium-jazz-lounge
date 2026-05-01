@@ -71,7 +71,11 @@ function switchTab(tab) {
   if (tab === 'templates' && typeof window.templatesOnEnter === 'function') {
     window.templatesOnEnter();
   }
+  if (tab === 'studio' && typeof window.studioOnEnter === 'function') {
+    window.studioOnEnter();
+  }
 }
+window.switchTab = switchTab;
 $$('.tab').forEach((btn) => {
   btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
@@ -1318,6 +1322,111 @@ $('#bRenderBtn').addEventListener('click', async () => {
     builder.rendering = false;
     $('#bRenderBtn').disabled = false;
     $('#bRenderBtn').textContent = '🎬 렌더 준비 완료';
+  }
+});
+
+// Studio 로 이동 (Phase 4-D-2) — DB 에 영상 프로젝트 생성 + 곡별 signed URL + template config 를
+//                                  sessionStorage 에 적재 → switchTab('studio')
+$('#bStudioBtn')?.addEventListener('click', async () => {
+  if (!builder.tracks.length) {
+    toast('트랙이 없습니다. Pool 탭으로 돌아가서 다시 선택하세요', 'error');
+    return;
+  }
+  const templateId = parseInt($('#bTemplate').value, 10) || null;
+  if (!templateId) {
+    toast('템플릿을 선택하세요', 'error');
+    return;
+  }
+
+  const ordered = getOrderedTracksForRender();
+  const trackIds = ordered.map((t) => t.id);
+
+  // 자동 제목 — UI 가 hidden 이므로 timestamp 기반
+  const now = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  const autoTitle = `Untitled — ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+
+  builder.rendering = true;
+  $('#bStudioBtn').disabled = true;
+  $('#bStudioBtn').textContent = '🎬 처리 중…';
+
+  try {
+    // 1) 영상 프로젝트 생성 (DB)
+    const j = await apiPost('/api/videos', {
+      title: autoTitle,
+      trackIds,
+      templateId,
+      seriesId: null,
+      registerAsSeries: false,
+    });
+
+    // 2) 각 곡의 signed audio URL 발급
+    const urlMap = new Map();
+    for (const t of ordered) {
+      try {
+        const ar = await fetch(`/api/tracks/${t.id}/audio-url`);
+        const aj = await ar.json();
+        if (ar.ok && aj.ok) urlMap.set(t.id, aj.url);
+      } catch (e) {
+        console.warn(`[builder] audio-url fetch 실패 (track ${t.id}):`, e.message);
+      }
+    }
+
+    // 3) 템플릿 config 회수
+    let templateRow = null;
+    try {
+      const tr = await apiGet(`/api/templates/${templateId}`);
+      templateRow = tr.template || null;
+    } catch (e) {
+      console.warn(`[builder] template 회수 실패:`, e.message);
+    }
+
+    // 4) Studio 세션 데이터 구성
+    let cursor = 0;
+    const studioTracks = ordered.map((t) => {
+      const dur = Number(t.duration_actual_sec) || Number(t.duration_raw_sec) || 180;
+      const startSec = cursor;
+      const endSec = startSec + dur;
+      cursor = endSec;
+      return {
+        id: t.id,
+        title: t.title?.title_en || t.original_filename?.replace(/\.[^/.]+$/, '') || `Track ${t.id}`,
+        audioUrl: urlMap.get(t.id) || null,
+        durationSec: dur,
+        startSec,
+        endSec,
+      };
+    });
+
+    const session = {
+      buildId: j.buildId,
+      videoId: j.videoId,
+      title: j.title,
+      template: templateRow,
+      tracks: studioTracks,
+      totalDurationSec: cursor,
+      createdAt: Date.now(),
+    };
+
+    sessionStorage.setItem('pjl.studio.session', JSON.stringify(session));
+    sessionStorage.removeItem(BUILDER_SS_KEY);
+
+    toast(`Studio 진입 (${studioTracks.length}곡 / ${fmtMinSec(cursor)})`, 'success', 3000);
+
+    // 상태 리셋
+    builder.tracks = [];
+    $('#builderEmpty').hidden = false;
+    $('#builderMain').hidden = true;
+    refreshStats();
+
+    // Studio 로 전환
+    switchTab('studio');
+  } catch (e) {
+    toast(`Studio 진입 실패: ${e.message}`, 'error', 6000);
+  } finally {
+    builder.rendering = false;
+    $('#bStudioBtn').disabled = false;
+    $('#bStudioBtn').textContent = '🎬 Studio 로 이동';
   }
 });
 

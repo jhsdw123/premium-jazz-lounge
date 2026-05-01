@@ -604,11 +604,21 @@
     /* main 의 max-width 제약을 풀어서 캔버스가 가로로 펼쳐지게.
        작업 영역만 풀폭으로 쓰고 다른 탭은 그대로. */
     main:has(#tab-templates.active) { max-width: none; padding-right: 18px; padding-left: 18px; }
-    .te-grid {
+    main:has(#tab-studio.active) { max-width: none; padding-right: 18px; padding-left: 18px; }
+    .te-grid, .studio-grid {
       display: grid;
       grid-template-columns: 300px minmax(720px, 1fr);
       gap: 12px;
       align-items: start;
+    }
+    .studio-side { display: flex; flex-direction: column; gap: 12px; }
+    .studio-canvas-col { display: flex; flex-direction: column; gap: 12px; min-width: 720px; }
+    @media (max-width: 1080px) {
+      .studio-grid { grid-template-columns: 280px 1fr; }
+      .studio-canvas-col { min-width: 0; }
+    }
+    @media (max-width: 800px) {
+      .studio-grid { grid-template-columns: 1fr; }
     }
     .te-canvas-col { display: flex; flex-direction: column; gap: 12px; min-width: 720px; }
     @media (max-width: 1080px) {
@@ -1085,6 +1095,7 @@
     <button class="tab active" data-tab="pool">Pool</button>
     <button class="tab" data-tab="builder">Builder</button>
     <button class="tab" data-tab="templates">Template Editor</button>
+    <button class="tab" data-tab="studio">🎬 Studio</button>
     <button class="tab" data-tab="uploader">Uploader</button>
   </nav>
 
@@ -1280,9 +1291,9 @@
           </div>
         </div>
 
-        <!-- 우측: 메타 + AI + 시리즈 + 템플릿 + 렌더 -->
+        <!-- 우측: 템플릿 + Studio 진입 (Phase 4-D-2 — 단순화: 제목/AI/시리즈 hidden) -->
         <div style="display:flex; flex-direction:column; gap:12px;">
-          <div class="builder-card">
+          <div class="builder-card" hidden>
             <h3>영상 제목</h3>
             <label class="field" style="text-transform:none; letter-spacing:normal;">
               <input type="text" id="bTitle" placeholder="예: Late Night Jazz Vol.7" />
@@ -1293,7 +1304,7 @@
             <div id="bSuggestChips" class="suggest-chips"></div>
           </div>
 
-          <div class="builder-card">
+          <div class="builder-card" hidden>
             <h3>시리즈</h3>
             <select id="bSeries" style="width:100%;">
               <option value="">(시리즈 없음)</option>
@@ -1313,8 +1324,12 @@
 
           <div class="builder-card">
             <div class="builder-actions">
-              <button class="primary" id="bRenderBtn" type="button">🎬 렌더 준비 완료</button>
+              <button class="primary" id="bStudioBtn" type="button" style="height:54px;font-size:14px;">🎬 Studio 로 이동</button>
+              <button class="bulk-btn" id="bRenderBtn" type="button" hidden>🎬 렌더 준비 완료</button>
               <button class="bulk-btn" id="bResetBtn" type="button">↺ 새로 시작</button>
+            </div>
+            <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.5;">
+              영상 프로젝트 생성 후 Studio 탭에서 미리보기 + mp4 export.
             </div>
           </div>
         </div>
@@ -1424,6 +1439,88 @@
       </div>
     </section>
 
+    <!-- ─── Studio tab (Phase 4-D-2) ─── -->
+    <section id="tab-studio" class="tab-content">
+      <!-- 빈 상태 (세션 없을 때) -->
+      <div id="studioEmpty" class="builder-empty">
+        <strong>🎬 Studio</strong>
+        Builder 에서 영상 프로젝트를 만들고 <span style="color:var(--jazz-gold)">🎬 Studio 로 이동</span> 버튼을 눌러주세요.
+      </div>
+
+      <!-- 메인 (세션 있을 때) -->
+      <div id="studioMain" class="studio-grid" hidden>
+        <!-- 좌측 사이드바 -->
+        <div class="studio-side">
+          <div class="te-card">
+            <h3>📁 영상 프로젝트</h3>
+            <div id="studioProjectMeta" style="font-size:11px;line-height:1.7;color:var(--text-muted);">
+              <div>제목: <span id="studioMetaTitle" style="color:var(--text);">—</span></div>
+              <div>곡: <span id="studioMetaTrackCount" style="color:var(--text);">0</span> 개</div>
+              <div>총 길이: <span id="studioMetaDuration" style="color:var(--text);">0:00</span></div>
+              <div>템플릿: <span id="studioMetaTemplate" style="color:var(--text);">—</span></div>
+            </div>
+          </div>
+
+          <div class="te-card">
+            <h3>🎵 오디오</h3>
+            <div class="row">
+              <button class="te-btn" id="studioPlayBtn" type="button">▶</button>
+              <button class="te-btn" id="studioPauseBtn" type="button" disabled>⏸</button>
+              <button class="te-btn" id="studioStopBtn" type="button" disabled>⏹</button>
+              <button class="te-btn" id="studioNextBtn" type="button" disabled>⏭</button>
+            </div>
+            <div class="te-preview-progress" style="margin-top:8px;">
+              <div class="te-preview-progress-fill" id="studioProgress"></div>
+            </div>
+            <div id="studioStatus" style="font-size:11px;color:var(--text-dim);margin-top:6px;">대기 중</div>
+          </div>
+
+          <div class="te-card">
+            <h3>📊 진행 상태</h3>
+            <div style="font-size:12px;line-height:1.7;">
+              <div>곡: <span id="studioTrackPos" style="color:var(--jazz-gold);font-weight:bold;">0/0</span></div>
+              <div><span id="studioCurrentTrackTitle" style="color:var(--text-muted);font-size:11px;">—</span></div>
+              <div style="margin-top:6px;">
+                <span id="studioElapsed" style="color:var(--text);">00:00</span>
+                <span style="color:var(--text-muted);"> / </span>
+                <span id="studioTotal" style="color:var(--text-muted);">00:00</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="te-card">
+            <h3>🎬 녹화</h3>
+            <button class="te-btn gold" id="studioRecordBtn" type="button" style="width:100%;height:42px;font-size:13px;">🎬 녹화 시작</button>
+            <button class="te-btn" id="studioStopRecBtn" type="button" hidden style="width:100%;height:42px;background:#522;color:#fff;font-size:13px;">⏹ 녹화 중지 + 저장</button>
+            <div id="studioRecStatus" style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.5;"></div>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:6px;line-height:1.4;">
+              ⚠ 녹화 중 탭 비활성화 시 frame loss 가능. 다른 탭 전환 자제.
+            </div>
+          </div>
+
+          <div class="te-card">
+            <h3>↺ 다시</h3>
+            <button class="te-btn" id="studioResetBtn" type="button" style="width:100%;">새 영상 프로젝트</button>
+          </div>
+        </div>
+
+        <!-- 메인: 1920×1080 미리보기 캔버스 -->
+        <div class="studio-canvas-col">
+          <div class="te-canvas-wrap">
+            <div class="te-canvas-meta">
+              <span>편집 중: <span class="strong" id="studioCanvasTitle">(미리보기)</span></span>
+              <span style="margin-left:auto;">캔버스: <span class="strong">1920 × 1080</span></span>
+              <span>FPS: <span class="strong">30</span></span>
+            </div>
+            <div class="te-canvas-frame" id="studioCanvasFrame">
+              <canvas id="studioCanvas" width="1920" height="1080" style="width:100%;height:100%;display:block;background:#000;"></canvas>
+              <div class="te-canvas-bg" id="studioVisHost" style="position:absolute;inset:0;pointer-events:none;"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ─── Uploader tab placeholder ─── -->
     <section id="tab-uploader" class="tab-content">
       <div class="placeholder">
@@ -1468,7 +1565,10 @@
 
   <!-- interact.js — 드래그/리사이즈 라이브러리. Template Editor 전용. -->
   <script src="https://cdn.jsdelivr.net/npm/interactjs@1.10.27/dist/interact.min.js"></script>
+  <!-- mp4-muxer (WebCodecs → mp4) — Studio export 용 -->
+  <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.min.js"></script>
   <script type="module" src="app.js"></script>
   <script type="module" src="template-editor.js"></script>
+  <script type="module" src="studio.js"></script>
 </body>
 </html>
