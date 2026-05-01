@@ -10,6 +10,10 @@ import {
 } from './now-playing-animations.js';
 import { drawPlaylist } from './playlist-renderer.js';
 import { drawClock } from './clock-renderer.js';
+import {
+  getAmplitudes,
+  drawCustomVisualizer,
+} from './visualizer-styles.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -110,11 +114,17 @@ function defaultsFor(type) {
       return { ...base, src: '', fit: 'contain', width: 400, height: 400 };
     case 'visualizer':
       // AudioMotion-analyzer 기반 (Phase 4-C-2 v5).
+      // Phase 4-D-3-D-1 — visualizerStyle 추가 (5가지 디자인).
       // legacy (sensitivity/midBoost/highBoost/smoothing-old/centerCut/trimStart/barCount) 폐기.
       return {
         ...base,
         width: 1200, height: 240,
         x: (CANVAS_W - 1200) / 2, y: 760,
+        // ── Style ──
+        visualizerStyle: 'bars',    // 'bars' | 'line' | 'wave-time' | 'mirror' | 'mirror-fill'
+        lineWidth: 3,               // wave-time/mirror/mirror-fill 용 stroke 두께
+        smoothness: 0.5,            // 0=각진 / 1=매우 부드러움 (Catmull-Rom tension)
+        fillOpacity: 0.3,           // mirror-fill 의 영역 채움 alpha
         // ── AudioMotion 옵션 ──
         mode: 3,                    // 1/8 octave / 80 bands (default)
         gradient: 'rainbow',        // classic / prism / rainbow / orangered / steelblue / ...
@@ -437,8 +447,14 @@ function placeholderText(content) {
 
 // Visualizer 컴포넌트의 inner — AudioMotion 이 자체 canvas 를 만들어 넣음.
 // 우리는 빈 컨테이너만 제공. 실제 attach/destroy 는 attachVisualizerInstance 에서.
+// Phase 4-D-3-D-1: custom style 용 sibling canvas 추가 — wave-time/mirror/mirror-fill 일 때
+// AM canvas 는 숨기고 이 canvas 에 RAF 로 그림.
 function renderBars(c) {
-  return `<div class="te-vis-am-container" data-vis-am-id="${c.id}" style="width:100%;height:100%;position:relative;overflow:hidden;"></div>`;
+  return `<div class="te-vis-am-container" data-vis-am-id="${c.id}" style="width:100%;height:100%;position:relative;overflow:hidden;">
+    <canvas data-vis-custom-id="${c.id}"
+      width="${Math.round(c.width)}" height="${Math.round(c.height)}"
+      style="position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;display:none;"></canvas>
+  </div>`;
 }
 
 // ─── Audio preview (shared MediaElementSource) ────────────────────
@@ -455,8 +471,12 @@ const audio = {
 
 // AudioMotion 옵션 추출 — comp 의 schema 필드를 AudioMotion options 로 매핑.
 function audioMotionOptions(c) {
+  // Phase 4-D-3-D-1: visualizerStyle 따라 AM mode 자동 매핑.
+  //   'line' → AM mode 10 (line/area graph)
+  //   나머지 → c.mode (bars/wave-time/mirror/mirror-fill 모두 c.mode 의 octave 분할 사용).
+  const effectiveMode = c.visualizerStyle === 'line' ? 10 : (c.mode ?? 3);
   return {
-    mode: c.mode ?? 3,
+    mode: effectiveMode,
     gradient: c.gradient ?? 'rainbow',
     mirror: c.mirror ?? 0,
     radial: !!c.radial,
@@ -470,6 +490,9 @@ function audioMotionOptions(c) {
     alphaBars: !!c.alphaBars,
     outlineBars: !!c.outlineBars,
     roundBars: !!c.roundBars,
+    // Line 모드 (AM mode 10) 의 영역 채움 alpha — 형님 schema 의 fillOpacity 재활용
+    fillAlpha: c.visualizerStyle === 'line' ? (c.fillOpacity ?? 0.3) : (c.fillAlpha ?? 1),
+    lineWidth: c.visualizerStyle === 'line' ? (c.lineWidth ?? 3) : (c.barLineWidth ?? 0),
     minFreq: c.minFreq ?? 30,
     maxFreq: c.maxFreq ?? 20000,
     minDecibels: c.minDecibels ?? -85,
@@ -524,9 +547,69 @@ function attachVisualizerInstance(c) {
   } catch (e) {
     console.error('[AudioMotion] 생성 실패:', e);
   }
+  // style 따라 AM canvas / custom canvas 표시 분기.
+  applyVisualizerStyleVisibility(c);
+}
+
+// Phase 4-D-3-D-1: visualizerStyle 따라 AM canvas vs custom canvas 표시 토글.
+// - 'bars' / 'line' : AM canvas 보임, custom 숨김. AM 자체 RAF 로 작동.
+// - 'wave-time' / 'mirror' / 'mirror-fill' : AM canvas 숨김, custom 보임 + custom RAF 시작.
+function applyVisualizerStyleVisibility(c) {
+  const am = c._audioMotion;
+  const customCv = document.querySelector(`canvas[data-vis-custom-id="${c.id}"]`);
+  const useCustom = c.visualizerStyle === 'wave-time'
+    || c.visualizerStyle === 'mirror'
+    || c.visualizerStyle === 'mirror-fill';
+
+  if (am?.canvas) {
+    am.canvas.style.display = useCustom ? 'none' : '';
+  }
+  if (customCv) {
+    customCv.style.display = useCustom ? '' : 'none';
+    // 픽셀 해상도 동기화 (resize 시)
+    if (customCv.width !== Math.round(c.width)) customCv.width = Math.round(c.width);
+    if (customCv.height !== Math.round(c.height)) customCv.height = Math.round(c.height);
+  }
+
+  if (useCustom) {
+    startCustomVisualizerLoop(c);
+  } else {
+    stopCustomVisualizerLoop(c);
+  }
+}
+
+// custom RAF — 매 frame am.getBars() 읽어 sibling canvas 에 그림.
+function startCustomVisualizerLoop(c) {
+  if (c._customLoopRaf) return;
+  const tick = () => {
+    if (!c._customLoopRaf) return;
+    const am = c._audioMotion;
+    const cv = document.querySelector(`canvas[data-vis-custom-id="${c.id}"]`);
+    if (!am || !cv) {
+      c._customLoopRaf = requestAnimationFrame(tick);
+      return;
+    }
+    // 픽셀 해상도 follow (한쪽 width 만 바뀌어도 sync)
+    if (cv.width !== Math.round(c.width)) cv.width = Math.round(c.width);
+    if (cv.height !== Math.round(c.height)) cv.height = Math.round(c.height);
+    const ctx = cv.getContext('2d');
+    ctx.clearRect(0, 0, cv.width, cv.height);
+    const amps = getAmplitudes(am);
+    drawCustomVisualizer(ctx, c, amps, 0, 0, cv.width, cv.height);
+    c._customLoopRaf = requestAnimationFrame(tick);
+  };
+  c._customLoopRaf = requestAnimationFrame(tick);
+}
+
+function stopCustomVisualizerLoop(c) {
+  if (c._customLoopRaf) {
+    cancelAnimationFrame(c._customLoopRaf);
+    c._customLoopRaf = null;
+  }
 }
 
 function destroyVisualizerInstance(c) {
+  stopCustomVisualizerLoop(c);
   if (c?._audioMotion) {
     try { c._audioMotion.destroy(); } catch {}
     delete c._audioMotion;
@@ -1245,16 +1328,44 @@ function renderProps() {
         </label>
       </div>
     `;
+    const vstyle = c.visualizerStyle || 'bars';
+    const isCustom = vstyle === 'wave-time' || vstyle === 'mirror' || vstyle === 'mirror-fill';
+    const isLine = vstyle === 'line';
+    const isBars = vstyle === 'bars';
     typeFields = `
+      <div class="te-prop full" style="margin-top:6px;background:var(--bg-input);padding:8px;border-radius:4px;border-left:3px solid var(--jazz-gold);">
+        <div style="font-size:10px;color:var(--jazz-gold);font-weight:700;margin-bottom:4px;">🎵 VISUALIZER STYLE</div>
+        <select data-prop="visualizerStyle" style="width:100%;">
+          <option value="bars" ${vstyle === 'bars' ? 'selected' : ''}>Bars (막대 — AudioMotion mode)</option>
+          <option value="line" ${vstyle === 'line' ? 'selected' : ''}>Line / Area (AudioMotion mode 10)</option>
+          <option value="wave-time" ${vstyle === 'wave-time' ? 'selected' : ''}>Wave Time (시간축 부드러운 곡선)</option>
+          <option value="mirror" ${vstyle === 'mirror' ? 'selected' : ''}>Mirror (좌우 대칭)</option>
+          <option value="mirror-fill" ${vstyle === 'mirror-fill' ? 'selected' : ''}>Mirror Fill (좌우 대칭 + 채움)</option>
+        </select>
+      </div>
+
+      ${isCustom || isLine ? `
+        <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+          <label style="color:var(--jazz-gold)">— Wave / Line 옵션 —</label>
+        </div>
+        ${slider('lineWidth', 'Line Width', 1, 10, 0.5, c.lineWidth ?? 3, 'px')}
+        ${isCustom ? slider('smoothness', 'Smoothness', 0, 1, 0.05, c.smoothness ?? 0.5, '') : ''}
+        ${(isLine || vstyle === 'mirror-fill') ? slider('fillOpacity', 'Fill Opacity', 0, 1, 0.05, c.fillOpacity ?? 0.3, '') : ''}
+      ` : ''}
+
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
         <label style="color:var(--jazz-gold)">— 디스플레이 —</label>
       </div>
+      ${!isLine ? `
       <div class="te-prop">
-        <label>Mode</label>
+        <label>Mode (octave)</label>
         <select data-prop="mode" data-coerce="int">
-          ${modeOpts.map(([v, lab]) => `<option value="${v}" ${(c.mode ?? 3) === v ? 'selected' : ''}>${v}: ${lab}</option>`).join('')}
+          ${modeOpts.filter(([v]) => v !== 10).map(([v, lab]) => `<option value="${v}" ${(c.mode ?? 3) === v ? 'selected' : ''}>${v}: ${lab}</option>`).join('')}
         </select>
+        <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${isCustom ? 'data sampling 분할 (custom 그리기 입력 정밀도)' : 'AudioMotion bars 분할'}</div>
       </div>
+      ` : ''}
+      ${(isBars || isLine) ? `
       <div class="te-prop">
         <label>Gradient</label>
         <select data-prop="gradient">
@@ -1276,6 +1387,8 @@ function renderProps() {
         </select>
       </div>
       ${checkbox('radial', '⭕ Radial', c.radial)}
+      ` : ''}
+      ${isBars ? `
       ${checkbox('showPeaks', '🔝 Show Peaks', c.showPeaks ?? true)}
       ${checkbox('ledBars', '💡 LED Bars', c.ledBars)}
       ${checkbox('lumiBars', '✨ Lumi Bars', c.lumiBars)}
@@ -1284,6 +1397,7 @@ function renderProps() {
       ${checkbox('roundBars', '⚪ Round Bars', c.roundBars)}
       ${slider('reflexRatio', 'Reflex Ratio', 0, 1, 0.01, c.reflexRatio ?? 0, '')}
       ${slider('reflexAlpha', 'Reflex Alpha', 0, 1, 0.01, c.reflexAlpha ?? 1, '')}
+      ` : ''}
 
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
         <label style="color:var(--jazz-gold)">— 주파수 —</label>
@@ -1621,6 +1735,8 @@ function renderProps() {
         valEl.textContent = `${val}${suffix}`;
       }
       updateComponent(c.id, { [prop]: val });
+      // visualizerStyle 변경 시 props 패널 sub-옵션 show/hide 위해 다시 그리기.
+      if (prop === 'visualizerStyle') renderProps();
     });
   });
   // Boolean 체크박스 (Auto Wrap 등)

@@ -16,6 +16,7 @@ import {
 } from './now-playing-animations.js';
 import { drawPlaylist } from './playlist-renderer.js';
 import { drawClock } from './clock-renderer.js';
+import { getAmplitudes, drawCustomVisualizer } from './visualizer-styles.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -229,11 +230,25 @@ function roundedRect(ctx, x, y, w, h, r) {
 
 // ─── Visualizer 컴포지팅 ──────────────────────────────────────────
 function drawVisualizerComponent(ctx, c) {
+  const am = studio.visInstances.get(c.id);
+  // Phase 4-D-3-D-1: visualizerStyle 따라 분기.
+  // - bars / line : AudioMotion 자체 그리기 결과 (am.canvas) 를 drawImage.
+  // - wave-time / mirror / mirror-fill : am.getBars() 데이터로 메인 canvas 에 직접 그리기.
+  const isCustom = c.visualizerStyle === 'wave-time'
+    || c.visualizerStyle === 'mirror'
+    || c.visualizerStyle === 'mirror-fill';
+
+  if (isCustom) {
+    if (!am) return;
+    const amps = getAmplitudes(am);
+    drawCustomVisualizer(ctx, c, amps, c.x, c.y, c.width, c.height);
+    return;
+  }
+
   const amCv = studio.visCanvases.get(c.id);
   if (!amCv) return;
   ctx.save();
   ctx.globalAlpha = c.opacity ?? 1;
-  // glow — drop-shadow 는 drawImage 경로에서 ctx.shadow 로 모사.
   const glow = c.glow ?? 0;
   if (glow > 0) {
     ctx.shadowColor = c.colorMode === 'gradient' ? '#D4AF37' : (c.color || '#D4AF37');
@@ -458,8 +473,10 @@ function onTrackChangeForNP(newIdx) {
 
 // ─── AudioMotion 인스턴스 (visualizer 컴포넌트마다) ──────────────
 function audioMotionOptions(c) {
+  // Phase 4-D-3-D-1 — Editor 의 audioMotionOptions 와 동일 매핑.
+  const effectiveMode = c.visualizerStyle === 'line' ? 10 : (c.mode ?? 3);
   return {
-    mode: c.mode ?? 3,
+    mode: effectiveMode,
     gradient: c.gradient ?? 'rainbow',
     mirror: c.mirror ?? 0,
     radial: !!c.radial,
@@ -473,6 +490,8 @@ function audioMotionOptions(c) {
     alphaBars: !!c.alphaBars,
     outlineBars: !!c.outlineBars,
     roundBars: !!c.roundBars,
+    fillAlpha: c.visualizerStyle === 'line' ? (c.fillOpacity ?? 0.3) : (c.fillAlpha ?? 1),
+    lineWidth: c.visualizerStyle === 'line' ? (c.lineWidth ?? 3) : (c.barLineWidth ?? 0),
     minFreq: c.minFreq ?? 30,
     maxFreq: c.maxFreq ?? 20000,
     minDecibels: c.minDecibels ?? -85,
