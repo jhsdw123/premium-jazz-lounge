@@ -22,6 +22,7 @@ import { normalizeTitle, findCollision } from '../../lib/title-utils.mjs';
 import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { buildAndPersistPlaylist } from '../../lib/template-to-remotion.mjs';
+import { analyzeTrack as analyzeTrackForVisualizer, pickVisualizerOptions } from '../../lib/audio-analysis.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -1619,6 +1620,33 @@ app.post('/api/videos', async (req, res) => {
       });
     }
 
+    // 6.5) AudioMotion 사전 분석 — 비주얼라이저 컴포넌트가 있으면 곡당 .bin 생성.
+    //      (Phase 4-C-2 v5 — Editor 와 동일한 AudioMotion 결과를 Remotion 측에서 재생)
+    const visOpts = pickVisualizerOptions(templateRow);
+    const analyses = [];
+    if (visOpts) {
+      const origin = `http://localhost:${PORT}`;
+      for (const t of orderedTracks) {
+        try {
+          const { data: signed } = await supabase.storage
+            .from(SUPABASE_BUCKET)
+            .createSignedUrl(t.storage_path, 3600);
+          const audioUrl = signed?.signedUrl;
+          if (!audioUrl) throw new Error('signed URL 발급 실패');
+          const r = await analyzeTrackForVisualizer({
+            controlPanelOrigin: origin,
+            audioUrl,
+            trackId: t.id,
+            visOptions: visOpts,
+          });
+          analyses.push({ trackId: t.id, status: 'ok', ...r });
+        } catch (e) {
+          console.warn(`[analysis] track ${t.id} 실패:`, e.message);
+          analyses.push({ trackId: t.id, status: 'error', error: e.message });
+        }
+      }
+    }
+
     // 7) total_duration_sec 갱신 + template use_count + series.current_vol 증가
     await supabase
       .from('pjl_video_projects')
@@ -1679,6 +1707,7 @@ app.post('/api/videos', async (req, res) => {
       trackCount: orderedTracks.length,
       downloads: buildResult.downloads,
       playlistPath: buildResult.playlistPath,
+      analyses,
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });

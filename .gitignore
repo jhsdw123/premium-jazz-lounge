@@ -40,6 +40,8 @@ data/tracks/
 data/output/
 data/temp/
 data/cache/
+video/public/tracks/
+video/public/analysis/
 
 # OS files
 .DS_Store

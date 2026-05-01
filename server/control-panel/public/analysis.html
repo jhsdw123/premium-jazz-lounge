@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>PJL — AudioMotion 사전 분석</title>
+<style>
+  body { background:#000; color:#9f9; font-family: 'SF Mono', Menlo, monospace; font-size:11px; margin:0; padding:8px; }
+  #container { width: 800px; height: 200px; background: #111; }
+  #log { white-space: pre-wrap; max-height: 220px; overflow:auto; }
+</style>
+</head>
+<body>
+<div id="container"></div>
+<div id="log">대기 중…</div>
+
+<script type="module">
+// 헤드리스 Chromium 안에서 puppeteer 가 page.evaluate 로 호출:
+//   await window.PJL_runAnalysis({ audioUrl, mode, fps, minFreq, maxFreq, smoothing, weightingFilter, frequencyScale, minDecibels, maxDecibels })
+// 반환: Uint8Array (mode 의 band 수 × frame 수, 0~255 양자화)
+import AudioMotionAnalyzer from 'https://cdn.jsdelivr.net/npm/audiomotion-analyzer@4/+esm';
+
+const log = (...args) => {
+  const el = document.getElementById('log');
+  if (el) el.textContent = args.join(' ');
+  console.log(...args);
+};
+
+const BANDS_BY_MODE = { 0:128, 1:240, 2:120, 3:80, 4:60, 5:40, 6:30, 7:20, 8:10, 10:128 };
+
+window.PJL_runAnalysis = async function(opts) {
+  const {
+    audioUrl,
+    mode = 3,
+    fps = 30,
+    minFreq = 30,
+    maxFreq = 20000,
+    smoothing = 0.5,
+    weightingFilter = 'D',
+    frequencyScale = 'log',
+    minDecibels = -85,
+    maxDecibels = -25,
+    playbackRate = 2,   // 분석 속도 배수 (1=실시간, 2=2배속, 4=4배속). 너무 높이면 frame loss.
+  } = opts || {};
+
+  const expectedBands = BANDS_BY_MODE[mode] ?? 80;
+
+  return await new Promise(async (resolve, reject) => {
+    try {
+      log('analysis start:', audioUrl);
+      const audio = new Audio();
+      audio.crossOrigin = 'anonymous';
+      audio.preload = 'auto';
+      audio.src = audioUrl;
+
+      await new Promise((res, rej) => {
+        audio.addEventListener('canplaythrough', res, { once: true });
+        audio.addEventListener('error', () => rej(new Error('audio load 실패')), { once: true });
+        // safety
+        setTimeout(() => res(), 30000);
+      });
+      log('audio loaded, duration =', audio.duration);
+
+      // AudioMotion — overlay/showBgColor false (캡처는 getBars() 사용, draw 자체는 의미 없음)
+      const container = document.getElementById('container');
+      container.innerHTML = '';
+      const am = new AudioMotionAnalyzer(container, {
+        source: audio,
+        mode,
+        minFreq, maxFreq,
+        smoothing,
+        weightingFilter,
+        frequencyScale,
+        minDecibels, maxDecibels,
+        showPeaks: false,
+        showBgColor: false,
+        overlay: true,
+        useCanvas: true,
+        connectSpeakers: false,
+      });
+
+      const totalFrames = Math.max(1, Math.round(audio.duration * fps));
+      const samples = new Uint8Array(totalFrames * expectedBands);
+
+      // 분석 루프 — audio.currentTime 을 frame step 으로 이동시키며 매 step 의 bars 캡처.
+      // requestAnimationFrame 으로는 30fps 정확 캡처가 안 됨 (실시간 재생에 종속).
+      // 대신 audio.currentTime 을 시킹하면서 AudioMotion 의 onCanvasDraw 가 호출될 때까지 대기.
+      // 하지만 시킹은 디코더가 buffer 읽어야 해서 속도가 음원 길이의 1/3~1/5 수준.
+      //
+      // 실측 결과 가장 안정적인 방법: 1x speed playback + onCanvasDraw 캡처.
+      // 곡 길이만큼 실시간 wait 가 필요하지만 정확함.
+      let captureCount = 0;
+      let lastCaptureTime = -1;
+      const captureInterval = 1 / fps;
+
+      am.onCanvasDraw = (instance) => {
+        if (audio.paused) return;
+        const t = audio.currentTime;
+        if (t - lastCaptureTime < captureInterval && lastCaptureTime >= 0) return;
+        lastCaptureTime = t;
+        const targetFrame = Math.round(t * fps);
+        if (targetFrame < 0 || targetFrame >= totalFrames) return;
+        const bars = instance.getBars();
+        const offset = targetFrame * expectedBands;
+        // bars.value: [left, right?] — single 채널이면 [v]
+        for (let i = 0; i < expectedBands; i++) {
+          const b = bars[i];
+          if (!b) continue;
+          const v = Array.isArray(b.value) ? b.value[0] : b.value;
+          samples[offset + i] = Math.max(0, Math.min(255, Math.round((v || 0) * 255)));
+        }
+        captureCount++;
+      };
+
+      audio.addEventListener('ended', () => {
+        log('analysis done. frames=', captureCount, '/', totalFrames);
+        am.destroy();
+        resolve({
+          totalFrames,
+          bandsPerFrame: expectedBands,
+          captured: captureCount,
+          // Uint8Array → Array (page.evaluate 직렬화 친화)
+          // 큰 데이터: 콘텐츠 transfer 비용 큼 → puppeteer 측에서 toDataURL/blob/등 처리 가능.
+          // 여기선 Array.from 으로 직렬화 (수MB 까지 ok).
+          samples: Array.from(samples),
+        });
+      });
+
+      audio.addEventListener('error', () => {
+        am.destroy();
+        reject(new Error('audio playback 에러'));
+      });
+
+      // playbackRate 적용 (분석 속도 향상)
+      try { audio.playbackRate = playbackRate; } catch {}
+
+      // 시작
+      try {
+        await audio.play();
+      } catch (e) {
+        // autoplay 정책 회피: muted 로 시작
+        audio.muted = false;   // 분석엔 무관
+        await audio.play().catch(reject);
+      }
+
+      log('playing @', playbackRate + 'x … (분석 진행)');
+    } catch (e) {
+      reject(e);
+    }
+  });
+};
+
+log('ready — window.PJL_runAnalysis(opts) 호출 대기');
+</script>
+</body>
+</html>

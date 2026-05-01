@@ -1,5 +1,7 @@
-// Premium Jazz Lounge — Template Editor (Phase 4-C-1-A)
+// Premium Jazz Lounge — Template Editor (Phase 4-C-2 v5: AudioMotion-analyzer)
 // vanilla ES module. interact.js 는 글로벌 (CDN 으로 로드).
+// AudioMotion-analyzer ESM 을 jsdelivr CDN 으로 import (오프라인이면 패키지 dist 로 교체).
+import AudioMotionAnalyzer from 'https://cdn.jsdelivr.net/npm/audiomotion-analyzer@4/+esm';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -99,25 +101,38 @@ function defaultsFor(type) {
     case 'image':
       return { ...base, src: '', fit: 'contain', width: 400, height: 400 };
     case 'visualizer':
-      // Legacy 13 옵션 (기본값은 legacy original) + color mode (solid / gradient).
+      // AudioMotion-analyzer 기반 (Phase 4-C-2 v5).
+      // legacy (sensitivity/midBoost/highBoost/smoothing-old/centerCut/trimStart/barCount) 폐기.
       return {
         ...base,
         width: 1200, height: 240,
         x: (CANVAS_W - 1200) / 2, y: 760,
-        verticalMode: 'symmetric',  // 'symmetric' | 'up' | 'down' (legacy vMirror 0/1/2)
-        barWidth: 6,
-        barGap: 2,
-        barCount: 80,
-        sensitivity: 0.15,          // legacy barGain
-        smoothing: 0.85,
-        midBoost: 1.5,
-        highBoost: 0.8,
-        centerCut: 0,               // Low Cut — FFT bin offset
-        splitGap: 0,                // 위/아래 미러 사이 수직 gap (px)
-        trimStart: 3,               // FFT bin trim
-        glow: 20,
-        // 색상
-        colorMode: 'solid',         // 'solid' | 'gradient'
+        // ── AudioMotion 옵션 ──
+        mode: 3,                    // 1/8 octave / 80 bands (default)
+        gradient: 'rainbow',        // classic / prism / rainbow / orangered / steelblue / ...
+        mirror: 0,                  // -1 / 0 / 1
+        radial: false,
+        reflexRatio: 0,             // 0~1
+        reflexAlpha: 1,             // 0~1
+        showPeaks: true,
+        ledBars: false,
+        lumiBars: false,
+        alphaBars: false,
+        outlineBars: false,
+        roundBars: false,
+        minFreq: 30,                // Hz
+        maxFreq: 20000,             // Hz
+        minDecibels: -85,
+        maxDecibels: -25,
+        smoothing: 0.5,             // AudioMotion 자체 smoothing (0~1)
+        weightingFilter: 'D',       // '' / A / B / C / D / 468
+        frequencyScale: 'log',      // log / linear / bark / mel
+        channelLayout: 'single',    // single / dual-horizontal / dual-vertical / dual-combined
+        // ── 디자인 ──
+        verticalMode: 'symmetric',  // 'symmetric' | 'up' | 'down' (편집기 미리보기 카드용 정적 표시)
+        splitGap: 0,                // 카드 썸네일 정적 표시용
+        glow: 20,                   // CSS drop-shadow px
+        colorMode: 'solid',         // 'solid' | 'gradient' — 글로우 색 + 카드 썸네일
         color: '#D4AF37',
         gradientStops: [
           { position: 0,   color: '#FFFFFF' },
@@ -241,11 +256,11 @@ function loadConfigToCanvas(cfg) {
     const v = cfg.visualizer;
     const w = v.width ?? 1200;
     const h = v.height ?? 240;
-    // legacy vMirror 0/1/2 → verticalMode 'symmetric'/'up'/'down'
     const vmMap = ['symmetric', 'up', 'down'];
     const verticalMode = typeof v.vMirror === 'number'
       ? (vmMap[v.vMirror] || 'symmetric')
       : (v.verticalMode || 'symmetric');
+    // AudioMotion 기본값으로 채움 (legacy sensitivity/midBoost/etc. 무시).
     result.push({
       id: nextId(),
       type: 'visualizer',
@@ -253,19 +268,32 @@ function loadConfigToCanvas(cfg) {
       y: (v.position?.y ?? 880) - h / 2,
       width: w, height: h,
       rotation: 0, opacity: 1.0,
+      mode: v.mode ?? 3,
+      gradient: v.gradient ?? 'rainbow',
+      mirror: v.mirror ?? 0,
+      radial: v.radial ?? false,
+      reflexRatio: v.reflexRatio ?? 0,
+      reflexAlpha: v.reflexAlpha ?? 1,
+      showPeaks: v.showPeaks ?? true,
+      ledBars: v.ledBars ?? false,
+      lumiBars: v.lumiBars ?? false,
+      alphaBars: v.alphaBars ?? false,
+      outlineBars: v.outlineBars ?? false,
+      roundBars: v.roundBars ?? false,
+      minFreq: v.minFreq ?? 30,
+      maxFreq: v.maxFreq ?? 20000,
+      minDecibels: v.minDecibels ?? -85,
+      maxDecibels: v.maxDecibels ?? -25,
+      smoothing: v.smoothing ?? 0.5,
+      weightingFilter: v.weightingFilter ?? 'D',
+      frequencyScale: v.frequencyScale ?? 'log',
+      channelLayout: v.channelLayout ?? 'single',
       verticalMode,
-      barWidth: v.barWidth ?? 6,
-      barGap: v.barGap ?? 2,
-      barCount: v.barCount ?? 80,
-      sensitivity: v.sensitivity ?? v.barGain ?? 0.15,
-      smoothing: v.smoothing ?? 0.85,
-      midBoost: v.midBoost ?? 1.5,
-      highBoost: v.highBoost ?? 0.8,
-      centerCut: v.centerCut ?? 0,
       splitGap: v.splitGap ?? 0,
-      trimStart: v.trimStart ?? 3,
       glow: v.glow ?? (typeof v.glowIntensity === 'number' ? Math.round(v.glowIntensity * 30) : 20),
+      colorMode: v.colorMode || 'solid',
       color: v.color || '#D4AF37',
+      gradientStops: v.gradientStops,
     });
   }
   if (cfg?.progressBar) {
@@ -302,216 +330,126 @@ function placeholderText(content) {
     .replace(/\{\{totalTracks\}\}/g, '14');
 }
 
-// Visualizer 는 canvas 로 그림. inner HTML 은 빈 캔버스만 — 실제 그리기는 tickVisualizers.
+// Visualizer 컴포넌트의 inner — AudioMotion 이 자체 canvas 를 만들어 넣음.
+// 우리는 빈 컨테이너만 제공. 실제 attach/destroy 는 attachVisualizerInstance 에서.
 function renderBars(c) {
-  return `<canvas class="te-vis-canvas" data-vis-id="${c.id}" style="width:100%;height:100%;display:block;"></canvas>`;
+  return `<div class="te-vis-am-container" data-vis-am-id="${c.id}" style="width:100%;height:100%;position:relative;overflow:hidden;"></div>`;
 }
 
-// ─── Audio preview (real spectrum tap) ──────────────────────
-// Editor 미리듣기 곡 — Web Audio API 의 AnalyserNode 로 실제 주파수 데이터 추출.
-// 곡 미선택 시 fake spectrum 으로 fallback.
+// ─── Audio preview (shared MediaElementSource) ────────────────────
+// AudioMotion-analyzer 가 자체적으로 FFT/AnalyserNode 를 관리.
+// 우리는 single MediaElementAudioSourceNode 만 공유 — 모든 visualizer 가 이걸 source 로 사용.
 const audio = {
   context: null,
-  analyser: null,
   element: null,
-  source: null,
-  bytes: null,            // Uint8Array (fftBinCount)
+  source: null,           // MediaElementAudioSourceNode
   trackId: null,
   duration: 0,
   cachedTracks: null,     // [{ id, label }]
 };
 
-const FFT_SIZE = 4096;    // legacy 와 동일
-
-function audioHasRealData() {
-  return !!(audio.analyser && audio.element && audio.bytes && !audio.element.paused);
+// AudioMotion 옵션 추출 — comp 의 schema 필드를 AudioMotion options 로 매핑.
+function audioMotionOptions(c) {
+  return {
+    mode: c.mode ?? 3,
+    gradient: c.gradient ?? 'rainbow',
+    mirror: c.mirror ?? 0,
+    radial: !!c.radial,
+    reflexRatio: c.reflexRatio ?? 0,
+    reflexAlpha: c.reflexAlpha ?? 1,
+    showPeaks: c.showPeaks ?? true,
+    showBgColor: false,             // 우리 컨테이너에 배경 따로 둠
+    overlay: true,                  // 투명
+    ledBars: !!c.ledBars,
+    lumiBars: !!c.lumiBars,
+    alphaBars: !!c.alphaBars,
+    outlineBars: !!c.outlineBars,
+    roundBars: !!c.roundBars,
+    minFreq: c.minFreq ?? 30,
+    maxFreq: c.maxFreq ?? 20000,
+    minDecibels: c.minDecibels ?? -85,
+    maxDecibels: c.maxDecibels ?? -25,
+    smoothing: c.smoothing ?? 0.5,
+    weightingFilter: c.weightingFilter ?? 'D',
+    frequencyScale: c.frequencyScale ?? 'log',
+    channelLayout: c.channelLayout ?? 'single',
+    useCanvas: true,
+  };
 }
 
-function getRealSpectrum() {
-  if (!audioHasRealData()) return null;
-  audio.analyser.getByteFrequencyData(audio.bytes);
-  return audio.bytes;
-}
-
-// 컴포넌트별 smoothing 상태. barCount 변경 시 길이 다시 맞춤.
-const visState = new Map(); // id → { lastData: Float32Array, raw: Float32Array, len: number }
-
-function getVisState(c) {
-  const need = Math.max(1, c.barCount | 0);
-  let s = visState.get(c.id);
-  if (!s || s.len !== need) {
-    s = { lastData: new Float32Array(need), raw: new Float32Array(need), len: need };
-    visState.set(c.id, s);
-  }
-  return s;
-}
-
-function roundedRect(ctx, x, y, w, h, r) {
-  if (w <= 0 || h <= 0) return;
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.lineTo(x + w - rr, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-  ctx.lineTo(x + w, y + h - rr);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
-  ctx.lineTo(x + rr, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
-  ctx.lineTo(x, y + rr);
-  ctx.quadraticCurveTo(x, y, x + rr, y);
-  ctx.closePath();
-  ctx.fill();
-}
-
-function drawVisualizer(canvas, c, time) {
-  // canvas 의 백킹 픽셀 크기 = 컴포넌트 박스 크기 (DPR 무시 — Editor 미리보기 우선)
-  const w = canvas.clientWidth;
-  const h = canvas.clientHeight;
-  if (w === 0 || h === 0) return;
-  if (canvas.width !== w) canvas.width = w;
-  if (canvas.height !== h) canvas.height = h;
-
-  const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, w, h);
-
-  const state = getVisState(c);
-  const N = state.len;
-
-  // 1) Spectrum 채우기 — 실제 오디오면 AnalyserNode 의 byte data 를 legacy 의
-  //    log mapping (centerCut + trimStart + pow(percent, 2)) 으로 N 개 막대 amplitude 로 변환.
-  //    아니면 fake (sine + 랜덤).
-  const real = getRealSpectrum();
-  if (real) {
-    // legacy 매핑: percent → pow(2) → rawIdx (FFT bin) + adaptive range (3~7 bin).
-    // 저음(percent~0): 윈도우 좁게 (3 bin) — 저음 영역은 bin 자체가 빽빽하니 좁게.
-    // 고음(percent~1): 윈도우 넓게 (7 bin) — 고음 영역은 bin 이 듬성하니 넓게.
-    const fftSize = audio.analyser.fftSize;
-    const binCount = real.length;
-    const ccLocal = Math.max(0, c.centerCut | 0);
-    const tsLocal = Math.max(0, c.trimStart | 0);
-    for (let i = 0; i < N; i++) {
-      const denom = N + ccLocal - 1;
-      const percent = denom > 0 ? (i + ccLocal) / denom : 0;
-      const logIndex = Math.pow(percent, 2.0);
-      const rawIdx = Math.floor(tsLocal + logIndex * (fftSize / 5));
-      const range = 2 + Math.floor(percent * 4);   // legacy: 3~7 bins
-      let sum = 0, cnt = 0;
-      for (let k = 0; k <= range; k++) {
-        const idx = rawIdx + k;
-        if (idx >= 0 && idx < binCount) {
-          sum += real[idx];
-          cnt++;
-        }
-      }
-      state.raw[i] = cnt > 0 ? (sum / cnt) / 255 : 0;
-    }
+function applyVisualizerGlow(container, c) {
+  if (!container) return;
+  const glow = Math.max(0, c.glow ?? 0);
+  if (glow > 0) {
+    const glowColor = c.colorMode === 'gradient' ? '#D4AF37' : (c.color || '#D4AF37');
+    container.style.filter = `drop-shadow(0 0 ${glow}px ${glowColor})`;
   } else {
-    const t = time * 0.001;
-    for (let i = 0; i < N; i++) {
-      const base = 0.45 + 0.35 * Math.sin(i * 0.28 + t * 1.2);
-      const wave2 = 0.20 * Math.sin(i * 0.7 + t * 0.7);
-      const noise = (Math.random() - 0.5) * 0.18;
-      state.raw[i] = Math.max(0.05, Math.min(1, base + wave2 + noise));
-    }
+    container.style.filter = 'none';
   }
-
-  // 2) Legacy 그리기 setup
-  ctx.save();
-  ctx.shadowBlur = Math.max(0, c.glow ?? 20);
-  // solid 모드면 전역 stroke/shadow 색 한 번만, gradient 모드면 막대마다 갱신.
-  const isGradient = c.colorMode === 'gradient' && Array.isArray(c.gradientStops) && c.gradientStops.length >= 2;
-  if (!isGradient) {
-    const rgb = hexToRgb(c.color || '#D4AF37');
-    ctx.fillStyle = rgbToCss(rgb);
-    ctx.shadowColor = rgbToCss(rgb);
-  }
-
-  const barWidth = Math.max(1, c.barWidth | 0 || 6);
-  const barGap = Math.max(0, c.barGap | 0 || 0);
-  const ew = barWidth + barGap;
-  const splitGap = Math.max(0, c.splitGap | 0 || 0);
-  const halfSplit = splitGap / 2;
-  const ox = w / 2;
-  const oy = h / 2;
-
-  const sensitivity = Math.max(0, c.sensitivity ?? 0.15);
-  const smoothing = Math.max(0, Math.min(0.999, c.smoothing ?? 0.85));
-  const midBoost = c.midBoost ?? 1.5;
-  const highBoost = c.highBoost ?? 0.8;
-  const centerCut = Math.max(0, c.centerCut | 0);
-  // 한쪽(반쪽) 에 들어갈 수 있는 max 막대 수
-  const maxHalfBars = Math.max(1, Math.floor((w / 2) / Math.max(1, ew)));
-  const drawCount = Math.min(N, maxHalfBars);
-
-  // 영상 막대 max 높이 — legacy 는 (sum/count)*2000*barGain*eq 식.
-  // Editor 에선 raw 를 0~1 로 만들고 동일 식 사용. height 는 컴포넌트 height 의 80% 클램프.
-  const heightCap = h * 0.8;
-
-  for (let i = 0; i < drawCount; i++) {
-    const denom = c.barCount + centerCut - 1;
-    const percent = denom > 0 ? (i + centerCut) / denom : 0;
-    const eq = midBoost * (1 - percent) + highBoost * percent;
-    // state.raw[i] 가 이미 i-th 막대의 amplitude (real: bin-mapped, fake: 직접).
-    // trimStart/centerCut 은 real 일 때 fillRawSpectrum 에서 적용됐고, fake 는 무관.
-    const adjusted = state.raw[i] * 2000 * sensitivity * eq;
-
-    // smoothing — legacy: rising 은 빠르게 (prev*0.3 + raw*0.7), 떨어질 때만 smoothing
-    const prev = state.lastData[i];
-    state.lastData[i] = adjusted > prev
-      ? prev * 0.3 + adjusted * 0.7
-      : prev * smoothing + adjusted * (1 - smoothing);
-
-    let barH = Math.min(state.lastData[i], heightCap);
-    if (barH < 2) barH = 2;
-    const halfH = barH / 2;
-    const r = barWidth / 2;
-
-    // gradient: 좌우 대칭이라 양쪽이 같은 인덱스 i. 가운데에서 가장자리로 갈수록 i 가 커짐.
-    // 좌우를 합친 시각적 mapping 으로는 i=0 이 가운데, i=drawCount-1 이 가장자리.
-    // 가장자리(좌우)~가운데 방향 그라데이션을 원하니 stop 0% = 가운데, 100% = 가장자리.
-    if (isGradient) {
-      const rgb = getBarColor(c, i, drawCount);
-      ctx.fillStyle = rgbToCss(rgb);
-      ctx.shadowColor = rgbToCss(rgb);
-    }
-
-    if (c.verticalMode === 'symmetric' && splitGap === 0) {
-      // 단일 블록 — 좌우 대칭, 가운데 oy 기준 위/아래 동시
-      roundedRect(ctx, ox + i * ew, oy - halfH, barWidth, barH, r);
-      roundedRect(ctx, ox - (i + 1) * ew, oy - halfH, barWidth, barH, r);
-    } else {
-      // splitGap>0 또는 vMirror up/down → 위/아래 분리
-      if (c.verticalMode !== 'down') {
-        roundedRect(ctx, ox + i * ew, oy - halfSplit - halfH, barWidth, halfH, r);
-        roundedRect(ctx, ox - (i + 1) * ew, oy - halfSplit - halfH, barWidth, halfH, r);
-      }
-      if (c.verticalMode !== 'up') {
-        roundedRect(ctx, ox + i * ew, oy + halfSplit, barWidth, halfH, r);
-        roundedRect(ctx, ox - (i + 1) * ew, oy + halfSplit, barWidth, halfH, r);
-      }
-    }
-  }
-  ctx.restore();
 }
 
-// 50ms 마다 모든 visualizer 를 갱신.
+// 컴포넌트의 AudioMotion 인스턴스를 (없으면) 새로 만들고, (있으면) 옵션만 갱신.
+function attachVisualizerInstance(c) {
+  if (c.type !== 'visualizer') return;
+  const container = document.querySelector(`#teCanvasInner [data-id="${c.id}"] [data-vis-am-id="${c.id}"]`);
+  if (!container) return;
+  applyVisualizerGlow(container, c);
+
+  if (c._audioMotion && !c._audioMotion.isDestroyed) {
+    try { c._audioMotion.setOptions(audioMotionOptions(c)); } catch {}
+    // source 는 audio.source 가 있으면 한번만 connect (idempotent 체크).
+    if (audio.source) {
+      try {
+        const connected = c._audioMotion.connectedSources || [];
+        const has = connected.indexOf(audio.source) >= 0;
+        if (!has) c._audioMotion.connectInput(audio.source);
+      } catch {}
+    }
+    return;
+  }
+
+  // 신규 인스턴스 — audio.context 가 있으면 share, 아니면 AudioMotion 이 자체 생성.
+  try {
+    c._audioMotion = new AudioMotionAnalyzer(container, {
+      ...audioMotionOptions(c),
+      audioCtx: audio.context || undefined,
+      source: audio.source || undefined,
+      connectSpeakers: false,    // 스피커 연결은 우리가 한 번만 함 (loadPreviewTrack)
+    });
+  } catch (e) {
+    console.error('[AudioMotion] 생성 실패:', e);
+  }
+}
+
+function destroyVisualizerInstance(c) {
+  if (c?._audioMotion) {
+    try { c._audioMotion.destroy(); } catch {}
+    delete c._audioMotion;
+  }
+}
+
+// 모든 visualizer 인스턴스를 새 audio.source 에 다시 연결.
+function reattachAllVisualizerSources() {
+  for (const c of te.components) {
+    if (c.type !== 'visualizer' || !c._audioMotion) continue;
+    try { c._audioMotion.disconnectInput(null, false); } catch {}
+    if (audio.source) {
+      try { c._audioMotion.connectInput(audio.source); } catch (e) {
+        console.warn('[AudioMotion] connectInput 실패:', e.message);
+      }
+    }
+  }
+}
+
+// 50ms 마다 디버그 패널만 갱신 (AudioMotion 본체는 자체 RAF 로 동작).
 let _visTickerStarted = false;
 function startVisualizerTicker() {
   if (_visTickerStarted) return;
   _visTickerStarted = true;
-  let debugCounter = 0;
   setInterval(() => {
     if (!te.initialized) return;
-    const now = performance.now();
-    for (const c of te.components) {
-      if (c.type !== 'visualizer') continue;
-      const cv = document.querySelector(`#teCanvasInner [data-id="${c.id}"] canvas[data-vis-id="${c.id}"]`);
-      if (cv) drawVisualizer(cv, c, now);
-    }
-    // 디버그 패널 — 200ms 마다 (4 tick) 갱신
-    debugCounter++;
-    if (debugCounter % 4 === 0) updateDebugSpectrumPanel();
-  }, 50);
+    updateDebugSpectrumPanel();
+  }, 200);
 }
 
 function updateDebugSpectrumPanel() {
@@ -530,35 +468,46 @@ function updateDebugSpectrumPanel() {
     return;
   }
   const c = visComps[0];
-  const state = visState.get(c.id);
-  if (!state) {
-    panel.textContent = '(state 없음)';
+  const am = c._audioMotion;
+  if (!am) {
+    panel.textContent = '(AudioMotion 인스턴스 미생성)';
     return;
   }
-  const real = audioHasRealData() ? '✅ REAL' : '❌ FAKE';
-  const N = state.len;
-  let min = 1, max = 0, sum = 0;
-  for (let i = 0; i < N; i++) {
-    if (state.raw[i] < min) min = state.raw[i];
-    if (state.raw[i] > max) max = state.raw[i];
-    sum += state.raw[i];
+  const playing = audio.element && !audio.element.paused;
+  const bars = am.getBars?.() || [];
+  let mx = 0, sum = 0;
+  for (const b of bars) {
+    const v = Array.isArray(b.value) ? b.value[0] : b.value;
+    if (v > mx) mx = v;
+    sum += v;
   }
-  const avg = sum / N;
-  const fmt = (v) => v.toFixed(3);
-  const sample = (arr, start, count) => {
-    const out = [];
-    for (let i = start; i < start + count && i < arr.length; i++) out.push(fmt(arr[i]));
-    return out.join(' ');
-  };
-  const mid = Math.floor(N / 2);
+  const avg = bars.length ? sum / bars.length : 0;
+  const fmt = (v) => Number(v).toFixed(3);
   panel.textContent = [
-    `mode: ${real}    bars: ${N}    min: ${fmt(min)}  max: ${fmt(max)}  avg: ${fmt(avg)}`,
-    `low (i=0..4):    ${sample(state.raw, 0, 5)}`,
-    `mid (i=${mid}..${mid + 4}):  ${sample(state.raw, mid, 5)}`,
-    `high (i=${N - 5}..${N - 1}): ${sample(state.raw, N - 5, 5)}`,
-    `lastData low: ${sample(state.lastData, 0, 5)}`,
-    `lastData high: ${sample(state.lastData, N - 5, 5)}`,
+    `state: ${playing ? '▶ playing' : '⏸ stopped'}    bars: ${bars.length}    max: ${fmt(mx)}  avg: ${fmt(avg)}`,
+    `mode: ${am.mode}  gradient: ${am.gradient}  freqScale: ${am.frequencyScale}`,
+    `freq: ${am.minFreq}~${am.maxFreq} Hz   dB: ${am.minDecibels}~${am.maxDecibels}`,
+    `smoothing: ${am.smoothing}  weighting: ${am.weightingFilter}`,
+    `bass energy: ${fmt(am.getEnergy?.('bass') ?? 0)}  mid: ${fmt(am.getEnergy?.('mid') ?? 0)}  treble: ${fmt(am.getEnergy?.('treble') ?? 0)}`,
   ].join('\n');
+}
+
+// roundedRect — 카드 썸네일/progress 에서 사용.
+function roundedRect(ctx, x, y, w, h, r) {
+  if (w <= 0 || h <= 0) return;
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+  ctx.fill();
 }
 
 function renderProgress(c) {
@@ -650,6 +599,10 @@ function applyComponentTransform(el, c) {
 function renderCanvas() {
   const inner = $('#teCanvasInner');
   if (!inner) return;
+  // 기존 visualizer 인스턴스 destroy (DOM 이 사라질 거니까)
+  for (const c of te.components) {
+    if (c.type === 'visualizer') destroyVisualizerInstance(c);
+  }
   inner.innerHTML = '';
   for (const c of te.components) {
     const el = document.createElement('div');
@@ -667,6 +620,10 @@ function renderCanvas() {
     applyComponentTransform(el, c);
     inner.appendChild(el);
     bindComponentInteractions(el, c);
+  }
+  // visualizer 들 attach (DOM 이 들어간 다음에)
+  for (const c of te.components) {
+    if (c.type === 'visualizer') attachVisualizerInstance(c);
   }
   $('#teCompCount').textContent = String(te.components.length);
   renderBg();
@@ -764,30 +721,26 @@ function bindComponentInteractions(el, c) {
           cur.fontSize = Math.max(8, Math.round(_dragStart.fontSize * factor));
         }
         applyComponentTransform(el, cur);
-        // 비주얼라이저는 width/height 변경 시 bar 다시 그리기
-        if (cur.type === 'visualizer' || cur.type === 'progress' || cur.type === 'image' || cur.type === 'text') {
-          el.querySelector('.te-bar')?.parentElement?.remove();
-          const tr = el.querySelector('.text-render');
-          const img = el.querySelector('img');
-          const pt = el.querySelector('.te-progress-track');
-          const noImage = el.querySelector('div[style*="이미지 없음"]');
+        // 비주얼라이저: AudioMotion 의 canvas 는 컨테이너 크기 따라 자체 ResizeObserver 로 갱신.
+        //                재렌더 X — 인스턴스 보존.
+        if (cur.type === 'visualizer') {
+          applyVisualizerGlow(
+            el.querySelector(`[data-vis-am-id="${cur.id}"]`),
+            cur
+          );
+        } else if (cur.type === 'progress' || cur.type === 'image' || cur.type === 'text') {
           // 강제 재렌더 — 본체만 교체
-          const oldExtra = el.querySelectorAll('.te-del, .te-handle, .te-opacity');
-          // 내부 첫 자식만 교체
           const newInner = document.createElement('div');
           newInner.style.width = '100%'; newInner.style.height = '100%';
           newInner.innerHTML = renderComponentInner(cur);
-          // 기존 내부 텍스트/img/visualizer 제거
           [...el.children].forEach((ch) => {
             if (!ch.classList.contains('te-del') && !ch.classList.contains('te-handle') && !ch.classList.contains('te-opacity')) {
               ch.remove();
             }
           });
-          // newInner 의 자식만 prepend
           while (newInner.firstChild) {
             el.insertBefore(newInner.firstChild, el.firstChild);
           }
-          // Text 의 .text-render fontSize 를 화면 스케일에 맞춤 (rebuild 후 한 번 더)
           applyComponentTransform(el, cur);
         }
         if (te.selectedId === cur.id) renderProps();
@@ -817,13 +770,26 @@ function selectComponent(id) {
   renderProps();
 }
 
+
 function updateComponent(id, patch) {
   const idx = te.components.findIndex((c) => c.id === id);
   if (idx < 0) return;
-  te.components[idx] = { ...te.components[idx], ...patch };
+  const prev = te.components[idx];
+  // _audioMotion 인스턴스 ref 는 spread 로 보존됨 (own 속성).
+  te.components[idx] = { ...prev, ...patch };
+  const cur = te.components[idx];
   const el = $(`#teCanvasInner [data-id="${id}"]`);
   if (!el) return;
-  // inner 다시 그리기 (control 들 보존)
+
+  if (cur.type === 'visualizer') {
+    // visualizer: AudioMotion 인스턴스 유지하고 setOptions 만 호출.
+    // 단, 컨테이너 크기/위치/glow 도 transform + glow 함수로 갱신.
+    applyComponentTransform(el, cur);
+    attachVisualizerInstance(cur);
+    return;
+  }
+
+  // 비-visualizer — inner 다시 그리기 (control 들 보존)
   [...el.children].forEach((ch) => {
     if (!ch.classList.contains('te-del') && !ch.classList.contains('te-handle') && !ch.classList.contains('te-opacity')) {
       ch.remove();
@@ -831,17 +797,17 @@ function updateComponent(id, patch) {
   });
   const inner = document.createElement('div');
   inner.style.width = '100%'; inner.style.height = '100%';
-  inner.innerHTML = renderComponentInner(te.components[idx]);
+  inner.innerHTML = renderComponentInner(cur);
   while (inner.firstChild) {
     el.insertBefore(inner.firstChild, el.firstChild);
   }
-  // .text-render fontSize 스케일 + 좌표 재적용 (rebuild 후)
-  applyComponentTransform(el, te.components[idx]);
+  applyComponentTransform(el, cur);
 }
 
 function removeComponent(id) {
+  const c = te.components.find((x) => x.id === id);
+  if (c?.type === 'visualizer') destroyVisualizerInstance(c);
   te.components = te.components.filter((c) => c.id !== id);
-  visState.delete(id);
   if (te.selectedId === id) te.selectedId = null;
   renderCanvas();
 }
@@ -998,30 +964,113 @@ function renderProps() {
         </div>
         <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#D4AF37'}" /></div>
       `;
+    const modeOpts = [
+      [0, 'Discrete frequencies'],
+      [1, '1/24 octave (240 bands)'],
+      [2, '1/12 octave (120 bands)'],
+      [3, '1/8 octave (80 bands) ← default'],
+      [4, '1/6 octave (60 bands)'],
+      [5, '1/4 octave (40 bands)'],
+      [6, '1/3 octave (30 bands)'],
+      [7, '1/2 octave (20 bands)'],
+      [8, 'Full octave (10 bands)'],
+      [10, 'Line / Area graph'],
+    ];
+    const gradientOpts = ['classic','prism','rainbow','orangered','steelblue'];
+    const freqScales = ['log','linear','bark','mel'];
+    const weightingFilters = ['','A','B','C','D','468'];
+    const channelLayouts = ['single','dual-horizontal','dual-vertical','dual-combined'];
+    const checkbox = (key, label, val) => `
+      <div class="te-prop">
+        <label class="vocal-check" style="font-size:12px;cursor:pointer;">
+          <input type="checkbox" data-prop-bool="${key}" ${val ? 'checked' : ''} />
+          ${label}
+        </label>
+      </div>
+    `;
     typeFields = `
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 디스플레이 —</label>
+      </div>
       <div class="te-prop">
         <label>Mode</label>
+        <select data-prop="mode" data-coerce="int">
+          ${modeOpts.map(([v, lab]) => `<option value="${v}" ${(c.mode ?? 3) === v ? 'selected' : ''}>${v}: ${lab}</option>`).join('')}
+        </select>
+      </div>
+      <div class="te-prop">
+        <label>Gradient</label>
+        <select data-prop="gradient">
+          ${gradientOpts.map((g) => `<option value="${g}" ${(c.gradient ?? 'rainbow') === g ? 'selected' : ''}>${g}</option>`).join('')}
+        </select>
+      </div>
+      <div class="te-prop">
+        <label>Mirror</label>
+        <select data-prop="mirror" data-coerce="int">
+          <option value="-1" ${(c.mirror ?? 0) === -1 ? 'selected' : ''}>← Left</option>
+          <option value="0"  ${(c.mirror ?? 0) === 0 ? 'selected' : ''}>none</option>
+          <option value="1"  ${(c.mirror ?? 0) === 1 ? 'selected' : ''}>Right →</option>
+        </select>
+      </div>
+      <div class="te-prop">
+        <label>Channel Layout</label>
+        <select data-prop="channelLayout">
+          ${channelLayouts.map((l) => `<option value="${l}" ${(c.channelLayout || 'single') === l ? 'selected' : ''}>${l}</option>`).join('')}
+        </select>
+      </div>
+      ${checkbox('radial', '⭕ Radial', c.radial)}
+      ${checkbox('showPeaks', '🔝 Show Peaks', c.showPeaks ?? true)}
+      ${checkbox('ledBars', '💡 LED Bars', c.ledBars)}
+      ${checkbox('lumiBars', '✨ Lumi Bars', c.lumiBars)}
+      ${checkbox('alphaBars', '🌫 Alpha Bars', c.alphaBars)}
+      ${checkbox('outlineBars', '⬜ Outline Bars', c.outlineBars)}
+      ${checkbox('roundBars', '⚪ Round Bars', c.roundBars)}
+      ${slider('reflexRatio', 'Reflex Ratio', 0, 1, 0.01, c.reflexRatio ?? 0, '')}
+      ${slider('reflexAlpha', 'Reflex Alpha', 0, 1, 0.01, c.reflexAlpha ?? 1, '')}
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 주파수 —</label>
+      </div>
+      ${slider('minFreq', 'Min Freq (Hz)', 20, 500, 1, c.minFreq ?? 30, 'Hz')}
+      ${slider('maxFreq', 'Max Freq (Hz)', 5000, 22000, 100, c.maxFreq ?? 20000, 'Hz')}
+      <div class="te-prop">
+        <label>Frequency Scale</label>
+        <select data-prop="frequencyScale">
+          ${freqScales.map((s) => `<option value="${s}" ${(c.frequencyScale || 'log') === s ? 'selected' : ''}>${s}</option>`).join('')}
+        </select>
+      </div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 감도 —</label>
+      </div>
+      ${slider('minDecibels', 'Min dB', -120, -60, 1, c.minDecibels ?? -85, 'dB')}
+      ${slider('maxDecibels', 'Max dB', -50, 0, 1, c.maxDecibels ?? -25, 'dB')}
+      ${slider('smoothing', 'Smoothing', 0, 1, 0.01, c.smoothing ?? 0.5, '')}
+      <div class="te-prop">
+        <label>Weighting Filter</label>
+        <select data-prop="weightingFilter">
+          ${weightingFilters.map((w) => `<option value="${w}" ${(c.weightingFilter ?? 'D') === w ? 'selected' : ''}>${w || '(none)'}</option>`).join('')}
+        </select>
+      </div>
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— 디자인 —</label>
+      </div>
+      ${colorBlock}
+      ${slider('glow', 'Glow', 0, 80, 1, c.glow ?? 20, 'px')}
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--text-muted);font-size:10px;">⚠ verticalMode/splitGap 은 카드 썸네일 정적 표시용 (실시간 비주얼라이저는 AudioMotion 옵션 사용)</label>
+      </div>
+      <div class="te-prop">
+        <label>Card Mode</label>
         <select data-prop="verticalMode">
           <option value="symmetric" ${c.verticalMode === 'symmetric' ? 'selected' : ''}>↕ Symmetric</option>
           <option value="up" ${c.verticalMode === 'up' ? 'selected' : ''}>↑ Up only</option>
           <option value="down" ${c.verticalMode === 'down' ? 'selected' : ''}>↓ Down only</option>
         </select>
       </div>
-      ${colorBlock}
-      ${slider('glow', 'Glow', 0, 80, 1, c.glow ?? 20, 'px')}
-      ${slider('barCount', 'Bar Count', 4, 200, 1, c.barCount ?? 80, '')}
-      ${slider('barWidth', 'Bar Width', 1, 30, 1, c.barWidth ?? 6, 'px')}
-      ${slider('barGap', 'Bar Gap', 0, 30, 1, c.barGap ?? 2, 'px')}
-      ${slider('splitGap', 'Split Gap', 0, 200, 1, c.splitGap ?? 0, 'px')}
-      ${slider('centerCut', 'Low Cut', 0, 200, 1, c.centerCut ?? 0, '')}
-      ${slider('trimStart', 'Trim Start', 0, 50, 1, c.trimStart ?? 3, '')}
-      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
-        <label style="color:var(--jazz-gold)">— 주파수 —</label>
-      </div>
-      ${slider('sensitivity', 'Sensitivity', 0, 1, 0.005, c.sensitivity ?? 0.15, '')}
-      ${slider('smoothing', 'Smoothing', 0, 1, 0.01, c.smoothing ?? 0.85, '')}
-      ${slider('midBoost', 'Mid Boost', 0, 10, 0.05, c.midBoost ?? 1.5, '')}
-      ${slider('highBoost', 'High Boost', 0, 10, 0.05, c.highBoost ?? 0.8, '')}
+      ${slider('splitGap', 'Card Split Gap', 0, 200, 1, c.splitGap ?? 0, 'px')}
     `;
   } else if (c.type === 'progress') {
     typeFields = `
@@ -1053,7 +1102,9 @@ function renderProps() {
       let val = inp.value;
       const numericInput = inp.type === 'number' || inp.type === 'range';
       if (numericInput) val = parseFloat(val);
-      if (Number.isNaN(val) && numericInput) return;
+      else if (inp.dataset.coerce === 'int') val = parseInt(val, 10);
+      else if (inp.dataset.coerce === 'float') val = parseFloat(val);
+      if ((numericInput || inp.dataset.coerce) && Number.isNaN(val)) return;
       // 슬라이더 값 표시 갱신
       const valEl = wrap.querySelector(`[data-val-for="${prop}"]`);
       if (valEl) {
@@ -1754,6 +1805,10 @@ async function deleteTemplate(id) {
 async function templatesOnEnter() {
   if (!te.initialized) {
     te.initialized = true;
+    // AudioContext 를 미리 만들어둠 — AudioMotion 인스턴스가 이 context 를 공유해야
+    // 나중에 audio.source (같은 context) 를 connect 할 수 있음. 자동재생 정책 때문에
+    // 처음엔 suspended 상태로 시작 — 사용자 ▶ 클릭 시 resume.
+    ensureAudioContext();
     await Promise.all([refreshTemplateList(), refreshPreviewTracks()]);
     renderCanvas();
     startVisualizerTicker();
@@ -1794,16 +1849,6 @@ async function refreshPreviewTracks() {
 function ensureAudioContext() {
   if (audio.context) return;
   audio.context = new (window.AudioContext || window.webkitAudioContext)();
-  audio.analyser = audio.context.createAnalyser();
-  audio.analyser.fftSize = FFT_SIZE;
-  // ⚠ 막대 다양성을 위해 내부 smoothing 은 낮게. 사용자 smoothing 슬라이더가
-  // 우리 쪽 pass 에서 적용되므로 여기서 더 smooth 하면 인접 막대들이 평탄화됨.
-  audio.analyser.smoothingTimeConstant = 0.3;
-  // dB range — 음악의 dynamic range 를 더 잘 보이게.
-  audio.analyser.minDecibels = -90;
-  audio.analyser.maxDecibels = -20;
-  audio.bytes = new Uint8Array(audio.analyser.frequencyBinCount);
-  audio.analyser.connect(audio.context.destination);
 }
 
 function disposePreview() {
@@ -1818,6 +1863,8 @@ function disposePreview() {
   }
   audio.trackId = null;
   audio.duration = 0;
+  // 모든 visualizer 의 source 도 끊기
+  reattachAllVisualizerSources();
   setPreviewUiState({ ready: false, playing: false, time: 0, duration: 0 });
 }
 
@@ -1839,8 +1886,13 @@ async function loadPreviewTrack(trackId) {
     audio.trackId = trackId;
 
     // mediaElementSource 는 audio element 마다 1회만.
+    // AudioMotion 이 자체 분석을 하므로 우리 쪽 AnalyserNode 는 제거.
+    // 스피커 출력은 source → destination 직결.
     audio.source = audio.context.createMediaElementSource(el);
-    audio.source.connect(audio.analyser);
+    audio.source.connect(audio.context.destination);
+
+    // 모든 visualizer 가 새 source 사용하도록 다시 연결
+    reattachAllVisualizerSources();
 
     el.addEventListener('loadedmetadata', () => {
       audio.duration = el.duration || 0;
