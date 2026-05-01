@@ -44,7 +44,8 @@ function buildStrokeStyle(ctx, comp, x, y, width /*, height */) {
 function applyGlow(ctx, comp) {
   const glow = comp.glow ?? 0;
   if (glow > 0) {
-    ctx.shadowColor = comp.glowColor || comp.color || '#D4AF37';
+    // Phase 4-D-3-D-1 polish: glow 색은 c.glowColor 직접 사용 (자동 매칭 X).
+    ctx.shadowColor = comp.glowColor || '#D4AF37';
     ctx.shadowBlur = glow;
   }
 }

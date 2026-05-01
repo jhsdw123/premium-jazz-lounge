@@ -509,11 +509,45 @@ function applyVisualizerGlow(container, c) {
   if (!container) return;
   const glow = Math.max(0, c.glow ?? 0);
   if (glow > 0) {
-    const glowColor = c.colorMode === 'gradient' ? '#D4AF37' : (c.color || '#D4AF37');
+    // Phase 4-D-3-D-1 polish: glow color 는 항상 c.glowColor 를 직접 사용.
+    // colorMode 와 독립 — 자동 매칭 X.
+    const glowColor = c.glowColor || '#D4AF37';
     container.style.filter = `drop-shadow(0 0 ${glow}px ${glowColor})`;
   } else {
     container.style.filter = 'none';
   }
+}
+
+// Phase 4-D-3-D-1 polish: AudioMotion 의 gradient 를 colorMode 에 따라 동적 등록.
+//   colorMode='solid'    → 1색 gradient 등록 (사용자 색상 = 막대 색)
+//   colorMode='gradient' → c.gradientStops 를 그대로 등록
+//   colorMode='preset'   → 등록 X, c.gradient (rainbow 등 preset 이름) 그대로 사용
+// 반환값: AM setOptions 에 넣을 gradient 이름.
+function registerVisualizerGradient(am, c) {
+  const presetMode = c.colorMode === 'preset';
+  if (presetMode) return c.gradient || 'rainbow';
+
+  // 'solid' 또는 'gradient' — 동적 gradient 등록
+  const gradName = `pjl-${c.id}`;
+  let colorStops;
+  if (c.colorMode === 'gradient' && Array.isArray(c.gradientStops) && c.gradientStops.length >= 2) {
+    const sorted = [...c.gradientStops].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    colorStops = sorted.map((s) => ({
+      pos: Math.max(0, Math.min(1, (s.position ?? 0) / 100)),
+      color: s.color || '#FFFFFF',
+    }));
+  } else {
+    // solid — 단색 (AudioMotion 은 최소 2 stops 필요 → 같은 색 2개)
+    const col = c.color || '#D4AF37';
+    colorStops = [{ pos: 0, color: col }, { pos: 1, color: col }];
+  }
+  try {
+    am.registerGradient(gradName, { bgColor: '#000', colorStops });
+  } catch (e) {
+    console.warn('[AudioMotion] registerGradient 실패:', e?.message || e);
+    return c.gradient || 'rainbow';
+  }
+  return gradName;
 }
 
 // 컴포넌트의 AudioMotion 인스턴스를 (없으면) 새로 만들고, (있으면) 옵션만 갱신.
@@ -524,7 +558,11 @@ function attachVisualizerInstance(c) {
   applyVisualizerGlow(container, c);
 
   if (c._audioMotion && !c._audioMotion.isDestroyed) {
-    try { c._audioMotion.setOptions(audioMotionOptions(c)); } catch {}
+    try {
+      // Phase 4-D-3-D-1 polish: 동적 gradient 재등록 → AM 옵션의 gradient 로 사용.
+      const gradName = registerVisualizerGradient(c._audioMotion, c);
+      c._audioMotion.setOptions({ ...audioMotionOptions(c), gradient: gradName });
+    } catch {}
     // source 는 audio.source 가 있으면 한번만 connect (idempotent 체크).
     if (audio.source) {
       try {
@@ -533,6 +571,8 @@ function attachVisualizerInstance(c) {
         if (!has) c._audioMotion.connectInput(audio.source);
       } catch {}
     }
+    // style 따라 AM canvas / custom canvas 표시 분기 (mode 변경 시도 호출).
+    applyVisualizerStyleVisibility(c);
     return;
   }
 
@@ -544,6 +584,9 @@ function attachVisualizerInstance(c) {
       source: audio.source || undefined,
       connectSpeakers: false,    // 스피커 연결은 우리가 한 번만 함 (loadPreviewTrack)
     });
+    // 신규 인스턴스에도 동적 gradient 등록 후 옵션으로 적용.
+    const gradName = registerVisualizerGradient(c._audioMotion, c);
+    c._audioMotion.setOptions({ gradient: gradName });
   } catch (e) {
     console.error('[AudioMotion] 생성 실패:', e);
   }
@@ -1273,13 +1316,39 @@ function renderProps() {
     const stops = Array.isArray(c.gradientStops) && c.gradientStops.length
       ? c.gradientStops
       : [{ position: 0, color: '#FFFFFF' }, { position: 100, color: '#D4AF37' }];
-    const colorBlock = c.colorMode === 'gradient'
-      ? `
-        <div class="te-prop full">
-          <div class="te-radio-row" style="margin-bottom:6px;">
-            <label><input type="radio" name="vmcolor" data-mode="solid" /> Solid</label>
-            <label><input type="radio" name="vmcolor" data-mode="gradient" checked /> Gradient</label>
+    // visualizerStyle 변수 (colorBlock 이 사용)
+    const vstyle = c.visualizerStyle || 'bars';
+    const isCustom = vstyle === 'wave-time' || vstyle === 'mirror' || vstyle === 'mirror-fill';
+    const isLine = vstyle === 'line';
+    const isBars = vstyle === 'bars';
+    // Phase 4-D-3-D-1 polish — 3 modes:
+    //   solid    → c.color (단색, AM 에는 1색 dynamic gradient 등록)
+    //   gradient → c.gradientStops (3-stop, AM 에는 multi-stop dynamic gradient 등록)
+    //   preset   → AM preset (rainbow/classic/...). Bars/Line 만 의미 있음.
+    //              Custom (wave/mirror/mirror-fill) 에선 안내 + solid fallback.
+    const cmRaw = c.colorMode || 'solid';
+    // Custom style + preset → 시각적 fallback (UI 는 solid 처럼 보여줌)
+    const cmEffective = (cmRaw === 'preset' && (isCustom || vstyle === undefined)) ? 'solid' : cmRaw;
+    const supportsPreset = isBars || isLine;
+    const radio = (mode, label) => `
+      <label><input type="radio" name="vmcolor" data-mode="${mode}" ${cmRaw === mode ? 'checked' : ''} /> ${label}</label>
+    `;
+    const colorBlock = `
+      <div class="te-prop full">
+        <label>Color Mode</label>
+        <div class="te-radio-row" style="margin-bottom:6px;">
+          ${radio('solid', 'Solid')}
+          ${radio('gradient', 'Gradient')}
+          ${supportsPreset
+            ? radio('preset', 'Preset')
+            : `<label style="opacity:0.4;cursor:not-allowed;" title="Wave/Mirror 에선 Preset 미지원 — Solid/Gradient 사용"><input type="radio" disabled /> Preset</label>`}
+        </div>
+        ${cmRaw === 'preset' && !supportsPreset ? `
+          <div style="font-size:10px;color:var(--accent-warn,#e8a04a);margin-bottom:6px;">
+            ⚠ Wave/Mirror 는 Preset 미지원 — Solid 로 작동합니다.
           </div>
+        ` : ''}
+        ${cmEffective === 'gradient' ? `
           <div class="te-gradient-preview" style="background:${gradientCss(stops)};"></div>
           <div id="teGradientStops">
             ${stops.map((s, i) => `
@@ -1292,18 +1361,19 @@ function renderProps() {
             `).join('')}
           </div>
           <button type="button" class="te-btn" id="teGradientAddBtn" style="margin-top:4px;">+ Add Stop</button>
-        </div>
-      `
-      : `
-        <div class="te-prop">
-          <label>Color Mode</label>
-          <div class="te-radio-row">
-            <label><input type="radio" name="vmcolor" data-mode="solid" checked /> Solid</label>
-            <label><input type="radio" name="vmcolor" data-mode="gradient" /> Gradient</label>
+        ` : cmEffective === 'preset' ? `
+          <div class="te-prop full">
+            <label>Preset</label>
+            <select data-prop="gradient">
+              ${['classic','prism','rainbow','orangered','steelblue'].map((g) => `<option value="${g}" ${(c.gradient ?? 'rainbow') === g ? 'selected' : ''}>${g}</option>`).join('')}
+            </select>
+            <div style="font-size:10px;color:var(--text-muted);margin-top:2px;">AudioMotion 내장 그라데이션 (Bars/Line 전용)</div>
           </div>
-        </div>
-        <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#D4AF37'}" /></div>
-      `;
+        ` : `
+          <div class="te-prop"><label>Color</label><input type="color" data-prop="color" value="${c.color || '#D4AF37'}" /></div>
+        `}
+      </div>
+    `;
     const modeOpts = [
       [0, 'Discrete frequencies'],
       [1, '1/24 octave (240 bands)'],
@@ -1328,10 +1398,6 @@ function renderProps() {
         </label>
       </div>
     `;
-    const vstyle = c.visualizerStyle || 'bars';
-    const isCustom = vstyle === 'wave-time' || vstyle === 'mirror' || vstyle === 'mirror-fill';
-    const isLine = vstyle === 'line';
-    const isBars = vstyle === 'bars';
     typeFields = `
       <div class="te-prop full" style="margin-top:6px;background:var(--bg-input);padding:8px;border-radius:4px;border-left:3px solid var(--jazz-gold);">
         <div style="font-size:10px;color:var(--jazz-gold);font-weight:700;margin-bottom:4px;">🎵 VISUALIZER STYLE</div>
@@ -1366,12 +1432,6 @@ function renderProps() {
       </div>
       ` : ''}
       ${(isBars || isLine) ? `
-      <div class="te-prop">
-        <label>Gradient</label>
-        <select data-prop="gradient">
-          ${gradientOpts.map((g) => `<option value="${g}" ${(c.gradient ?? 'rainbow') === g ? 'selected' : ''}>${g}</option>`).join('')}
-        </select>
-      </div>
       <div class="te-prop">
         <label>Mirror</label>
         <select data-prop="mirror" data-coerce="int">
@@ -1429,6 +1489,7 @@ function renderProps() {
       </div>
       ${colorBlock}
       ${slider('glow', 'Glow', 0, 80, 1, c.glow ?? 20, 'px')}
+      <div class="te-prop"><label>Glow Color</label><input type="color" data-prop="glowColor" value="${c.glowColor || '#D4AF37'}" /></div>
 
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
         <label style="color:var(--text-muted);font-size:10px;">⚠ verticalMode/splitGap 은 카드 썸네일 정적 표시용 (실시간 비주얼라이저는 AudioMotion 옵션 사용)</label>
@@ -1808,7 +1869,7 @@ function renderProps() {
     });
   });
 
-  // Visualizer — Color Mode 라디오
+  // Visualizer — Color Mode 라디오 (solid / gradient / preset)
   wrap.querySelectorAll('input[name="vmcolor"][data-mode]').forEach((r) => {
     r.addEventListener('change', () => {
       if (!r.checked) return;
@@ -1823,6 +1884,10 @@ function renderProps() {
           { position: 50, color: cur.color || '#D4AF37' },
           { position: 100, color: '#A04000' },
         ];
+      }
+      // preset 첫 전환 — c.gradient 가 비어있으면 'rainbow' default
+      if (mode === 'preset' && !cur.gradient) {
+        patch.gradient = 'rainbow';
       }
       updateComponent(cur.id, patch);
       renderProps();

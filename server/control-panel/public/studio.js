@@ -251,7 +251,8 @@ function drawVisualizerComponent(ctx, c) {
   ctx.globalAlpha = c.opacity ?? 1;
   const glow = c.glow ?? 0;
   if (glow > 0) {
-    ctx.shadowColor = c.colorMode === 'gradient' ? '#D4AF37' : (c.color || '#D4AF37');
+    // Phase 4-D-3-D-1 polish: glow 는 c.glowColor 를 직접 사용 (자동 매칭 X).
+    ctx.shadowColor = c.glowColor || '#D4AF37';
     ctx.shadowBlur = glow;
   }
   ctx.drawImage(amCv, c.x, c.y, c.width, c.height);
@@ -548,9 +549,36 @@ function attachVisualizers() {
       source: studio.audioSource || undefined,
       connectSpeakers: false,
     });
+    // Phase 4-D-3-D-1 polish: colorMode 따라 동적 gradient 등록.
+    const gradName = registerVisualizerGradient(am, c);
+    try { am.setOptions({ gradient: gradName }); } catch {}
     studio.visInstances.set(c.id, am);
     studio.visCanvases.set(c.id, am.canvas);
   }
+}
+
+// Editor 의 registerVisualizerGradient 와 동일 로직 (Studio 도 사용).
+function registerVisualizerGradient(am, c) {
+  if (c.colorMode === 'preset') return c.gradient || 'rainbow';
+  const gradName = `pjl-${c.id}`;
+  let colorStops;
+  if (c.colorMode === 'gradient' && Array.isArray(c.gradientStops) && c.gradientStops.length >= 2) {
+    const sorted = [...c.gradientStops].sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
+    colorStops = sorted.map((s) => ({
+      pos: Math.max(0, Math.min(1, (s.position ?? 0) / 100)),
+      color: s.color || '#FFFFFF',
+    }));
+  } else {
+    const col = c.color || '#D4AF37';
+    colorStops = [{ pos: 0, color: col }, { pos: 1, color: col }];
+  }
+  try {
+    am.registerGradient(gradName, { bgColor: '#000', colorStops });
+  } catch (e) {
+    console.warn('[AudioMotion] registerGradient 실패:', e?.message || e);
+    return c.gradient || 'rainbow';
+  }
+  return gradName;
 }
 
 // ─── 곡 자동 진행 ─────────────────────────────────────────────────
