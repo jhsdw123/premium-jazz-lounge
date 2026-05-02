@@ -676,6 +676,136 @@ app.get('/api/tracks/:id/usage', async (req, res) => {
   }
 });
 
+// ─── Tracks: 제목 자동완성 (Phase 5-B) ──────────────────────────────────
+//   GET /api/tracks/autocomplete?q=Sho&limit=5
+//   - 제목이 q 로 시작하는 (사용된 적 있는) 곡 우선.
+//   - title_en 은 pjl_titles 에 있으므로 2-step query (titles 먼저 → tracks).
+//   - 응답: { ok, results: [{ id, title, used_count, last_used_at }] }.
+app.get('/api/tracks/autocomplete', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 5, 1), 20);
+  if (!q) return res.json({ ok: true, results: [] });
+
+  try {
+    // 1) title_en 이 q 로 시작하는 title row 들 (≤200 prefetch)
+    const safe = q.replace(/[,()*\\%]/g, ' ').trim();
+    const { data: titleHits, error: tErr } = await supabase
+      .from('pjl_titles')
+      .select('id, title_en')
+      .ilike('title_en', `${safe}%`)
+      .limit(200);
+    if (tErr) throw tErr;
+    const matchedTitleIds = (titleHits || []).map((t) => t.id);
+    if (!matchedTitleIds.length) return res.json({ ok: true, results: [] });
+
+    // 2) 그 title 을 가진 + used_count>0 트랙 중 used 가 많은 순.
+    const { data: trackRows, error: trErr } = await supabase
+      .from('pjl_tracks')
+      .select('id, title_id, used_count, last_used_at')
+      .in('title_id', matchedTitleIds)
+      .gt('used_count', 0)
+      .eq('is_active', true)
+      .order('used_count', { ascending: false })
+      .order('last_used_at', { ascending: false, nullsFirst: false })
+      .limit(limit);
+    if (trErr) throw trErr;
+
+    const titleMap = new Map((titleHits || []).map((t) => [t.id, t.title_en]));
+    const results = (trackRows || []).map((t) => ({
+      id: t.id,
+      title: titleMap.get(t.title_id) || '',
+      used_count: t.used_count || 0,
+      last_used_at: t.last_used_at || null,
+    }));
+    res.json({ ok: true, results });
+  } catch (e) {
+    console.error('[autocomplete] 실패:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Tracks: 가장 최근 사용 영상의 곡 list (Phase 5-B) ───────────────────
+//   GET /api/tracks/:id/last-video
+//   - 이 곡의 가장 최근 used_at 의 video_id 조회.
+//   - 그 video_id 의 모든 pjl_track_usage row + 트랙/제목/길이 조회.
+//   - 누적 시간 계산해 timecode 부여.
+//   - 응답: { ok, video_id, used_at, track_count, tracks: [{ position, title, track_id, length_sec, start_sec, timecode }] }
+//   - 사용 이력 없으면 404 + { fallback: 'manual' }.
+app.get('/api/tracks/:id/last-video', async (req, res) => {
+  const trackId = parseIntOrNull(req.params.id);
+  if (!trackId) return res.status(400).json({ ok: false, error: 'invalid track id' });
+
+  try {
+    // 1) 가장 최근 사용
+    const { data: last, error: e1 } = await supabase
+      .from('pjl_track_usage')
+      .select('video_id, used_at, track_position')
+      .eq('track_id', trackId)
+      .order('used_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (e1) throw e1;
+    if (!last) {
+      return res.status(404).json({ ok: false, error: '이 곡의 사용 이력 없음', fallback: 'manual' });
+    }
+
+    // 2) 그 video_id 의 모든 곡 (position 순). 트랙/제목/길이 join.
+    //    pjl_track_usage → pjl_tracks → pjl_titles 2단 nested embed.
+    const { data: usageRows, error: e2 } = await supabase
+      .from('pjl_track_usage')
+      .select(`
+        track_position,
+        used_at,
+        track:pjl_tracks (
+          id,
+          duration_actual_sec,
+          duration_raw_sec,
+          title:pjl_titles ( id, title_en )
+        )
+      `)
+      .eq('video_id', last.video_id)
+      .order('track_position', { ascending: true });
+    if (e2) throw e2;
+
+    let cumulative = 0;
+    const tracks = (usageRows || []).map((u) => {
+      const lengthSec = Number(u.track?.duration_actual_sec)
+        || Number(u.track?.duration_raw_sec)
+        || 0;
+      const startSec = cumulative;
+      cumulative += lengthSec;
+      return {
+        position: u.track_position,
+        track_id: u.track?.id ?? null,
+        title: u.track?.title?.title_en || '',
+        length_sec: lengthSec,
+        start_sec: startSec,
+        timecode: formatTimecode(startSec),
+      };
+    });
+
+    res.json({
+      ok: true,
+      video_id: last.video_id,
+      used_at: last.used_at,
+      track_count: tracks.length,
+      tracks,
+    });
+  } catch (e) {
+    console.error('[last-video] 실패:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+function formatTimecode(sec) {
+  const total = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 // ─── Tracks: backfill (Phase 3-B) ────────────────────────────────────────
 //   POST /api/tracks/backfill
 //   body: { ids?: number[], limit?: number }
