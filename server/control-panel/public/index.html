@@ -1496,8 +1496,12 @@
             <button class="te-btn gold" id="studioRecordBtn" type="button" style="width:100%;height:42px;font-size:13px;">🎬 녹화 시작</button>
             <button class="te-btn" id="studioStopRecBtn" type="button" hidden style="width:100%;height:42px;background:#522;color:#fff;font-size:13px;">⏹ 녹화 중지 + 저장</button>
             <div id="studioRecStatus" style="font-size:11px;color:var(--text-dim);margin-top:8px;line-height:1.5;"></div>
-            <div style="font-size:10px;color:var(--text-muted);margin-top:6px;line-height:1.4;">
-              ⚠ 녹화 중 탭 비활성화 시 frame loss 가능. 다른 탭 전환 자제.
+            <div style="font-size:11px;color:#f9d77c;background:#3a2a14;border:1px solid #6a4d20;border-radius:6px;padding:8px 10px;margin-top:8px;line-height:1.55;">
+              <strong>⚠ 녹화 중 주의사항</strong><br>
+              • 이 탭을 항상 활성 상태로 유지 (다른 탭/창 전환 시 화면 정지 위험)<br>
+              • 다른 audio 재생 X (시스템 캡처에 들어감)<br>
+              • 컴퓨터 sleep / 화면 보호기 끄기<br>
+              • 알림 소리 끄기 (집중 모드 권장)
             </div>
           </div>
 
@@ -1515,9 +1519,12 @@
               <span style="margin-left:auto;">캔버스: <span class="strong">1920 × 1080</span></span>
               <span>FPS: <span class="strong">30</span></span>
             </div>
-            <div class="te-canvas-frame" id="studioCanvasFrame">
+            <div class="te-canvas-frame" id="studioCanvasFrame" style="position:relative;">
               <canvas id="studioCanvas" width="1920" height="1080" style="width:100%;height:100%;display:block;background:#000;"></canvas>
               <div class="te-canvas-bg" id="studioVisHost" style="position:absolute;inset:0;pointer-events:none;"></div>
+              <div id="studioVisibilityWarning" hidden style="position:absolute;top:0;left:0;right:0;background:#a01818;color:#fff;font-weight:bold;font-size:14px;text-align:center;padding:10px 14px;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.6);line-height:1.4;">
+                🚨 녹화 탭이 백그라운드 — 즉시 이 탭으로 돌아오세요! (화면 정지 위험)
+              </div>
             </div>
           </div>
         </div>

@@ -60,12 +60,17 @@ const studio = {
 
   // 재생 상태
   playing: false,
-  rafId: null,
+  renderIntervalId: null,    // setInterval 기반 (Phase 4-D-4 fix v2: 백그라운드 throttle 회피 — RAF 폐기)
 
   // 녹화
   recording: false,
   recCancelled: false,
+  wakeLock: null,            // navigator.wakeLock.request('screen') 결과 (녹화 중 화면 sleep 방지)
+  visibilityListenerBound: false,
 };
+
+// Phase 4-D-4 fix v2: 1000/30 = 33.333…ms. setInterval 정수 권장 — Math.round 안 함 (drift 더 적음).
+const FRAME_MS = 1000 / FPS;
 
 // ─── 색상 유틸 (template-editor.js 와 동일 로직) ────────────────────
 function hexToRgb(hex) {
@@ -729,21 +734,72 @@ function updateButtons() {
     || studio.currentTrackIdx >= (studio.session.tracks.length - 1);
 }
 
-// ─── RAF 루프 — 매 frame 캔버스 그리기 ──────────────────────────
+// ─── 렌더 루프 — setInterval 기반 (Phase 4-D-4 fix v2) ───────────
+// requestAnimationFrame 은 백그라운드 탭에서 throttle (보통 1Hz) → 9분 영상 중간에
+// 1분 30초 화면 정지 발생. setInterval 은 백그라운드에서도 (Chrome 기준) 1초당 1회까지
+// 안정적으로 호출됨 + 활성 탭이라면 정확히 33ms 간격. RAF 보다 훨씬 견고.
+// 완벽한 해결책은 OffscreenCanvas + Worker 이지만 우선 setInterval 로 적용.
 function startRenderLoop() {
-  if (studio.rafId) return;
-  const tick = () => {
-    renderFrame();
-    studio.rafId = requestAnimationFrame(tick);
-  };
-  studio.rafId = requestAnimationFrame(tick);
+  if (studio.renderIntervalId) return;
+  studio.renderIntervalId = setInterval(renderFrame, FRAME_MS);
 }
 
 function stopRenderLoop() {
-  if (studio.rafId) {
-    cancelAnimationFrame(studio.rafId);
-    studio.rafId = null;
+  if (studio.renderIntervalId) {
+    clearInterval(studio.renderIntervalId);
+    studio.renderIntervalId = null;
   }
+}
+
+// ─── WakeLock + Visibility 감시 (Phase 4-D-4 fix v2) ─────────────
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) {
+    console.warn('[REC] WakeLock API 미지원 (구형 브라우저)');
+    return;
+  }
+  try {
+    studio.wakeLock = await navigator.wakeLock.request('screen');
+    studio.wakeLock.addEventListener('release', () => {
+      console.log('[REC] WakeLock released');
+    });
+    console.log('[REC] WakeLock acquired (화면 sleep 방지)');
+  } catch (e) {
+    console.warn('[REC] WakeLock 획득 실패:', e?.message || e);
+  }
+}
+
+function releaseWakeLock() {
+  if (!studio.wakeLock) return;
+  try { studio.wakeLock.release(); } catch {}
+  studio.wakeLock = null;
+}
+
+function showVisibilityWarning() {
+  const el = $('#studioVisibilityWarning');
+  if (el) el.hidden = false;
+}
+function hideVisibilityWarning() {
+  const el = $('#studioVisibilityWarning');
+  if (el) el.hidden = true;
+}
+
+function bindVisibilityWatcher() {
+  if (studio.visibilityListenerBound) return;
+  studio.visibilityListenerBound = true;
+  document.addEventListener('visibilitychange', async () => {
+    if (!studio.recording) return;
+    if (document.hidden) {
+      console.warn('[REC] ⚠️ 녹화 탭 백그라운드 진입 — 화면 정지/throttle 위험!');
+      showVisibilityWarning();
+    } else {
+      console.log('[REC] 녹화 탭 활성화 복귀');
+      hideVisibilityWarning();
+      // WakeLock 은 탭 백그라운드 진입 시 자동 release. 복귀 시 재획득 필요.
+      if (!studio.wakeLock) {
+        await acquireWakeLock();
+      }
+    }
+  });
 }
 
 // ─── Image 컴포넌트 사전 로드 ─────────────────────────────────────
@@ -793,6 +849,7 @@ async function bootSession(session) {
 window.studioOnEnter = async function studioOnEnter() {
   if (!studio.initialized) {
     bindControls();
+    bindVisibilityWatcher();
     studio.initialized = true;
   }
   const session = await loadSession();
@@ -888,6 +945,10 @@ async function startRecording() {
   studio.recCancelled = false;
   $('#studioRecordBtn').hidden = true;
   $('#studioStopRecBtn').hidden = false;
+
+  // Phase 4-D-4 fix v2: WakeLock 으로 화면 sleep 방지 + 현재 visibility 즉시 점검.
+  await acquireWakeLock();
+  if (document.hidden) showVisibilityWarning();
 
   const cv = $('#studioCanvas');
 
@@ -987,6 +1048,8 @@ async function captureTrackFramesLive(vEnc, canvas, trackIdx, trackDur, globalTi
   const keyFrameInterval = FPS * 3;
   const frameInterval = 1000 / FPS;
   const startWall = performance.now();
+  // Phase 4-D-4 fix v2: backpressure 임계값 25→5 — 인코더가 밀리는 즉시 캡처를 늦춤.
+  const MAX_QUEUE_SIZE = 5;
 
   for (let f = 0; f < totalFrames; f++) {
     if (studio.recCancelled) break;
@@ -999,13 +1062,13 @@ async function captureTrackFramesLive(vEnc, canvas, trackIdx, trackDur, globalTi
     }
 
     // encoder backpressure
-    while (vEnc.encodeQueueSize > 25) {
-      await new Promise((r) => setTimeout(r, 0));
+    while (vEnc.encodeQueueSize > MAX_QUEUE_SIZE) {
+      await new Promise((r) => setTimeout(r, 1));
       if (studio.recCancelled) break;
     }
     if (studio.recCancelled) break;
 
-    // RAF 가 알아서 캔버스 갱신 중. 현재 frame 그대로 캡처.
+    // 캔버스는 setInterval 루프에서 매 33ms 갱신 중. 현재 frame 그대로 캡처.
     const localTime = f / FPS;
     const ts = Math.round((globalTimeOffset + localTime) * 1e6);
     try {
@@ -1014,6 +1077,20 @@ async function captureTrackFramesLive(vEnc, canvas, trackIdx, trackDur, globalTi
       vf.close();
     } catch (e) {
       console.warn('VideoFrame 인코드 실패:', e.message);
+    }
+
+    // Phase 4-D-4 fix v2: 매 30 frame (1초) 마다 진단 로그 — 백그라운드 throttle / 인코더 밀림 / 메모리 누수 추적.
+    if (f % 30 === 0) {
+      const queueSize = vEnc.encodeQueueSize;
+      const memMB = performance.memory?.usedJSHeapSize
+        ? (performance.memory.usedJSHeapSize / 1048576).toFixed(0)
+        : '?';
+      const elapsedSec = (f / FPS).toFixed(1);
+      const wallSec = ((performance.now() - startWall) / 1000).toFixed(1);
+      const drift = (wallSec - elapsedSec).toFixed(1);
+      console.log(
+        `[REC] track=${trackIdx + 1} frame=${f}/${totalFrames} time=${elapsedSec}s wall=${wallSec}s drift=${drift}s queue=${queueSize} mem=${memMB}MB hidden=${document.hidden}`
+      );
     }
 
     if (f % 90 === 0) {
@@ -1104,6 +1181,8 @@ async function finishRecording() {
     studio.recording = false;
     studio.recCancelled = false;
     studio._enc = null;
+    releaseWakeLock();
+    hideVisibilityWarning();
     $('#studioRecordBtn').hidden = false;
     $('#studioStopRecBtn').hidden = true;
   }
