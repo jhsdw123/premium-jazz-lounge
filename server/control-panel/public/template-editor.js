@@ -502,6 +502,11 @@ function audioMotionOptions(c) {
     frequencyScale: c.frequencyScale ?? 'log',
     channelLayout: c.channelLayout ?? 'single',
     useCanvas: true,
+    // Phase 4-D fix: 음역대 (Hz) / dB 축은 영상에 안 보이게 default off.
+    //   기존 컴포넌트는 schema 에 필드 자체가 없으므로 ?? false 로 자동 적용됨.
+    //   필요 시 c.showScaleX / showScaleY 로 명시적 true override 가능.
+    showScaleX: c.showScaleX ?? false,
+    showScaleY: c.showScaleY ?? false,
   };
 }
 

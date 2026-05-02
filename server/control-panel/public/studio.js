@@ -534,6 +534,10 @@ function audioMotionOptions(c) {
     frequencyScale: c.frequencyScale ?? 'log',
     channelLayout: c.channelLayout ?? 'single',
     useCanvas: true,
+    // Phase 4-D fix: 음역대 (Hz) / dB 축은 mp4 에 들어가지 않도록 default off.
+    //   schema 에 필드 없는 기존 컴포넌트도 ?? false 로 자동 적용.
+    showScaleX: c.showScaleX ?? false,
+    showScaleY: c.showScaleY ?? false,
   };
 }
 
