@@ -1177,6 +1177,33 @@ async function encodeAudioSegment(encoder, buffer, duration, timeOffset) {
   }
 }
 
+// Phase 4-D-5-A: mp4 export 성공 직후 호출 — 곡 사용 이력을 백엔드에 기록.
+// videoId 는 클라이언트 측 ID (현재 시각). 백엔드에 별도 video 테이블 join 없이 추적 가능.
+async function recordTrackUsage(tracks) {
+  if (!Array.isArray(tracks) || tracks.length === 0) return;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const videoId = `vid_${stamp}`;
+  const records = tracks
+    .filter((t) => t && t.id != null)
+    .map((t, idx) => ({
+      track_id: t.id,
+      video_id: videoId,
+      track_position: idx + 1,
+    }));
+  if (!records.length) return;
+  const r = await fetch('/api/tracks/usage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ records }),
+  });
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    throw new Error(`HTTP ${r.status} ${txt}`);
+  }
+  const j = await r.json();
+  console.log(`[REC] 사용 이력 ${j.recorded || records.length} 곡 기록 (videoId=${videoId})`);
+}
+
 async function finishRecording() {
   const enc = studio._enc;
   if (!enc) return;
@@ -1221,6 +1248,15 @@ async function finishRecording() {
     setTimeout(() => URL.revokeObjectURL(url), 5000);
 
     setRecStatus(`✅ 저장 완료 (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
+
+    // Phase 4-D-5-A: 사용 이력 기록 — mp4 가 실제 다운로드된 시점에만.
+    // 취소/예외 시점엔 catch 로 빠지므로 여기 도달 X.
+    try {
+      await recordTrackUsage(studio.session?.tracks || []);
+    } catch (e) {
+      // 영상은 이미 만들어졌으니 사용 이력 실패는 silently 로그만.
+      console.warn('[REC] 사용 이력 기록 실패:', e?.message || e);
+    }
   } catch (e) {
     console.error('finalize 실패:', e);
     setRecStatus(`⚠ 저장 실패: ${e.message}`);

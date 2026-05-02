@@ -369,6 +369,26 @@ app.get('/api/tracks', async (req, res) => {
       case 'shortest': q = q.order('duration_actual_sec', { ascending: true, nullsFirst: false }); break;
       case 'longest':  q = q.order('duration_actual_sec', { ascending: false, nullsFirst: false }); break;
       case 'random':   /* RPC 가 위에서 처리, JS reorder 는 fetch 후 */ break;
+      // Phase 4-D-5-A: 사용 이력 기반 정렬.
+      case 'recommend':
+        // 사용 횟수 적은 순 + 마지막 사용 오래된 순. 둘 다 nulls 가 가장 위 (= 한 번도 안 쓴 곡 최상단).
+        q = q.order('used_count', { ascending: true, nullsFirst: true })
+             .order('last_used_at', { ascending: true, nullsFirst: true });
+        break;
+      case 'usage_asc':
+        q = q.order('used_count', { ascending: true, nullsFirst: true });
+        break;
+      case 'usage_desc':
+        q = q.order('used_count', { ascending: false, nullsFirst: false });
+        break;
+      case 'last_used_asc':
+        q = q.order('last_used_at', { ascending: true, nullsFirst: true });
+        break;
+      case 'alpha':
+        // 파일명 알파벳 순 (title_en 은 join 컬럼이라 PostgREST .order 처리 까다로움 — 안정적 키 선택).
+        q = q.order('original_filename', { ascending: true, nullsFirst: false });
+        break;
+      case 'recent':   q = q.order('created_at', { ascending: false }); break;  // 'newest' alias
       case 'newest':
       default:         q = q.order('created_at', { ascending: false });
     }
@@ -391,7 +411,17 @@ app.get('/api/tracks', async (req, res) => {
       }
     }
 
-    res.json({ ok: true, count: tracks.length, tracks });
+    // Phase 4-D-5-A: 활성 트랙 총 개수 (Pool 탭 'N / 총 N 곡' 표시용 — 필터 무관 글로벌 count).
+    let total = null;
+    try {
+      const { count, error: cErr } = await supabase
+        .from('pjl_tracks')
+        .select('id', { count: 'exact', head: true })
+        .eq('is_active', true);
+      if (!cErr) total = count ?? null;
+    } catch {}
+
+    res.json({ ok: true, count: tracks.length, total, tracks });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -429,6 +459,74 @@ app.post('/api/tracks/delete', async (req, res) => {
 
     res.json({ ok: true, deleted: tracks.length, removedFromStorage });
   } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Tracks: 사용 이력 기록 (Phase 4-D-5-A) ──────────────────────────────
+//   POST /api/tracks/usage
+//   body: { records: [{ track_id, video_id, track_position }, ...] }
+//   - pjl_track_usage 에 일괄 INSERT.
+//   - 각 track_id 마다 pjl_increment_usage RPC 호출 (atomic +1 + last_used_at=now()).
+//   - RPC 미존재 환경 fallback: SELECT used_count → UPDATE 2-step.
+//   - 같은 곡이 한 영상에 두 번 들어가도 (예: encore) 둘 다 카운트.
+//   - 호출 시점: Studio 가 mp4 export 성공 직후 (취소/실패 시 호출 X).
+app.post('/api/tracks/usage', async (req, res) => {
+  try {
+    const records = Array.isArray(req.body?.records) ? req.body.records : [];
+    if (!records.length) {
+      return res.status(400).json({ ok: false, error: 'records 배열이 필요합니다' });
+    }
+
+    const cleaned = records
+      .map((r, idx) => ({
+        track_id: parseIntOrNull(r?.track_id),
+        video_id: typeof r?.video_id === 'string' ? r.video_id.slice(0, 200) : null,
+        track_position: parseIntOrNull(r?.track_position) ?? idx + 1,
+      }))
+      .filter((r) => r.track_id != null && r.video_id);
+
+    if (!cleaned.length) {
+      return res.status(400).json({ ok: false, error: 'track_id / video_id 모두 필요' });
+    }
+
+    const { error: insErr } = await supabase.from('pjl_track_usage').insert(cleaned);
+    if (insErr) throw insErr;
+
+    // unique track_ids — 같은 영상 안 중복 곡은 used_count 1회만 증가시키지 않고 record 수만큼 증가시킴.
+    // (record N = 그 곡이 영상에 N 번 들어갔다는 의미. 둘 다 +1.)
+    let rpcOk = 0;
+    let rpcFail = 0;
+    for (const r of cleaned) {
+      const { error: rpcErr } = await supabase
+        .rpc('pjl_increment_usage', { p_track_id: r.track_id });
+      if (rpcErr) {
+        rpcFail++;
+        // RPC 미존재(0005 마이그레이션 미실행) → 2-step fallback
+        try {
+          const { data: row } = await supabase
+            .from('pjl_tracks')
+            .select('used_count')
+            .eq('id', r.track_id)
+            .maybeSingle();
+          await supabase
+            .from('pjl_tracks')
+            .update({
+              used_count: (row?.used_count || 0) + 1,
+              last_used_at: new Date().toISOString(),
+            })
+            .eq('id', r.track_id);
+        } catch (e) {
+          console.warn(`[usage] track ${r.track_id} fallback 도 실패:`, e.message);
+        }
+      } else {
+        rpcOk++;
+      }
+    }
+
+    res.json({ ok: true, recorded: cleaned.length, rpcOk, rpcFail });
+  } catch (e) {
+    console.error('[usage] 기록 실패:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -1621,24 +1719,9 @@ app.post('/api/videos', async (req, res) => {
         .eq('id', seriesRow.id);
     }
 
-    // 7) 트랙 사용 카운트 증가
-    //    supabase-js 는 increment RPC 별도 필요 → 간단히 select → update 로.
-    for (const t of orderedTracks) {
-      const { data: row } = await supabase
-        .from('pjl_tracks')
-        .select('used_count')
-        .eq('id', t.id)
-        .maybeSingle();
-      if (row) {
-        await supabase
-          .from('pjl_tracks')
-          .update({
-            used_count: (row.used_count || 0) + 1,
-            last_used_at: new Date().toISOString(),
-          })
-          .eq('id', t.id);
-      }
-    }
+    // 7) 트랙 사용 카운트 — Phase 4-D-5-A 부터 Studio 가 mp4 export 성공 시점에
+    //    POST /api/tracks/usage 로 증가시킴. Builder 단계의 video_project 생성에서는
+    //    실제 영상이 나온 게 아니므로 카운트 X (예전 코드 제거).
 
     res.json({
       ok: true,

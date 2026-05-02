@@ -7,6 +7,7 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 const state = {
   prompts: [],
   tracks: [],
+  tracksTotal: null,        // Phase 4-D-5-A: pjl_tracks 활성 트랙 총 개수 (서버에서 받음)
   selected: new Set(),
   bulkInProgress: false,
   playingTrackId: null,
@@ -59,6 +60,20 @@ function fmtDuration(sec) {
   const m = Math.floor(s / 60);
   const ss = String(s % 60).padStart(2, '0');
   return `${m}:${ss}`;
+}
+
+// Phase 4-D-5-A: 마지막 사용 시점 → 사람 친화적 표시 ('어제', '3주 전', ...).
+function formatLastUsed(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return '—';
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days <= 0) return '오늘';
+  if (days === 1) return '어제';
+  if (days < 7) return `${days}일 전`;
+  if (days < 30) return `${Math.floor(days / 7)}주 전`;
+  if (days < 365) return `${Math.floor(days / 30)}개월 전`;
+  return `${Math.floor(days / 365)}년 전`;
 }
 
 // ─── Tab switching ──────────────────────────────────────────────────
@@ -180,7 +195,7 @@ function readFiltersFromUrl() {
     instrument: p.get('instrument') || '',
     minDuration: p.get('min') || '',
     maxDuration: p.get('max') || '',
-    orderBy: p.get('sort') || 'newest',
+    orderBy: p.get('sort') || 'recommend',
   };
 }
 
@@ -194,7 +209,7 @@ function writeFiltersToUrl(f) {
   if (f.instrument) p.set('instrument', f.instrument);
   if (f.minDuration) p.set('min', f.minDuration);
   if (f.maxDuration) p.set('max', f.maxDuration);
-  if (f.orderBy && f.orderBy !== 'newest') p.set('sort', f.orderBy);
+  if (f.orderBy && f.orderBy !== 'recommend') p.set('sort', f.orderBy);
   const qs = p.toString();
   history.replaceState(null, '', qs ? `${location.pathname}?${qs}` : location.pathname);
 }
@@ -208,7 +223,7 @@ function applyFiltersToForm(f) {
   $('#filterInstrument').value = f.instrument || '';
   $('#filterMinDur').value = f.minDuration;
   $('#filterMaxDur').value = f.maxDuration;
-  $('#filterOrder').value = f.orderBy || 'newest';
+  $('#filterOrder').value = f.orderBy || 'recommend';
 }
 
 function readFiltersFromForm() {
@@ -229,7 +244,7 @@ function clearFilters() {
   applyFiltersToForm({
     search: '', promptId: '', hasVocals: '',
     usedFilter: 'all', prefixOrder: 'any', instrument: '',
-    minDuration: '', maxDuration: '', orderBy: 'newest',
+    minDuration: '', maxDuration: '', orderBy: 'recommend',
   });
 }
 
@@ -268,7 +283,8 @@ $('#searchInput').addEventListener('keydown', (ev) => {
 async function refreshTracks() {
   const f = readFiltersFromForm();
   const p = new URLSearchParams();
-  p.set('limit', '200');
+  // Phase 4-D-5-A: 100곡 표시 (이전 200 → 100). 정렬이 사용 횟수 기반이라 더 적게 보여도 OK.
+  p.set('limit', '100');
   if (f.search) p.set('search', f.search);
   if (f.promptId) p.set('promptId', f.promptId);
   if (f.hasVocals) p.set('hasVocals', f.hasVocals);
@@ -282,18 +298,23 @@ async function refreshTracks() {
   try {
     const j = await apiGet(`/api/tracks?${p}`);
     state.tracks = j.tracks || [];
+    state.tracksTotal = (typeof j.total === 'number') ? j.total : null;
     renderTracks();
   } catch (e) {
     toast(`tracks 로드 실패: ${e.message}`, 'error');
     state.tracks = [];
+    state.tracksTotal = null;
     renderTracks();
   }
 }
 
 function renderTracks() {
   const tb = $('#trackBody');
-  $('#trackCount').textContent = state.tracks.length
-    ? `(${state.tracks.length})`
+  // Phase 4-D-5-A: '표시 N / 총 N' 형식. total 모르면 표시 카운트만.
+  const shown = state.tracks.length;
+  const total = state.tracksTotal;
+  $('#trackCount').textContent = shown
+    ? (total != null ? `(${shown} / 총 ${total} 곡)` : `(${shown})`)
     : '';
 
   if (!state.tracks.length) {
@@ -302,7 +323,7 @@ function renderTracks() {
       || (f.usedFilter && f.usedFilter !== 'all')
       || (f.prefixOrder && f.prefixOrder !== 'any')
       || f.instrument || f.minDuration || f.maxDuration;
-    tb.innerHTML = `<tr><td colspan="7" class="empty">${
+    tb.innerHTML = `<tr><td colspan="9" class="empty">${
       hasFilter ? '조건에 맞는 곡이 없습니다. 필터를 조정하세요.' : '아직 곡이 없습니다. mp3 파일을 드래그해서 추가하세요.'
     }</td></tr>`;
     updateBulkBar();
@@ -362,6 +383,8 @@ function renderTracks() {
       </td>
       <td class="col-duration">${fmtDuration(t.duration_actual_sec)}</td>
       <td class="col-prompt" title="${escapeHtml(promptFull)}">${escapeHtml(promptShort)}</td>
+      <td class="col-usage">${t.used_count || 0}</td>
+      <td class="col-last-used" title="${t.last_used_at ? escapeHtml(t.last_used_at) : '한 번도 사용 안 함'}">${formatLastUsed(t.last_used_at)}</td>
       <td class="col-action">
         <button class="row-btn reroll-btn" data-id="${t.id}" title="${titleBtnTitle}">${titleBtnIcon}</button>
       </td>
