@@ -26,6 +26,9 @@ import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
 import { randomUUID } from 'node:crypto';
+import { google } from 'googleapis';
+import fs from 'node:fs';
+import path from 'node:path';
 
 const PORT = parseInt(process.env.PORT, 10) || 4001;
 const VERSION = '0.2.0';
@@ -1930,6 +1933,210 @@ app.post('/api/videos', async (req, res) => {
     });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── YouTube OAuth + API (Phase 5-A) ─────────────────────────────────────
+//
+// 흐름:
+//   1) GET /auth/youtube         → Google consent 화면으로 redirect
+//   2) Google → GET /auth/youtube/callback?code=...
+//   3) 서버가 code → tokens 교환 후 secrets/youtube-token.json 에 저장
+//   4) 이후 oauth2Client 가 access_token 만료 시 refresh_token 으로 자동 갱신
+//
+// 토큰 파일은 .gitignore (secrets/) 로 보호. client_id/secret 도 .env.local 에만.
+
+const YT_CLIENT_ID = process.env.YOUTUBE_CLIENT_ID || '';
+const YT_CLIENT_SECRET = process.env.YOUTUBE_CLIENT_SECRET || '';
+const YT_REDIRECT_URI = process.env.YOUTUBE_REDIRECT_URI || `http://localhost:${PORT}/auth/youtube/callback`;
+const YT_TOKEN_PATH = path.isAbsolute(process.env.YOUTUBE_TOKEN_PATH || '')
+  ? process.env.YOUTUBE_TOKEN_PATH
+  : resolve(__dirname, '../..', process.env.YOUTUBE_TOKEN_PATH || 'secrets/youtube-token.json');
+const YT_SCOPES = [
+  'https://www.googleapis.com/auth/youtube',
+  'https://www.googleapis.com/auth/youtube.force-ssl',
+];
+
+let oauth2Client = null;
+let youtube = null;
+
+function ytConfigured() {
+  return !!(YT_CLIENT_ID && YT_CLIENT_SECRET);
+}
+
+function ytLoadToken() {
+  try {
+    if (!fs.existsSync(YT_TOKEN_PATH)) return null;
+    return JSON.parse(fs.readFileSync(YT_TOKEN_PATH, 'utf-8'));
+  } catch (e) {
+    console.warn('[YT] 토큰 로드 실패:', e.message);
+    return null;
+  }
+}
+
+function ytSaveToken(tokens) {
+  const dir = path.dirname(YT_TOKEN_PATH);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(YT_TOKEN_PATH, JSON.stringify(tokens, null, 2));
+}
+
+if (ytConfigured()) {
+  oauth2Client = new google.auth.OAuth2(YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REDIRECT_URI);
+
+  // refresh_token 은 첫 인증 시만 받음 → 자동 갱신된 access_token 만 새로 저장 + 기존 refresh 보존.
+  oauth2Client.on('tokens', (newTokens) => {
+    const existing = ytLoadToken() || {};
+    ytSaveToken({ ...existing, ...newTokens });
+    console.log('[YT] 토큰 자동 갱신 — refresh_token=' + (newTokens.refresh_token ? 'rotated' : 'kept'));
+  });
+
+  const saved = ytLoadToken();
+  if (saved) {
+    oauth2Client.setCredentials(saved);
+    console.log('[YT] 저장된 토큰 로드');
+  } else {
+    console.log('[YT] 토큰 없음 — /auth/youtube 로 인증 필요');
+  }
+
+  youtube = google.youtube({ version: 'v3', auth: oauth2Client });
+} else {
+  console.warn('[YT] YOUTUBE_CLIENT_ID / SECRET 미설정 — Uploader 탭은 인증 카드 표시');
+}
+
+// === 1) 인증 시작 ===
+app.get('/auth/youtube', (_req, res) => {
+  if (!ytConfigured()) {
+    return res.status(500).send('YOUTUBE_CLIENT_ID / SECRET 가 .env.local 에 없습니다.');
+  }
+  const url = oauth2Client.generateAuthUrl({
+    access_type: 'offline',
+    prompt: 'consent',          // refresh_token 보장 (이미 동의한 사용자도 다시 묻기)
+    scope: YT_SCOPES,
+  });
+  res.redirect(url);
+});
+
+// === 2) Callback ===
+app.get('/auth/youtube/callback', async (req, res) => {
+  if (!ytConfigured()) return res.status(500).send('YT not configured');
+  const code = req.query.code;
+  if (!code) return res.status(400).send('Missing code');
+  try {
+    const { tokens } = await oauth2Client.getToken(String(code));
+    oauth2Client.setCredentials(tokens);
+    ytSaveToken(tokens);
+    console.log('[YT] OAuth 인증 완료. refresh_token=' + (tokens.refresh_token ? 'OK' : 'MISSING — re-consent 필요'));
+    res.send(`<!doctype html><html><body style="font-family:system-ui;background:#0a0a0a;color:#eee;padding:60px;text-align:center;">
+      <h2 style="color:#D4AF37;">✅ YouTube 인증 완료</h2>
+      <p style="color:#888;">이 창은 잠시 후 자동으로 닫힙니다.</p>
+      <script>setTimeout(() => window.close(), 1500);</script>
+    </body></html>`);
+  } catch (e) {
+    console.error('[YT] OAuth 실패:', e);
+    res.status(500).send(`인증 실패: ${e.message}`);
+  }
+});
+
+// === 3) 인증 상태 ===
+app.get('/api/youtube/status', (_req, res) => {
+  const token = ytLoadToken();
+  res.json({
+    ok: true,
+    configured: ytConfigured(),
+    authenticated: !!token,
+    hasRefreshToken: !!(token?.refresh_token),
+  });
+});
+
+// === 4) 영상 50개 (예약 영상 포함) ===
+//   uploads playlist 를 통해 가져오기 — search.list 는 예약 영상 누락.
+async function ytGetMyVideos(maxResults = 50) {
+  if (!youtube) throw new Error('YouTube 미인증 또는 client 미설정');
+  const meRes = await youtube.channels.list({ part: ['contentDetails'], mine: true });
+  const me = meRes.data.items?.[0];
+  if (!me) throw new Error('채널 정보를 가져올 수 없음');
+  const uploadsPid = me.contentDetails?.relatedPlaylists?.uploads;
+  if (!uploadsPid) throw new Error('uploads playlist ID 없음');
+
+  const itemsRes = await youtube.playlistItems.list({
+    part: ['contentDetails'],
+    playlistId: uploadsPid,
+    maxResults,
+  });
+  const ids = (itemsRes.data.items || []).map((it) => it.contentDetails?.videoId).filter(Boolean);
+  if (!ids.length) return [];
+
+  const vidsRes = await youtube.videos.list({
+    part: ['snippet', 'status', 'statistics', 'localizations'],
+    id: ids,
+  });
+  return (vidsRes.data.items || []).map((v) => ({
+    id: v.id,
+    title: v.snippet?.title || '',
+    description: v.snippet?.description || '',
+    thumbnail: v.snippet?.thumbnails?.medium?.url
+            || v.snippet?.thumbnails?.default?.url
+            || null,
+    publishedAt: v.snippet?.publishedAt || null,
+    privacyStatus: v.status?.privacyStatus || null,
+    publishAt: v.status?.publishAt || null,
+    viewCount: parseInt(v.statistics?.viewCount || '0', 10),
+    tags: v.snippet?.tags || [],
+    defaultLanguage: v.snippet?.defaultLanguage || null,
+    localizations: v.localizations || {},
+    localizationCount: Object.keys(v.localizations || {}).length,
+  }));
+}
+
+async function ytGetMyPlaylists(maxResults = 50) {
+  if (!youtube) throw new Error('YouTube 미인증 또는 client 미설정');
+  const r = await youtube.playlists.list({
+    part: ['snippet', 'contentDetails'],
+    mine: true,
+    maxResults,
+  });
+  return (r.data.items || []).map((p) => ({
+    id: p.id,
+    title: p.snippet?.title || '',
+    description: p.snippet?.description || '',
+    thumbnail: p.snippet?.thumbnails?.medium?.url || p.snippet?.thumbnails?.default?.url || null,
+    itemCount: p.contentDetails?.itemCount || 0,
+    privacyStatus: p.status?.privacyStatus || null,
+  }));
+}
+
+function ytAuthGate(_req, res) {
+  if (!ytConfigured()) {
+    res.status(500).json({ ok: false, error: 'YouTube client 미설정 (.env.local 의 YOUTUBE_CLIENT_ID/SECRET)' });
+    return false;
+  }
+  if (!ytLoadToken()) {
+    res.status(401).json({ ok: false, error: 'YouTube 인증 필요', authUrl: '/auth/youtube' });
+    return false;
+  }
+  return true;
+}
+
+app.get('/api/youtube/videos', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  try {
+    const max = Math.min(Math.max(parseInt(req.query.max, 10) || 50, 1), 50);
+    const videos = await ytGetMyVideos(max);
+    res.json({ ok: true, count: videos.length, videos });
+  } catch (e) {
+    console.error('[YT] 영상 조회 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+app.get('/api/youtube/playlists', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  try {
+    const playlists = await ytGetMyPlaylists();
+    res.json({ ok: true, count: playlists.length, playlists });
+  } catch (e) {
+    console.error('[YT] 재생목록 조회 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 

@@ -1111,6 +1111,64 @@
     .toast.success { border-left-color: var(--green); }
     .toast.info { border-left-color: var(--text-dim); }
     .toast.warn { border-left-color: #e8b800; background: #2a1f08; color: #f9d77c; }
+
+    /* ─── Phase 5-A: Uploader tab ─── */
+    .video-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+      padding: 16px 4px;
+    }
+    .video-grid-empty {
+      grid-column: 1 / -1;
+      padding: 32px;
+      color: var(--text-muted);
+      font-size: 13px;
+      text-align: center;
+    }
+    .video-card {
+      background: var(--bg-card, #161616);
+      border: 1px solid var(--border, #333);
+      border-radius: 8px;
+      padding: 10px;
+      transition: border-color 0.15s, transform 0.15s;
+      display: flex; flex-direction: column;
+    }
+    .video-card:hover { border-color: var(--jazz-gold); }
+    .video-card .vc-thumb {
+      width: 100%; aspect-ratio: 16/9; object-fit: cover;
+      border-radius: 4px; background: #000;
+      display: block; margin-bottom: 8px;
+    }
+    .video-card .vc-thumb-ph {
+      width: 100%; aspect-ratio: 16/9; background: #0e0e0e;
+      border-radius: 4px; margin-bottom: 8px;
+      display: flex; align-items: center; justify-content: center;
+      color: var(--text-muted); font-size: 11px;
+    }
+    .video-card .vc-title {
+      font-size: 13px; color: var(--text); line-height: 1.35;
+      height: 36px; overflow: hidden;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      margin-bottom: 6px;
+    }
+    .video-card .vc-meta {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; color: var(--text-muted); flex-wrap: wrap;
+    }
+    .video-card .vc-meta .spacer { flex: 1; }
+    .video-card .vc-date { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+    .vc-badge {
+      padding: 2px 6px; border-radius: 3px; font-size: 10px;
+      font-weight: 600; line-height: 1.4; white-space: nowrap;
+    }
+    .vc-badge.public    { background: #1d4d1d; color: #9bf09b; }
+    .vc-badge.scheduled { background: #4d3d05; color: #f9d77c; }
+    .vc-badge.private   { background: #2a2a2a; color: #aaa; }
+    .vc-badge.unlisted  { background: #1d3d4d; color: #9bd5f0; }
+    .vc-loc-full   { color: #9bf09b; font-weight: 600; }
+    .vc-loc-partial{ color: #f9d77c; }
+    .vc-loc-none   { color: #888; }
     @keyframes slidein {
       from { transform: translateX(20px); opacity: 0; }
       to { transform: translateX(0); opacity: 1; }
@@ -1579,11 +1637,36 @@
       </div>
     </section>
 
-    <!-- ─── Uploader tab placeholder ─── -->
+    <!-- ─── Uploader tab (Phase 5-A) ─── -->
     <section id="tab-uploader" class="tab-content">
-      <div class="placeholder">
-        <strong>🚧 Uploader</strong>
-        Phase 5 에서 구현 예정 — YouTube 16개 언어 자동 번역 + 예약 업로드
+      <!-- 인증 카드 (인증 안 됐을 때) -->
+      <div id="uploaderAuthCard" class="te-card" hidden style="max-width:560px;margin:24px auto;padding:24px;text-align:center;">
+        <h3 style="color:var(--jazz-gold);margin-top:0;">📤 YouTube 인증 필요</h3>
+        <p style="color:var(--text-dim);font-size:13px;line-height:1.6;">
+          Uploader 사용을 위해 PJL-BOT OAuth 클라이언트로 YouTube 계정 인증이 필요합니다.<br>
+          새 창에서 Google 계정 선택 → 권한 허용 후 자동으로 돌아옵니다.
+        </p>
+        <button id="uploaderAuthBtn" class="te-btn gold" type="button" style="margin-top:8px;">YouTube 로그인</button>
+        <div id="uploaderAuthStatus" style="font-size:11px;color:var(--text-muted);margin-top:12px;"></div>
+      </div>
+
+      <!-- 메인 (인증 됐을 때) -->
+      <div id="uploaderMainCard" hidden>
+        <div class="track-list-header">
+          <h3>📺 최근 영상 <span id="uploaderVideoCount" class="dim"></span></h3>
+          <button class="refresh-btn" id="uploaderRefreshBtn" type="button">↻ 새로고침</button>
+        </div>
+        <div id="uploaderVideoList" class="video-grid">
+          <div class="video-grid-empty">영상 로딩 중…</div>
+        </div>
+
+        <div class="track-list-header" style="margin-top:24px;">
+          <h3>📋 재생목록 <span id="uploaderPlaylistCount" class="dim"></span></h3>
+          <button class="refresh-btn" id="uploaderRefreshPlaylistsBtn" type="button">↻ 새로고침</button>
+        </div>
+        <div id="uploaderPlaylistList" class="video-grid">
+          <div class="video-grid-empty">재생목록 로딩 중…</div>
+        </div>
       </div>
     </section>
 
@@ -1628,5 +1711,6 @@
   <script type="module" src="app.js"></script>
   <script type="module" src="template-editor.js"></script>
   <script type="module" src="studio.js"></script>
+  <script type="module" src="uploader.js"></script>
 </body>
 </html>

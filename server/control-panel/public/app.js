@@ -154,6 +154,9 @@ function switchTab(tab) {
   if (tab === 'studio' && typeof window.studioOnEnter === 'function') {
     window.studioOnEnter();
   }
+  if (tab === 'uploader' && typeof window.uploaderOnEnter === 'function') {
+    window.uploaderOnEnter();
+  }
 }
 window.switchTab = switchTab;
 $$('.tab').forEach((btn) => {
