@@ -18,7 +18,10 @@ import { uploadTrack, deleteTrack, deleteTracks, getSignedUrl } from '../../lib/
 import { computeFileHash, parsePrefixOrder } from '../../lib/track-utils.mjs';
 import { analyzeTrack } from '../../lib/track-meta.mjs';
 import { generateTitleCandidates } from '../../lib/llm.mjs';
-import { normalizeTitle, findCollision } from '../../lib/title-utils.mjs';
+import {
+  normalizeTitle, findCollision,
+  firstContentWord, buildWordFrequency, findHeavilyUsedWords, findUsedFirstWords,
+} from '../../lib/title-utils.mjs';
 import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
@@ -989,23 +992,36 @@ async function generateTitleForTrack(trackId) {
 
   const promptText = track.prompt?.prompt_text || '';
 
-  // 2) 모든 기존 제목 (status 무관) 로드 — 회피 + 충돌 검사용
+  // 2) 기존 제목 로드 — 회피 + 충돌 + 다양성 필터 계산용.
+  //    Phase 4-D-5-D: 'recent window' (최근 50) 기준으로 heavyWords / bannedFirstWords 산출 →
+  //    같은 batch 내 직전 곡들과의 단어 폭증 ("Showa", "Bayou") 자동 차단.
   const { data: existing, error: eerr } = await supabase
     .from('pjl_titles')
-    .select('id, title_en, normalized_words, status');
+    .select('id, title_en, normalized_words, status')
+    .order('id', { ascending: false })
+    .limit(500);
   if (eerr) throw new Error(`titles 조회 실패: ${eerr.message}`);
-  const avoidList = (existing || []).map((t) => t.title_en);
+  const all = existing || [];
+  const recent = all.slice(0, 50);                     // 최근 50개
+  const avoidList = all.map((t) => t.title_en);        // 충돌 검사 + Gemini prompt
+  const recentFreq = buildWordFrequency(recent);
+  const heavyWords = findHeavilyUsedWords(recentFreq, 2);  // 최근 50 안에서 2회 이상 = heavy
+  const bannedFirstWords = findUsedFirstWords(recent);
 
-  // 3) Gemini 호출 + 충돌 필터, 최대 MAX_GEN_ROUNDS 회 시도
+  // 3) Gemini 호출 + 점수화. MAX_GEN_ROUNDS 회 시도, 모든 후보 모아 best 픽.
+  //    Phase 4-D-5-D: 단순 first-collision 통과 → 점수제로 변경. perfect 후보 있으면 즉시 채택,
+  //    없어도 best 후보를 fallback 으로 사용 (500 안 던짐 — 형님 작업 흐름 멈추지 않게).
   const allCandidates = [];
   const rejections = [];
-  let chosen = null;
+  /** @type {Array<{ trimmed: string, norm: string[], score: number, reasons: string[] }>} */
+  const scoredAll = [];
 
   for (let round = 1; round <= MAX_GEN_ROUNDS; round++) {
     let cands;
     try {
       cands = await generateTitleCandidates({
-        promptText, avoidList, count: 5, attempt: round,
+        promptText, avoidList, heavyWords, bannedFirstWords,
+        count: 10, attempt: round,
       });
     } catch (e) {
       throw new Error(`Gemini 호출 실패 (round ${round}): ${e.message}`);
@@ -1016,40 +1032,70 @@ async function generateTitleForTrack(trackId) {
       if (!trimmed) continue;
       allCandidates.push(trimmed);
 
-      // 정확히 일치 (대소문자 무시) → reject
+      // 절대 reject: exact duplicate / 의미 단어 0개 / ≥2 단어 충돌
       if (avoidList.some((t) => t.toLowerCase() === trimmed.toLowerCase())) {
         rejections.push({ candidate: trimmed, reason: 'exact-duplicate' });
         continue;
       }
-
       const norm = normalizeTitle(trimmed);
       if (!norm.length) {
         rejections.push({ candidate: trimmed, reason: 'no-content-words' });
         continue;
       }
-
-      const col = findCollision(norm, existing || []);
+      const col = findCollision(norm, all);
       if (col) {
         rejections.push({
-          candidate: trimmed,
-          reason: 'pattern-collision',
-          existingTitle: col.existingTitle,
-          overlapWords: col.overlapWords,
+          candidate: trimmed, reason: 'pattern-collision',
+          existingTitle: col.existingTitle, overlapWords: col.overlapWords,
         });
         continue;
       }
 
-      chosen = { title: trimmed, normalized: norm };
-      break;
+      // 점수화 — 0 이 perfect. heavyWord/firstWord 패널티 큼.
+      const reasons = [];
+      let score = 0;
+      const fw = norm[0];
+      if (fw && bannedFirstWords.has(fw)) {
+        score += 5;
+        reasons.push(`first-word-collision(${fw})`);
+      }
+      let heavyHits = 0;
+      for (const w of norm) {
+        if ((recentFreq.get(w) || 0) >= 2) {
+          heavyHits++;
+          score += 3;
+        }
+      }
+      if (heavyHits) reasons.push(`heavy-word-x${heavyHits}`);
+
+      scoredAll.push({ trimmed, norm, score, reasons });
+
+      // perfect 후보 발견 시 즉시 채택 (배치당 Gemini 호출 절약).
+      if (score === 0) break;
     }
-    if (chosen) break;
+    if (scoredAll.some((s) => s.score === 0)) break;
   }
 
-  if (!chosen) {
-    const err = new Error('모든 후보가 충돌/중복 — 패턴 회피 실패');
+  if (!scoredAll.length) {
+    // exact-dup / 충돌만 있어서 점수화 단계 자체에 도달 못 함.
+    const err = new Error('모든 후보가 ≥2 단어 충돌 — 패턴 회피 실패');
     err.candidates = allCandidates;
     err.rejections = rejections;
     throw err;
+  }
+
+  // 가장 unique 한 후보 선택. score 동률 시 먼저 들어온 (= 더 일찍 발견된 = round 작은) 것.
+  scoredAll.sort((a, b) => a.score - b.score);
+  const best = scoredAll[0];
+  const chosen = { title: best.trimmed, normalized: best.norm };
+  let warning = null;
+  if (best.score > 0) {
+    warning = {
+      message: '완벽한 unique 후보를 찾지 못해 가장 unique 한 것을 사용했습니다. 수동 변경 권장.',
+      score: best.score,
+      issues: best.reasons,
+    };
+    console.warn(`[TITLE] 곡 ${trackId} fallback: ${chosen.title} (score=${best.score}, ${best.reasons.join(', ')})`);
   }
 
   // 4) titles insert
@@ -1082,6 +1128,7 @@ async function generateTitleForTrack(trackId) {
     track: { id: trackId, title_id: title.id },
     candidatesConsidered: allCandidates.length,
     rejections,
+    warning,
   };
 }
 
@@ -1162,11 +1209,17 @@ app.post('/api/titles/bulk-generate', async (req, res) => {
     let ok = 0, errs = 0;
 
     // ⚠ 순차 처리 + sleep — Gemini free tier 15 RPM
+    let warns = 0;
     for (let i = 0; i < tracks.length; i++) {
       const t = tracks[i];
       try {
         const r = await generateTitleForTrack(t.id);
-        results.push({ trackId: t.id, status: 'ok', titleId: r.title.id, title: r.title.title_en });
+        if (r.warning) warns++;
+        results.push({
+          trackId: t.id, status: r.warning ? 'warn' : 'ok',
+          titleId: r.title.id, title: r.title.title_en,
+          warning: r.warning || null,
+        });
         ok++;
       } catch (e) {
         results.push({ trackId: t.id, status: 'error', error: e.message });
@@ -1177,7 +1230,7 @@ app.post('/api/titles/bulk-generate', async (req, res) => {
       }
     }
 
-    res.json({ ok: true, total: tracks.length, summary: { ok, errs }, results });
+    res.json({ ok: true, total: tracks.length, summary: { ok, warns, errs }, results });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

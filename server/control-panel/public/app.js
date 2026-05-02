@@ -556,7 +556,12 @@ async function rerollOrGenerate(trackId, btnEl) {
     const body = isReroll ? { trackId, reason: 'manual reroll' } : { trackId };
     const j = await apiPost(endpoint, body);
 
-    toast(`새 제목: ${j.title.title_en}`, 'success');
+    // Phase 4-D-5-D: warning 응답이면 노란 toast — 단어 다양성 회피 실패한 fallback 결과.
+    if (j.warning) {
+      toast(`⚠ 새 제목: ${j.title.title_en} — ${j.warning.message} (issues: ${(j.warning.issues || []).join(', ')})`, 'warn', 8000);
+    } else {
+      toast(`새 제목: ${j.title.title_en}`, 'success');
+    }
 
     // 해당 row 만 갱신 (전체 리프레시 X)
     const idx = state.tracks.findIndex((t) => t.id === trackId);
@@ -637,7 +642,7 @@ async function bulkRetitle() {
   updateBulkBar();
   showBulkProgress(`0/${ids.length} 제목 작업 중…`);
 
-  let ok = 0, errs = 0;
+  let ok = 0, warns = 0, errs = 0;
   for (let i = 0; i < ids.length; i++) {
     const id = ids[i];
     const track = state.tracks.find((t) => t.id === id);
@@ -649,7 +654,11 @@ async function bulkRetitle() {
     try {
       const endpoint = isReroll ? '/api/titles/reroll' : '/api/titles/generate';
       const body = isReroll ? { trackId: id, reason: 'bulk retitle' } : { trackId: id };
-      await apiPost(endpoint, body);
+      const j = await apiPost(endpoint, body);
+      if (j.warning) {
+        warns++;
+        console.warn(`[retitle warn] id=${id}: ${j.title.title_en}`, j.warning);
+      }
       ok++;
     } catch (e) {
       errs++;
@@ -657,13 +666,14 @@ async function bulkRetitle() {
     }
     if (i < ids.length - 1) await sleep(4500);
   }
-  setBulkProgress(100, `완료: 성공 ${ok}, 실패 ${errs}`);
+  setBulkProgress(100, `완료: 성공 ${ok} (경고 ${warns}), 실패 ${errs}`);
 
   state.bulkInProgress = false;
   await Promise.all([refreshTracks(), refreshStats()]);
   setTimeout(hideBulkProgress, 2200);
 
-  if (errs) toast(`일괄 retitle: 성공 ${ok}, 실패 ${errs}`, 'info');
+  if (errs) toast(`일괄 retitle: 성공 ${ok}, 경고 ${warns}, 실패 ${errs}`, 'info');
+  else if (warns) toast(`일괄 retitle 완료: ${ok}개 — 그중 ${warns}개는 다양성 회피 실패 (수동 검토 권장)`, 'warn', 8000);
   else toast(`일괄 retitle 완료: ${ok}개`, 'success');
 }
 
