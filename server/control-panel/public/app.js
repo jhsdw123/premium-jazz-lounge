@@ -1833,6 +1833,28 @@ window.builderOnEnter = async function builderOnEnter() {
   }
 };
 
+// ─── 3x3 분할 가이드 (Editor + Studio 공용) ─────────────────────────
+// SVG overlay 가 canvas element 옆 sibling 으로 위치 → Studio 의 mp4 export 가
+// new VideoFrame(canvas) 로 캔버스 픽셀만 캡처하므로 가이드는 절대 영상에 들어가지 않음.
+// 켜져 있어도 export 결과는 깨끗.
+const GUIDE_LS_KEY = 'pjl.guide.thirds';
+function applyGuideState() {
+  const on = localStorage.getItem(GUIDE_LS_KEY) === '1';
+  document.querySelectorAll('.guide-overlay').forEach((el) => { el.hidden = !on; });
+  document.querySelectorAll('.guide-toggle-btn').forEach((b) => {
+    b.classList.toggle('active', on);
+    b.textContent = on ? '▦ 3분할 ON' : '▦ 3분할';
+  });
+}
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest('.guide-toggle-btn');
+  if (!btn) return;
+  const cur = localStorage.getItem(GUIDE_LS_KEY) === '1';
+  localStorage.setItem(GUIDE_LS_KEY, cur ? '0' : '1');
+  applyGuideState();
+});
+applyGuideState();
+
 // ─── Init ───────────────────────────────────────────────────────────
 async function init() {
   // 1) prompts + instruments 먼저 로드 (필터 dropdown 옵션 채우기 위해)
