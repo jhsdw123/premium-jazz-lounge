@@ -23,8 +23,14 @@ const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 const CANVAS_W = 1920;
 const CANVAS_H = 1080;
-const FPS = 30;
+const DEFAULT_FPS = 30;
+const SUPPORTED_FPS = [30, 60];
 const SS_KEY = 'pjl.studio.session';
+
+// Phase 4-D-4 polish: fps 별 권장 비트레이트 (1920×1080 jazz lounge 기준).
+function bitrateForFps(fps) {
+  return fps === 60 ? 12_000_000 : 8_000_000;
+}
 
 const studio = {
   initialized: false,
@@ -62,15 +68,16 @@ const studio = {
   playing: false,
   renderIntervalId: null,    // setInterval 기반 (Phase 4-D-4 fix v2: 백그라운드 throttle 회피 — RAF 폐기)
 
+  // FPS (Phase 4-D-4 polish)
+  fps: DEFAULT_FPS,          // 미리보기/녹화 둘 다 사용. 녹화 시작 시점에 recordingFps 로 스냅샷.
+  recordingFps: null,        // 녹화 중에만 set — 녹화 도중 fps 가 바뀌어도 무시되도록 분리.
+
   // 녹화
   recording: false,
   recCancelled: false,
   wakeLock: null,            // navigator.wakeLock.request('screen') 결과 (녹화 중 화면 sleep 방지)
   visibilityListenerBound: false,
 };
-
-// Phase 4-D-4 fix v2: 1000/30 = 33.333…ms. setInterval 정수 권장 — Math.round 안 함 (drift 더 적음).
-const FRAME_MS = 1000 / FPS;
 
 // ─── 색상 유틸 (template-editor.js 와 동일 로직) ────────────────────
 function hexToRgb(hex) {
@@ -741,13 +748,30 @@ function updateButtons() {
 // 완벽한 해결책은 OffscreenCanvas + Worker 이지만 우선 setInterval 로 적용.
 function startRenderLoop() {
   if (studio.renderIntervalId) return;
-  studio.renderIntervalId = setInterval(renderFrame, FRAME_MS);
+  // Phase 4-D-4 polish: studio.fps 따라 페이싱. 60fps 면 16.67ms.
+  studio.renderIntervalId = setInterval(renderFrame, 1000 / studio.fps);
 }
 
 function stopRenderLoop() {
   if (studio.renderIntervalId) {
     clearInterval(studio.renderIntervalId);
     studio.renderIntervalId = null;
+  }
+}
+
+// Phase 4-D-4 polish: fps 변경 시 render loop 재시작 (녹화 중엔 무시 — recordingFps 가 lock).
+function applyFpsChange(newFps) {
+  if (!SUPPORTED_FPS.includes(newFps)) return;
+  if (studio.recording) {
+    console.warn('[Studio] 녹화 중 fps 변경 무시 — recordingFps 유지');
+    return;
+  }
+  studio.fps = newFps;
+  const fpsLabel = $('#studioCanvasFps');
+  if (fpsLabel) fpsLabel.textContent = String(newFps);
+  if (studio.renderIntervalId) {
+    stopRenderLoop();
+    startRenderLoop();
   }
 }
 
@@ -918,6 +942,19 @@ function bindControls() {
     teardown();
     showEmpty();
   });
+
+  // Phase 4-D-4 polish: fps dropdown — DOM 초기 값을 studio.fps 와 동기화 + change 바인딩.
+  const fpsSelect = $('#studioFpsSelect');
+  if (fpsSelect) {
+    fpsSelect.value = String(studio.fps);
+    fpsSelect.addEventListener('change', (e) => {
+      const v = parseInt(e.target.value, 10);
+      applyFpsChange(v);
+    });
+  }
+  // 초기 캔버스 메타 라벨 동기화
+  const fpsLabel = $('#studioCanvasFps');
+  if (fpsLabel) fpsLabel.textContent = String(studio.fps);
 }
 
 // ─── WebCodecs mp4 export ─────────────────────────────────────────
@@ -943,8 +980,14 @@ async function startRecording() {
 
   studio.recording = true;
   studio.recCancelled = false;
+  // Phase 4-D-4 polish: fps 스냅샷 — 이 녹화 한 건 동안 고정. UI 가 바뀌어도 영향 없음.
+  studio.recordingFps = studio.fps;
+  const recFps = studio.recordingFps;
+  const recBitrate = bitrateForFps(recFps);
   $('#studioRecordBtn').hidden = true;
   $('#studioStopRecBtn').hidden = false;
+  const fpsSelect = $('#studioFpsSelect');
+  if (fpsSelect) fpsSelect.disabled = true;
 
   // Phase 4-D-4 fix v2: WakeLock 으로 화면 sleep 방지 + 현재 visibility 즉시 점검.
   await acquireWakeLock();
@@ -972,7 +1015,7 @@ async function startRecording() {
   });
   const muxer = new globalThis.Mp4Muxer.Muxer({
     target: muxerTarget,
-    video: { codec: 'avc', width: CANVAS_W, height: CANVAS_H },
+    video: { codec: 'avc', width: CANVAS_W, height: CANVAS_H, frameRate: recFps },
     audio: { codec: 'aac', numberOfChannels: 2, sampleRate: 48000 },
     fastStart: false,
     firstTimestampBehavior: 'offset',
@@ -986,8 +1029,8 @@ async function startRecording() {
     codec: 'avc1.4d002a',
     width: CANVAS_W,
     height: CANVAS_H,
-    bitrate: 8_000_000,
-    framerate: FPS,
+    bitrate: recBitrate,
+    framerate: recFps,
     latencyMode: 'quality',
   });
 
@@ -1007,7 +1050,7 @@ async function startRecording() {
   const tracks = studio.session.tracks;
   const totalDur = studio.session.totalDurationSec;
 
-  setRecStatus(`🎬 녹화 시작 — 총 ${tracks.length}곡 / ${fmt(totalDur)}<br>곡당 실시간 진행`);
+  setRecStatus(`🎬 녹화 시작 — 총 ${tracks.length}곡 / ${fmt(totalDur)} @ ${recFps}fps<br>곡당 실시간 진행`);
 
   // 트랙 순차로 녹화 — 각 트랙: 오디오 디코드 + 인코드 + 실시간 영상 프레임 캡처
   let globalTime = 0;
@@ -1024,9 +1067,9 @@ async function startRecording() {
       // 2) 오디오 인코딩 (offline — 한 번에 다 인코드)
       await encodeAudioSegment(aEnc, audioBuffer, trackDur, globalTime);
 
-      // 3) 영상 프레임 — 실시간 재생 + 매 30fps 프레임 캡처
+      // 3) 영상 프레임 — 실시간 재생 + 매 fps 프레임 캡처
       setRecStatus(`🎬 [${i + 1}/${tracks.length}] ${t.title} 영상 캡처 중…`);
-      await captureTrackFramesLive(vEnc, cv, i, trackDur, globalTime);
+      await captureTrackFramesLive(vEnc, cv, i, trackDur, globalTime, recFps);
 
       globalTime += trackDur;
     } catch (e) {
@@ -1038,23 +1081,27 @@ async function startRecording() {
   await finishRecording();
 }
 
-async function captureTrackFramesLive(vEnc, canvas, trackIdx, trackDur, globalTimeOffset) {
+async function captureTrackFramesLive(vEnc, canvas, trackIdx, trackDur, globalTimeOffset, fps) {
   if (!loadTrack(trackIdx)) return;
   studio.playing = true;
   if (studio.audioCtx.state === 'suspended') await studio.audioCtx.resume();
   await studio.audioElement.play();
 
-  const totalFrames = Math.floor(trackDur * FPS);
-  const keyFrameInterval = FPS * 3;
-  const frameInterval = 1000 / FPS;
+  const totalFrames = Math.floor(trackDur * fps);
+  const keyFrameInterval = fps * 3;          // 3초마다 keyframe (fps 와 무관하게 시간 기준)
+  const frameInterval = 1000 / fps;
   const startWall = performance.now();
   // Phase 4-D-4 fix v2: backpressure 임계값 25→5 — 인코더가 밀리는 즉시 캡처를 늦춤.
+  // 60fps 에선 frame 이 2배라 queue 도 빠르게 차오르므로 동일 임계값 유지 (latency 짧음).
   const MAX_QUEUE_SIZE = 5;
+  // 진단 로그 — 1초당 1회 출력 (fps 무관하게 빈도 일정).
+  const logInterval = fps;
+  const statusInterval = fps * 3;            // status 텍스트는 3초마다
 
   for (let f = 0; f < totalFrames; f++) {
     if (studio.recCancelled) break;
 
-    // 30fps 페이싱 — 다음 frame 의 wall-clock 까지 대기
+    // 페이싱 — 다음 frame 의 wall-clock 까지 대기
     const targetWall = startWall + f * frameInterval;
     const now = performance.now();
     if (targetWall > now) {
@@ -1068,8 +1115,8 @@ async function captureTrackFramesLive(vEnc, canvas, trackIdx, trackDur, globalTi
     }
     if (studio.recCancelled) break;
 
-    // 캔버스는 setInterval 루프에서 매 33ms 갱신 중. 현재 frame 그대로 캡처.
-    const localTime = f / FPS;
+    // 캔버스는 setInterval 루프에서 매 (1000/fps)ms 갱신 중. 현재 frame 그대로 캡처.
+    const localTime = f / fps;
     const ts = Math.round((globalTimeOffset + localTime) * 1e6);
     try {
       const vf = new VideoFrame(canvas, { timestamp: ts });
@@ -1079,23 +1126,23 @@ async function captureTrackFramesLive(vEnc, canvas, trackIdx, trackDur, globalTi
       console.warn('VideoFrame 인코드 실패:', e.message);
     }
 
-    // Phase 4-D-4 fix v2: 매 30 frame (1초) 마다 진단 로그 — 백그라운드 throttle / 인코더 밀림 / 메모리 누수 추적.
-    if (f % 30 === 0) {
+    // Phase 4-D-4 fix v2: 매 1초 마다 진단 로그 — throttle / 인코더 밀림 / 메모리 누수 추적.
+    if (f % logInterval === 0) {
       const queueSize = vEnc.encodeQueueSize;
       const memMB = performance.memory?.usedJSHeapSize
         ? (performance.memory.usedJSHeapSize / 1048576).toFixed(0)
         : '?';
-      const elapsedSec = (f / FPS).toFixed(1);
+      const elapsedSec = (f / fps).toFixed(1);
       const wallSec = ((performance.now() - startWall) / 1000).toFixed(1);
       const drift = (wallSec - elapsedSec).toFixed(1);
       console.log(
-        `[REC] track=${trackIdx + 1} frame=${f}/${totalFrames} time=${elapsedSec}s wall=${wallSec}s drift=${drift}s queue=${queueSize} mem=${memMB}MB hidden=${document.hidden}`
+        `[REC] fps=${fps} track=${trackIdx + 1} frame=${f}/${totalFrames} time=${elapsedSec}s wall=${wallSec}s drift=${drift}s queue=${queueSize} mem=${memMB}MB hidden=${document.hidden}`
       );
     }
 
-    if (f % 90 === 0) {
+    if (f % statusInterval === 0) {
       const pct = Math.floor((f / totalFrames) * 100);
-      setRecStatus(`🎬 [곡 ${trackIdx + 1}] ${pct}%  (frame ${f}/${totalFrames})`);
+      setRecStatus(`🎬 [곡 ${trackIdx + 1}] ${pct}%  (frame ${f}/${totalFrames}) @ ${fps}fps`);
     }
   }
 
@@ -1180,10 +1227,13 @@ async function finishRecording() {
   } finally {
     studio.recording = false;
     studio.recCancelled = false;
+    studio.recordingFps = null;
     studio._enc = null;
     releaseWakeLock();
     hideVisibilityWarning();
     $('#studioRecordBtn').hidden = false;
     $('#studioStopRecBtn').hidden = true;
+    const fpsSelect = $('#studioFpsSelect');
+    if (fpsSelect) fpsSelect.disabled = false;
   }
 }
