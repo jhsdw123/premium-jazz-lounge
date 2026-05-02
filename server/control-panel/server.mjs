@@ -531,6 +531,29 @@ app.post('/api/tracks/usage', async (req, res) => {
   }
 });
 
+// ─── Tracks: 곡별 사용 이력 조회 (Phase 4-D-5-B) ─────────────────────────
+//   GET /api/tracks/:id/usage
+//   응답: { ok, count, usage: [{ id, video_id, track_position, used_at }, ...] }
+//   used_at desc 순. Pool 탭의 행 expand UI 가 이걸 호출.
+app.get('/api/tracks/:id/usage', async (req, res) => {
+  const trackId = parseIntOrNull(req.params.id);
+  if (!trackId) return res.status(400).json({ ok: false, error: 'invalid track id' });
+
+  try {
+    const { data, error } = await supabase
+      .from('pjl_track_usage')
+      .select('id, video_id, track_position, used_at')
+      .eq('track_id', trackId)
+      .order('used_at', { ascending: false });
+    if (error) throw error;
+
+    res.json({ ok: true, count: data?.length || 0, usage: data || [] });
+  } catch (e) {
+    console.error('[usage] 조회 실패:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── Tracks: backfill (Phase 3-B) ────────────────────────────────────────
 //   POST /api/tracks/backfill
 //   body: { ids?: number[], limit?: number }

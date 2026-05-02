@@ -76,6 +76,71 @@ function formatLastUsed(iso) {
   return `${Math.floor(days / 365)}년 전`;
 }
 
+// Phase 4-D-5-B: '2026-05-02 14:30' 형식. expand 이력 항목의 절대 시각용.
+function formatDateShort(iso) {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return '—';
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
+}
+
+// Phase 4-D-5-B: 곡 행 클릭 시 바로 아래 한 줄 expand. 다시 클릭 시 닫힘.
+async function toggleTrackUsageExpand(trackId, row) {
+  // 이미 펼쳐져 있으면 제거 (토글 닫기)
+  const existing = document.querySelector(`tr[data-usage-for="${trackId}"]`);
+  if (existing) {
+    existing.remove();
+    row.classList.remove('expanded');
+    return;
+  }
+
+  // 새 expand row 삽입 — loading 상태
+  const expandRow = document.createElement('tr');
+  expandRow.className = 'usage-expand-row';
+  expandRow.setAttribute('data-usage-for', String(trackId));
+  expandRow.innerHTML = `
+    <td colspan="9">
+      <div class="usage-loading">이력 로딩 중…</div>
+    </td>
+  `;
+  row.parentNode.insertBefore(expandRow, row.nextSibling);
+  row.classList.add('expanded');
+
+  try {
+    const j = await apiGet(`/api/tracks/${trackId}/usage`);
+    renderUsageExpand(expandRow.querySelector('td'), j.usage || [], j.count || 0);
+  } catch (e) {
+    expandRow.querySelector('td').innerHTML =
+      `<div class="usage-error">이력 조회 실패: ${escapeHtml(e.message || String(e))}</div>`;
+  }
+}
+
+function renderUsageExpand(container, usage, count) {
+  if (count === 0) {
+    container.innerHTML = `<div class="usage-empty">아직 사용된 적 없습니다.</div>`;
+    return;
+  }
+  const items = usage.map((u) => {
+    const rel = formatLastUsed(u.used_at);
+    const abs = formatDateShort(u.used_at);
+    return `
+      <div class="usage-item">
+        <span class="usage-when" title="${escapeHtml(abs)}">${escapeHtml(rel)}</span>
+        <span class="usage-pos">${u.track_position}번째 곡</span>
+        <span class="usage-vid" title="${escapeHtml(abs)}">${escapeHtml(u.video_id || '')}</span>
+      </div>
+    `;
+  }).join('');
+  container.innerHTML = `
+    <div class="usage-header">📋 사용 이력 (총 ${count}회)</div>
+    <div class="usage-list">${items}</div>
+  `;
+}
+
 // ─── Tab switching ──────────────────────────────────────────────────
 function switchTab(tab) {
   $$('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
@@ -333,6 +398,8 @@ function renderTracks() {
   tb.innerHTML = '';
   for (const t of state.tracks) {
     const tr = document.createElement('tr');
+    tr.classList.add('track-row');
+    tr.dataset.trackId = String(t.id);
     if (state.selected.has(t.id)) tr.classList.add('selected');
 
     const titleHtml = t.title?.title_en
@@ -417,6 +484,17 @@ function renderTracks() {
       playTrack(parseInt(btn.dataset.trackId, 10));
     })
   );
+
+  // Phase 4-D-5-B: 행 클릭 → 사용 이력 expand. checkbox/button 클릭은 트리거 X.
+  $$('.track-row').forEach((row) => {
+    row.addEventListener('click', (ev) => {
+      if (ev.target.closest('input[type="checkbox"]')) return;
+      if (ev.target.closest('button')) return;
+      if (ev.target.closest('.col-action')) return;
+      const id = parseInt(row.dataset.trackId, 10);
+      if (Number.isFinite(id)) toggleTrackUsageExpand(id, row);
+    });
+  });
 
   updateBulkBar();
 }
