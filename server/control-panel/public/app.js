@@ -1101,10 +1101,125 @@ function getOrderedTracksForRender() {
   return [...builder.tracks];
 }
 
+// Phase 4-D fix: Builder 곡 list 의 prompt 키워드 추출 + 색상 + 다양성 검사.
+//
+// 추출 우선순위:
+//   1) prompt.nickname  — 형님이 직접 붙인 짧은 라벨 (있으면 그대로 사용)
+//   2) 알려진 키워드 매칭 — prompt_text 안에 포함된 첫 일치
+//   3) prompt_text 의 첫 단어
+//   4) '?'
+const KNOWN_PROMPT_KEYWORDS = [
+  'Showa-era', 'Showa', 'Bayou', 'Dixie', 'New Orleans',
+  'Smooth', 'Classic', 'Modern', 'Vintage',
+  'Latin', 'Bossa', 'Cool', 'Hard Bop',
+  'Swing', 'Be-bop', 'Bebop', 'Smoky', 'Dreamy',
+  'Cafe', 'Lounge', 'Midnight', 'Sunset', 'Rainy',
+  'Tokyo', 'Paris', 'Havana',
+];
+const PROMPT_COLORS = {
+  'Showa-era': '#FFC107', 'Showa': '#FFC107',
+  'Bayou': '#03A9F4', 'Dixie': '#E91E63',
+  'New Orleans': '#9C27B0',
+  'Smooth': '#4CAF50', 'Classic': '#FF9800', 'Modern': '#607D8B', 'Vintage': '#8D6E63',
+  'Latin': '#F44336', 'Bossa': '#26A69A', 'Cool': '#00BCD4', 'Hard Bop': '#5D4037',
+  'Swing': '#7E57C2', 'Be-bop': '#3949AB', 'Bebop': '#3949AB',
+  'Smoky': '#795548', 'Dreamy': '#AB47BC',
+  'Cafe': '#A1887F', 'Lounge': '#42A5F5', 'Midnight': '#1A237E',
+  'Sunset': '#FF7043', 'Rainy': '#5C6BC0',
+  'Tokyo': '#EF5350', 'Paris': '#EC407A', 'Havana': '#FFB300',
+};
+
+function extractPromptKeyword(t) {
+  if (t?.prompt?.nickname) return t.prompt.nickname.trim();
+  const text = t?.prompt?.prompt_text || '';
+  if (!text) return '?';
+  const lower = text.toLowerCase();
+  for (const kw of KNOWN_PROMPT_KEYWORDS) {
+    if (lower.includes(kw.toLowerCase())) return kw;
+  }
+  const firstWord = text.trim().split(/[\s,/.;:|]+/).filter(Boolean)[0];
+  return firstWord || '?';
+}
+
+function getPromptColor(keyword) {
+  if (PROMPT_COLORS[keyword]) return PROMPT_COLORS[keyword];
+  // 알려지지 않은 키워드도 안정적인 색상 — 문자열 hash → HSL.
+  let h = 0;
+  for (let i = 0; i < keyword.length; i++) h = (h * 31 + keyword.charCodeAt(i)) | 0;
+  return `hsl(${Math.abs(h) % 360}, 55%, 45%)`;
+}
+
+// 같은 keyword 가 N 회 연속이면 그 인덱스들을 warning set 으로.
+function findDiversityWarnings(tracks) {
+  const warns = new Map();              // idx → { keyword, runLength }
+  let runStart = 0;
+  for (let i = 0; i <= tracks.length; i++) {
+    const cur = i < tracks.length ? extractPromptKeyword(tracks[i]) : null;
+    const prev = i > 0 ? extractPromptKeyword(tracks[i - 1]) : null;
+    if (cur !== prev) {
+      // run 종료 — 길이 ≥2 이면 마지막 (i-1) 까지 모두 warn.
+      const runLen = i - runStart;
+      if (runLen >= 2 && prev && prev !== '?') {
+        for (let j = runStart; j < i; j++) {
+          warns.set(j, { keyword: prev, runLength: runLen });
+        }
+      }
+      runStart = i;
+    }
+  }
+  return warns;
+}
+
+// 다양성 셔플 — keyword 별 그룹화 후 라운드로빈 인터리브.
+// 1~5번 핀 슬롯은 유지 (unpinAll 이면 PIN_COUNT=0).
+function shuffleForDiversity(tracks) {
+  const PIN_COUNT = builder.unpinAll ? 0 : Math.min(5, tracks.length);
+  const pinned = tracks.slice(0, PIN_COUNT);
+  const free = tracks.slice(PIN_COUNT);
+
+  // keyword 별 그룹화 — '?' 도 하나의 그룹.
+  const groups = new Map();
+  for (const t of free) {
+    const kw = extractPromptKeyword(t);
+    if (!groups.has(kw)) groups.set(kw, []);
+    groups.get(kw).push(t);
+  }
+  // 큰 그룹 먼저 시작 → 그 그룹이 끝까지 잘 분산됨.
+  const ordered = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+  const queues = ordered.map(([, arr]) => arr.slice());
+  const result = [];
+  let safety = free.length + 1;
+  while (queues.some((q) => q.length) && safety-- > 0) {
+    let lastKw = result.length ? extractPromptKeyword(result[result.length - 1]) : null;
+    let placed = false;
+    // 직전 곡과 다른 keyword 인 가장 큰 큐 우선.
+    let bestIdx = -1;
+    let bestLen = -1;
+    for (let i = 0; i < queues.length; i++) {
+      if (!queues[i].length) continue;
+      const kw = ordered[i][0];
+      if (kw === lastKw) continue;
+      if (queues[i].length > bestLen) { bestLen = queues[i].length; bestIdx = i; }
+    }
+    if (bestIdx < 0) {
+      // 모든 후보가 lastKw — 어쩔 수 없이 같은 그룹 한 개 더.
+      for (let i = 0; i < queues.length; i++) {
+        if (queues[i].length) { bestIdx = i; break; }
+      }
+      if (bestIdx < 0) break;
+    }
+    result.push(queues[bestIdx].shift());
+    placed = true;
+    if (!placed) break;
+  }
+  return [...pinned, ...result];
+}
+
 function renderBuilderTracks() {
   const container = $('#bTracks');
   const ordered = getOrderedTracksForRender();
   container.innerHTML = '';
+  const warns = findDiversityWarnings(ordered);
 
   let totalDur = 0;
   ordered.forEach((t, idx) => {
@@ -1120,11 +1235,29 @@ function renderBuilderTracks() {
     if (draggable) row.draggable = true;
 
     const titleText = t.title?.title_en || t.original_filename || `Track ${t.id}`;
+    const isPlaying = state.playingTrackId === t.id;
+    const keyword = extractPromptKeyword(t);
+    const promptColor = getPromptColor(keyword);
+    const promptFull = t.prompt?.prompt_text
+      ? (t.prompt.nickname ? `[${t.prompt.nickname}] ${t.prompt.prompt_text}` : t.prompt.prompt_text)
+      : '';
+    const warn = warns.get(idx);
+    if (warn) row.classList.add('diversity-warn');
+
+    const warnIcon = warn
+      ? `<span class="bdiversity-warn" title="${escapeHtml(warn.keyword)} ${warn.runLength}연속 — 셔플 권장">⚠</span>`
+      : '';
+
     row.innerHTML = `
       <span class="drag-handle ${draggable ? '' : 'locked'}" title="${draggable ? '드래그해서 순서 변경' : '핀 잠금'}">⋮⋮</span>
       <span class="pos">${pos}</span>
       <span class="pin-icon ${isPinSlot ? '' : 'unpinned'}" title="${isPinSlot ? `1~5번 고정 (셔플/드래그 제외)` : ''}">${isPinSlot ? '📌' : ''}</span>
-      <span class="btitle" title="${escapeHtml(titleText)}">${escapeHtml(titleText)}</span>
+      <button class="bplay play-btn ${isPlaying ? 'playing' : ''}" data-track-id="${t.id}" title="재생/일시정지">▶</button>
+      <span class="btitle-cell">
+        <span class="btitle-text" title="${escapeHtml(titleText)}">${escapeHtml(titleText)}</span>
+        <span class="bprompt-tag" style="background:${promptColor};" title="${escapeHtml(promptFull)}">${escapeHtml(keyword)}</span>
+        ${warnIcon}
+      </span>
       <span class="bdur">${fmtMinSec(dur)}</span>
       <button class="bremove" data-id="${t.id}" title="제외">×</button>
     `;
@@ -1139,7 +1272,18 @@ function renderBuilderTracks() {
 
   // 핸들러
   container.querySelectorAll('.bremove').forEach((b) =>
-    b.addEventListener('click', () => removeBuilderTrack(parseInt(b.dataset.id, 10)))
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      removeBuilderTrack(parseInt(b.dataset.id, 10));
+    })
+  );
+  // ▶ 재생 — Pool 의 playTrack 재사용 (같은 module). data-track-id 와 .play-btn 클래스
+  // 가 동일해서 playing 상태 표시도 자동 동기화됨.
+  container.querySelectorAll('.bplay').forEach((b) =>
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      playTrack(parseInt(b.dataset.trackId, 10));
+    })
   );
 
   setupDragDrop(container);
@@ -1232,6 +1376,16 @@ $('#bShuffleAllBtn').addEventListener('click', () => {
   builder.unpinAll = true;
   shuffleNonPinned();
   toast('전체 셔플 완료', 'info');
+});
+
+// Phase 4-D fix: 같은 prompt 곡끼리 멀리 떨어지게 라운드로빈 재배치.
+$('#bShuffleDiversityBtn').addEventListener('click', () => {
+  if (!builder.tracks.length) return;
+  builder.tracks = shuffleForDiversity(builder.tracks);
+  renderBuilderTracks();
+  const remaining = findDiversityWarnings(builder.tracks).size;
+  if (remaining === 0) toast('다양성 셔플 완료 — 연속 곡 없음', 'success');
+  else toast(`다양성 셔플 — 일부 (${remaining}곡) 는 prompt 부족으로 분산 불가`, 'warn', 5000);
 });
 
 $('#bUnpinAll').addEventListener('change', (ev) => {

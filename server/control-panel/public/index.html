@@ -549,7 +549,8 @@
     .builder-tracks { display: flex; flex-direction: column; gap: 4px; }
     .btrack {
       display: grid;
-      grid-template-columns: 36px 28px 28px 1fr 60px 28px;
+      /* drag / pos / pin / play / title+prompt / dur / remove */
+      grid-template-columns: 28px 24px 22px 28px 1fr 56px 24px;
       align-items: center;
       gap: 8px;
       background: var(--bg-input);
@@ -557,6 +558,32 @@
       border-radius: 5px;
       padding: 6px 10px;
       font-size: 13px;
+    }
+    /* Phase 4-D fix: 같은 prompt 연속 시 옅은 노란 배경. */
+    .btrack.diversity-warn { background: rgba(255, 193, 7, 0.06); border-color: rgba(255, 193, 7, 0.25); }
+    .btrack .bplay {
+      background: none; border: 1px solid transparent; cursor: pointer;
+      color: var(--text-muted); font-size: 13px; padding: 2px 6px;
+      border-radius: 4px; line-height: 1; text-align: center;
+    }
+    .btrack .bplay:hover { color: var(--jazz-gold); border-color: var(--border-strong); }
+    .btrack .bplay.playing { color: var(--jazz-gold); animation: bplay-pulse 1.2s ease-in-out infinite; }
+    @keyframes bplay-pulse {
+      0%, 100% { opacity: 1; } 50% { opacity: 0.5; }
+    }
+    .btrack .btitle-cell {
+      display: flex; align-items: center; gap: 8px; min-width: 0;
+    }
+    .btrack .btitle-text {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1;
+    }
+    .bprompt-tag {
+      display: inline-block; padding: 1px 7px; border-radius: 10px;
+      font-size: 10px; font-weight: 600; line-height: 1.5; white-space: nowrap;
+      color: #fff; flex-shrink: 0;
+    }
+    .bdiversity-warn {
+      color: #ff9800; font-size: 12px; cursor: help; flex-shrink: 0;
     }
     .btrack.dragging { opacity: 0.4; }
     .btrack.drop-target { border-color: var(--jazz-gold); background: rgba(212,175,55,0.06); }
@@ -574,9 +601,6 @@
     }
     .btrack .drag-handle.locked { color: var(--text-muted); cursor: not-allowed; opacity: 0.4; }
     .btrack .drag-handle:hover:not(.locked) { color: var(--text-dim); }
-    .btrack .btitle {
-      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-    }
     .btrack .bdur {
       color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 12px; text-align: right;
     }
@@ -1376,6 +1400,7 @@
           <div class="row">
             <button class="bulk-btn" id="bShufflePartialBtn" type="button">🔀 셔플 (6번 이후만)</button>
             <button class="bulk-btn warn" id="bShuffleAllBtn" type="button">🔀 전체 셔플</button>
+            <button class="bulk-btn" id="bShuffleDiversityBtn" type="button" title="같은 prompt 곡끼리 멀리 떨어지게 라운드로빈 재배치 (1~5번 핀 유지)">🎲 다양성 셔플</button>
             <span style="flex:1"></span>
             <label class="vocal-check" style="font-size:12px;">
               <input type="checkbox" id="bUnpinAll" />
