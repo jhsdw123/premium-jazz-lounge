@@ -1036,7 +1036,18 @@ const BUILDER_SS_KEY = 'pjl.builder.trackIds';
 $('#sendToBuilderBtn').addEventListener('click', () => {
   const ids = Array.from(state.selected);
   if (!ids.length) return;
-  sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(ids));
+  // Phase 4-D fix: prefix_order 자동 정렬은 Pool→Builder 전송 시점 1회만 적용.
+  // 그 결과를 sessionStorage 에 저장 → builderOnEnter 가 그대로 신뢰 (재정렬 X).
+  // → 탭 이동만으로 순서가 재정렬되는 버그 해결.
+  const tracksFromSel = ids
+    .map((id) => state.tracks.find((t) => t.id === id))
+    .filter(Boolean);
+  const arranged = arrangeTracksWithPins(tracksFromSel);
+  const arrangedIds = arranged.map((t) => t.id);
+  // state.tracks 에 없던 id 들 (필터로 가려진 곡 등) 은 끝에 그대로 부착.
+  const missing = ids.filter((id) => !arrangedIds.includes(id));
+  const finalIds = [...arrangedIds, ...missing];
+  sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(finalIds));
   toast(`${ids.length}곡을 Builder 로 전송`, 'success');
   switchTab('builder');
 });
@@ -1070,9 +1081,14 @@ function fmtNatural(totalSec) {
   return `${min}분 (너무 김 — 45분 이하 권장)`;
 }
 
-// Builder 첫 진입 시 자동 정렬 힌트 — prefix_order 1~5 곡을 슬롯 1~5 에 배치,
-// 나머지는 뒤쪽에 들어온 순서대로. 호출 시점은 builderOnEnter 진입 1회만.
-// 이후 셔플/드래그 결과는 그대로 보존 (prefix_order 무시).
+// Phase 4-D fix: builder.tracks 의 현재 순서를 sessionStorage 에 동기화.
+// 셔플/드래그/다양성/제거 등 모든 mutation 후 즉시 호출 → 탭 이동에도 순서 유지.
+function saveBuilderOrder() {
+  sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(builder.tracks.map((t) => t.id)));
+}
+
+// Pool→Builder 전송 시점에 prefix_order 1~5 곡을 슬롯 1~5 에 1회 배치.
+// builderOnEnter 에서는 호출 X (sessionStorage 의 사용자 순서 그대로 유지).
 function arrangeTracksWithPins(rawTracks) {
   const slots = new Array(rawTracks.length);
   const pool = [];
@@ -1339,14 +1355,14 @@ function reorderBuilderTracks(srcId, targetId) {
   const [src] = builder.tracks.splice(srcIdx, 1);
   const adj = srcIdx < tgtIdx ? tgtIdx - 1 : tgtIdx;
   builder.tracks.splice(adj, 0, src);
+  saveBuilderOrder();
   renderBuilderTracks();
 }
 
 function removeBuilderTrack(id) {
   // 단순 splice. 인덱스 기준 핀이라 뒤에서 한 칸씩 당겨오는 자연스러운 동작.
-  // (사용자가 셔플/드래그로 정한 순서를 prefix_order 로 다시 흔들지 않음)
   builder.tracks = builder.tracks.filter((t) => t.id !== id);
-  sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(builder.tracks.map((t) => t.id)));
+  saveBuilderOrder();
   renderBuilderTracks();
 }
 
@@ -1361,6 +1377,7 @@ function shuffleNonPinned() {
     [free[i], free[j]] = [free[j], free[i]];
   }
   builder.tracks = [...pinned, ...free];
+  saveBuilderOrder();
   renderBuilderTracks();
   return free.length;
 }
@@ -1382,6 +1399,7 @@ $('#bShuffleAllBtn').addEventListener('click', () => {
 $('#bShuffleDiversityBtn').addEventListener('click', () => {
   if (!builder.tracks.length) return;
   builder.tracks = shuffleForDiversity(builder.tracks);
+  saveBuilderOrder();
   renderBuilderTracks();
   const remaining = findDiversityWarnings(builder.tracks).size;
   if (remaining === 0) toast('다양성 셔플 완료 — 연속 곡 없음', 'success');
@@ -1785,22 +1803,26 @@ window.builderOnEnter = async function builderOnEnter() {
     return;
   }
 
-  // GET /api/tracks?ids=... 로 곡 정보 조회
+  // GET /api/tracks?ids=... 로 곡 정보 조회.
+  // Phase 4-D fix: sessionStorage 의 ids 순서가 곧 사용자가 본 마지막 순서 →
+  //                arrangeTracksWithPins 호출 X (재정렬 X). 셔플/드래그/다양성 등의
+  //                결과는 각 mutation 시 saveBuilderOrder() 가 이미 저장해 둠.
   try {
     const j = await apiGet(`/api/tracks?ids=${ids.join(',')}&limit=500`);
     const fetched = j.tracks || [];
-    // 요청한 id 순서를 유지하기 위해 재정렬
+    // 요청한 id 순서를 그대로 유지.
     const map = new Map(fetched.map((t) => [t.id, t]));
     const orderedFromIds = ids.map((id) => map.get(id)).filter(Boolean);
-    // 핀 적용 — prefix_order 1~5 트랙은 그 슬롯에 고정 배치
     builder.unpinAll = $('#bUnpinAll').checked;
-    builder.tracks = arrangeTracksWithPins(orderedFromIds);
+    builder.tracks = orderedFromIds;
     if (!builder.tracks.length) {
       toast('선택했던 곡이 모두 사라졌습니다 (삭제됨?)', 'error');
       $('#builderEmpty').hidden = false;
       $('#builderMain').hidden = true;
       return;
     }
+    // 일부 id 가 DB 에서 사라졌으면 sessionStorage 정리.
+    if (orderedFromIds.length !== ids.length) saveBuilderOrder();
     $('#builderEmpty').hidden = true;
     $('#builderMain').hidden = false;
     renderBuilderTracks();
