@@ -1262,6 +1262,7 @@
         <button class="bulk-btn warn" id="bulkRetitleBtn" type="button" disabled>♻ 일괄 retitle</button>
         <button class="bulk-btn" id="bulkBackfillBtn" type="button" disabled>🔍 일괄 backfill</button>
         <button class="bulk-btn" id="bulkExtractBtn" type="button" disabled>🎷 악기 추출</button>
+        <button class="bulk-btn" id="bulkResetUsageBtn" type="button" disabled>🔄 사용 이력 리셋</button>
         <button class="bulk-btn danger" id="bulkDeleteBtn" type="button" disabled>🗑 선택 삭제</button>
         <span class="bulk-divider"></span>
         <button class="bulk-btn warn" id="sendToBuilderBtn" type="button" disabled>🎬 Builder 로 보내기</button>
@@ -1289,11 +1290,12 @@
               <th class="col-usage" title="사용 횟수">Used</th>
               <th class="col-last-used" title="마지막 사용">Last Used</th>
               <th class="col-action">Title</th>
+              <th class="col-action" title="사용 이력 리셋">Reset</th>
               <th class="col-action">Del</th>
             </tr>
           </thead>
           <tbody id="trackBody">
-            <tr><td colspan="9" class="empty">로딩 중…</td></tr>
+            <tr><td colspan="10" class="empty">로딩 중…</td></tr>
           </tbody>
         </table>
       </div>

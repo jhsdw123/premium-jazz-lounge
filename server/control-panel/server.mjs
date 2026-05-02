@@ -28,6 +28,27 @@ const PORT = parseInt(process.env.PORT, 10) || 4001;
 const VERSION = '0.2.0';
 
 const app = express();
+
+// Phase 4-D-5-C: 요청 로거 — 매 응답마다 색상 코드 + 시각 + 메서드 + 경로 + 상태 + 소요 ms.
+//   morgan 의존성 회피 (package.json 변경 X). 디버깅 시 어떤 요청이 들어왔고 어디서 깨지는지
+//   서버 콘솔만 보고 즉시 파악 가능. 색상은 ANSI escape — Windows Terminal / VSCode / iTerm 모두 지원.
+app.use((req, _res, next) => {
+  const res = _res;
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    const status = res.statusCode;
+    const color = status >= 500 ? '\x1b[31m'        // red
+                : status >= 400 ? '\x1b[33m'        // yellow
+                : status >= 300 ? '\x1b[36m'        // cyan
+                : '\x1b[32m';                       // green
+    const reset = '\x1b[0m';
+    const t = new Date().toISOString().slice(11, 23);
+    console.log(`${color}[${t}] ${req.method.padEnd(4)} ${status} ${ms.toString().padStart(4)}ms ${req.originalUrl}${reset}`);
+  });
+  next();
+});
+
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
@@ -436,11 +457,14 @@ app.post('/api/tracks/delete', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'ids 배열이 필요합니다' });
     }
 
+    console.log(`[DELETE] ${ids.length}곡 삭제 요청:`, ids.slice(0, 10), ids.length > 10 ? `… +${ids.length - 10}` : '');
+
     const { data: tracks, error: selErr } = await supabase
       .from('pjl_tracks')
       .select('id, storage_path')
       .in('id', ids);
     if (selErr) throw selErr;
+    console.log(`[DELETE] DB 에서 ${tracks.length}곡 발견`);
 
     const paths = tracks.map((t) => t.storage_path).filter(Boolean);
     let removedFromStorage = 0;
@@ -448,17 +472,43 @@ app.post('/api/tracks/delete', async (req, res) => {
       try {
         const r = await deleteTracks(paths);
         removedFromStorage = r.removed;
+        console.log(`[DELETE] Storage ${removedFromStorage}/${paths.length} 파일 삭제`);
       } catch (e) {
         // best-effort: storage 실패해도 DB 삭제는 진행
-        console.warn('storage 삭제 일부 실패:', e.message);
+        console.warn('[DELETE] storage 삭제 일부 실패:', e.message);
       }
     }
 
-    const { error: delErr } = await supabase.from('pjl_tracks').delete().in('id', ids);
-    if (delErr) throw delErr;
+    // Phase 4-D-5-C fix: pjl_video_tracks.track_id 의 FK 가 ON DELETE RESTRICT —
+    //   Builder 단계 (POST /api/videos) 에서 video_track row 가 생기면 그 후 곡 삭제는 차단됨.
+    //   해결: pjl_tracks 삭제 직전 video_tracks 의 해당 track_id row 들을 명시적으로 정리.
+    //   pjl_track_usage 는 0005 에서 ON DELETE CASCADE 라 자동 처리.
+    {
+      const { error: vtErr, count: vtCount } = await supabase
+        .from('pjl_video_tracks')
+        .delete({ count: 'exact' })
+        .in('track_id', ids);
+      if (vtErr) {
+        console.warn('[DELETE] pjl_video_tracks 정리 실패:', vtErr.message);
+      } else {
+        console.log(`[DELETE] pjl_video_tracks ${vtCount ?? 0} row 정리`);
+      }
+    }
 
-    res.json({ ok: true, deleted: tracks.length, removedFromStorage });
+    const { error: delErr, count } = await supabase
+      .from('pjl_tracks')
+      .delete({ count: 'exact' })
+      .in('id', ids);
+    if (delErr) throw delErr;
+    console.log(`[DELETE] pjl_tracks ${count ?? tracks.length}곡 삭제 완료`);
+
+    res.json({
+      ok: true,
+      deleted: count ?? tracks.length,
+      removedFromStorage,
+    });
   } catch (e) {
+    console.error('[DELETE] 실패:', e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -527,6 +577,72 @@ app.post('/api/tracks/usage', async (req, res) => {
     res.json({ ok: true, recorded: cleaned.length, rpcOk, rpcFail });
   } catch (e) {
     console.error('[usage] 기록 실패:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── Tracks: 사용 이력 리셋 (Phase 4-D-5-C) ──────────────────────────────
+//   POST /api/tracks/reset-usage   body: { ids: [...] }
+//     일괄: 선택한 곡들의 used_count → 0, last_used_at → null,
+//     pjl_track_usage 행 모두 삭제.
+//   POST /api/tracks/:id/reset-usage
+//     단일: 한 곡만 동일 처리. (아래 별도 핸들러)
+//
+// ⚠ Express 라우팅 우선순위: '/api/tracks/reset-usage' 가 '/api/tracks/:id/...' 보다
+//   먼저 등록되도록 본 블록이 :id 핸들러보다 위에 위치해야 함.
+app.post('/api/tracks/reset-usage', async (req, res) => {
+  try {
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.map((x) => parseIntOrNull(x)).filter((n) => n != null)
+      : [];
+    if (!ids.length) {
+      return res.status(400).json({ ok: false, error: 'ids 배열이 필요합니다' });
+    }
+    console.log(`[RESET] ${ids.length}곡 일괄 리셋:`, ids.slice(0, 10), ids.length > 10 ? `… +${ids.length - 10}` : '');
+
+    const { error: usageErr, count: usageCount } = await supabase
+      .from('pjl_track_usage')
+      .delete({ count: 'exact' })
+      .in('track_id', ids);
+    if (usageErr) throw usageErr;
+    console.log(`[RESET] pjl_track_usage ${usageCount ?? 0} row 삭제`);
+
+    const { error: trErr, count: resetCount } = await supabase
+      .from('pjl_tracks')
+      .update({ used_count: 0, last_used_at: null }, { count: 'exact' })
+      .in('id', ids);
+    if (trErr) throw trErr;
+    console.log(`[RESET] pjl_tracks ${resetCount ?? 0}곡 카운터 리셋`);
+
+    res.json({ ok: true, reset: resetCount ?? ids.length, usageRowsDeleted: usageCount ?? 0 });
+  } catch (e) {
+    console.error('[RESET] 일괄 실패:', e);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/tracks/:id/reset-usage', async (req, res) => {
+  const trackId = parseIntOrNull(req.params.id);
+  if (!trackId) return res.status(400).json({ ok: false, error: 'invalid track id' });
+  try {
+    console.log(`[RESET] 곡 ${trackId} 단일 리셋`);
+
+    const { error: usageErr, count: usageCount } = await supabase
+      .from('pjl_track_usage')
+      .delete({ count: 'exact' })
+      .eq('track_id', trackId);
+    if (usageErr) throw usageErr;
+
+    const { error: trErr } = await supabase
+      .from('pjl_tracks')
+      .update({ used_count: 0, last_used_at: null })
+      .eq('id', trackId);
+    if (trErr) throw trErr;
+
+    console.log(`[RESET] 곡 ${trackId} 완료 (이력 ${usageCount ?? 0}건 삭제)`);
+    res.json({ ok: true, trackId, usageRowsDeleted: usageCount ?? 0 });
+  } catch (e) {
+    console.error(`[RESET] 곡 ${trackId} 실패:`, e);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -1762,6 +1878,14 @@ app.post('/api/videos', async (req, res) => {
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
+});
+
+// Phase 4-D-5-C: 글로벌 에러 핸들러 — 라우트 안에서 throw 가 res 에 처리되지 않은 채
+//   bubble up 한 경우 마지막 안전망. 정상 라우트들은 try/catch 로 직접 500 응답.
+app.use((err, req, res, _next) => {
+  console.error(`[GLOBAL ERROR] ${req.method} ${req.originalUrl}`, err);
+  if (res.headersSent) return;
+  res.status(500).json({ ok: false, error: err?.message || String(err) });
 });
 
 // ─── Start ───────────────────────────────────────────────────────────────

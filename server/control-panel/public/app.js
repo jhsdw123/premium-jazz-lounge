@@ -103,7 +103,7 @@ async function toggleTrackUsageExpand(trackId, row) {
   expandRow.className = 'usage-expand-row';
   expandRow.setAttribute('data-usage-for', String(trackId));
   expandRow.innerHTML = `
-    <td colspan="9">
+    <td colspan="10">
       <div class="usage-loading">이력 로딩 중…</div>
     </td>
   `;
@@ -388,7 +388,7 @@ function renderTracks() {
       || (f.usedFilter && f.usedFilter !== 'all')
       || (f.prefixOrder && f.prefixOrder !== 'any')
       || f.instrument || f.minDuration || f.maxDuration;
-    tb.innerHTML = `<tr><td colspan="9" class="empty">${
+    tb.innerHTML = `<tr><td colspan="10" class="empty">${
       hasFilter ? '조건에 맞는 곡이 없습니다. 필터를 조정하세요.' : '아직 곡이 없습니다. mp3 파일을 드래그해서 추가하세요.'
     }</td></tr>`;
     updateBulkBar();
@@ -456,6 +456,9 @@ function renderTracks() {
         <button class="row-btn reroll-btn" data-id="${t.id}" title="${titleBtnTitle}">${titleBtnIcon}</button>
       </td>
       <td class="col-action">
+        <button class="row-btn reset-usage-btn" data-id="${t.id}" title="사용 이력 리셋"${(t.used_count || 0) === 0 ? ' disabled' : ''}>🔄</button>
+      </td>
+      <td class="col-action">
         <button class="row-btn delete-btn" data-id="${t.id}" title="삭제">🗑</button>
       </td>
     `;
@@ -474,6 +477,12 @@ function renderTracks() {
   });
   $$('.reroll-btn').forEach((btn) =>
     btn.addEventListener('click', () => rerollOrGenerate(parseInt(btn.dataset.id, 10), btn))
+  );
+  $$('.reset-usage-btn').forEach((btn) =>
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      resetTrackUsage(parseInt(btn.dataset.id, 10));
+    })
   );
   $$('.delete-btn').forEach((btn) =>
     btn.addEventListener('click', () => deleteTrack(parseInt(btn.dataset.id, 10)))
@@ -508,6 +517,24 @@ async function deleteTrack(id) {
     await Promise.all([refreshTracks(), refreshStats()]);
   } catch (e) {
     toast(`삭제 실패: ${e.message}`, 'error');
+  }
+}
+
+// Phase 4-D-5-C: 단일 곡 사용 이력 리셋 — used_count=0, last_used_at=null, 이력 삭제.
+async function resetTrackUsage(id) {
+  const t = state.tracks.find((x) => x.id === id);
+  const cur = t?.used_count || 0;
+  if (cur === 0) {
+    toast('이미 사용 이력이 없습니다', 'info');
+    return;
+  }
+  if (!confirm(`trackId=${id} 의 사용 이력을 리셋합니다.\n(used_count ${cur} → 0, 이력 row 삭제 — 곡 자체는 유지)\n계속?`)) return;
+  try {
+    const j = await apiPost(`/api/tracks/${id}/reset-usage`, {});
+    toast(`리셋됨: id=${id} (이력 ${j.usageRowsDeleted}건 삭제)`, 'success');
+    await Promise.all([refreshTracks(), refreshStats()]);
+  } catch (e) {
+    toast(`리셋 실패: ${e.message}`, 'error');
   }
 }
 
@@ -561,6 +588,7 @@ function updateBulkBar() {
   $('#bulkRetitleBtn').disabled = !enabled;
   $('#bulkBackfillBtn').disabled = !enabled;
   $('#bulkExtractBtn').disabled = !enabled;
+  $('#bulkResetUsageBtn').disabled = !enabled;
   $('#bulkDeleteBtn').disabled = !enabled;
   $('#sendToBuilderBtn').disabled = !enabled;
 }
@@ -577,6 +605,7 @@ $('#clearSelBtn').addEventListener('click', () => {
 $('#bulkRetitleBtn').addEventListener('click', () => bulkRetitle());
 $('#bulkBackfillBtn').addEventListener('click', () => bulkBackfill());
 $('#bulkExtractBtn').addEventListener('click', () => bulkExtractInstruments());
+$('#bulkResetUsageBtn').addEventListener('click', () => bulkResetUsage());
 $('#bulkDeleteBtn').addEventListener('click', () => bulkDelete());
 
 // ─── Bulk progress UI (재사용) ─────────────────────────────────────
@@ -697,6 +726,30 @@ async function bulkExtractInstruments() {
 
   state.bulkInProgress = false;
   await Promise.all([refreshTracks(), refreshStats(), refreshInstruments()]);
+  setTimeout(hideBulkProgress, 1800);
+}
+
+// Phase 4-D-5-C: 다중 선택 곡 사용 이력 일괄 리셋 (used_count=0, last_used_at=null, 이력 row 삭제).
+async function bulkResetUsage() {
+  const ids = Array.from(state.selected);
+  if (!ids.length) return;
+  if (!confirm(`${ids.length}곡의 사용 이력을 리셋합니다.\n(used_count=0, 이력 row 삭제 — 곡 자체는 유지)\n계속?`)) return;
+
+  state.bulkInProgress = true;
+  updateBulkBar();
+  showBulkProgress(`이력 리셋 중…`);
+
+  try {
+    const j = await apiPost('/api/tracks/reset-usage', { ids });
+    setBulkProgress(100, `리셋됨: ${j.reset}곡 (이력 ${j.usageRowsDeleted}건 삭제)`);
+    toast(`${j.reset}곡 이력 리셋 완료`, 'success');
+    state.selected.clear();
+  } catch (e) {
+    toast(`일괄 리셋 실패: ${e.message}`, 'error');
+  }
+
+  state.bulkInProgress = false;
+  await Promise.all([refreshTracks(), refreshStats()]);
   setTimeout(hideBulkProgress, 1800);
 }
 
