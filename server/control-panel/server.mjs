@@ -2284,20 +2284,86 @@ app.get('/api/youtube/playlists', async (req, res) => {
 //    6) (Phase 5-F 에서) YouTube API 로 적용
 
 const PATH_A_TARGET_LANGUAGES = [
-  'ko', 'en', 'ja', 'zh-CN', 'zh-TW',
+  'ko', 'en', 'ja', 'zh', 'zh-Hant',
   'es', 'fr', 'de', 'it', 'pt',
   'ru', 'nl', 'th', 'vi', 'id',
   'ms', 'tl',
 ];
 
-// === Vol 숫자 +1 정규식 ===
-//  예: "[ニューオーリンズ・ジャズ] 설명 [Vol.5]" → "[Vol.6]"
-//  대괄호 포함, 여러 번 등장해도 모두 +1.
-function incrementVolNumber(text) {
+// === Vol 숫자 추출 (어떤 언어 제목이든) ===
+//  여러 패턴 중 첫 매치 → 정수 반환. 못 찾으면 null.
+function extractVolNumber(text) {
+  if (!text) return null;
+  const patterns = [
+    /\[Vol\.?\s*(\d+)\]/i,
+    /\(Vol\.?\s*(\d+)\)/i,
+    /\bVol\.?\s*(\d+)\b/i,
+    /\[(\d{1,3})\]\s*$/, // 프랑스어 [5]
+  ];
+  for (const p of patterns) {
+    const m = String(text).match(p);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
+// === Vol 패턴 통일 ===
+//  source 영상 17개 언어가 7~8가지 패턴으로 다양 (Gemini 번역 변동) →
+//  "두더지잡기" 회피: 알려진 모든 Vol 패턴 제거 후 끝에 [Vol.N] 통일 추가.
+//  결과: 다음 사이클부터는 [Vol.N] 1개 패턴만 매치 OK.
+function unifyVolPattern(text, newVolNumber) {
   if (!text) return text;
-  return String(text).replace(/\[Vol\.(\d+)\]/g, (_match, num) => {
-    return `[Vol.${parseInt(num, 10) + 1}]`;
+  let result = String(text);
+  // 알려진 Vol 패턴 모두 제거 (앞쪽 가로공백 흡수)
+  result = result.replace(/\s*\[Vol\.?\s*\d+\]/gi, '');         // [Vol.5] / [Vol5]
+  result = result.replace(/\s*\(Vol\.?\s*\d+\)/gi, '');         // (Vol 5) / (Vol5)
+  result = result.replace(/\s*\(\d+\s*집\)/g, '');              // 한국어 (5집)
+  result = result.replace(/\s*\(Том\s*\d+\)/gi, '');            // 러시아 (Том 5)
+  result = result.replace(/\s*\(เล่ม\s*\d+\)/g, '');            // 태국 (เล่ม 5)
+  result = result.replace(/\s*\(第\s*\d+\s*卷\)/g, '');         // 중국 (第 5 卷)
+  result = result.replace(/\s*\[\d{1,3}\]\s*$/, '');            // 프랑스 끝의 [5]
+  // 가로공백 collapse + 양끝 trim (newline 보존)
+  result = result.replace(/[ \t]{2,}/g, ' ').trim();
+  return result ? `${result} [Vol.${newVolNumber}]` : `[Vol.${newVolNumber}]`;
+}
+
+// === 검증 (개발 환경 1회): 형님 17개 언어 진짜 데이터 ===
+function validateUnifyVol() {
+  const cases = [
+    { input: 'Instant Good Mood: ... Big Band Classics (Vol 5)', newVol: 6,
+      expected: 'Instant Good Mood: ... Big Band Classics [Vol.6]' },
+    { input: '즉각적인 기분 전환: ... 빅밴드 클래식 (5집)', newVol: 6,
+      expected: '즉각적인 기분 전환: ... 빅밴드 클래식 [Vol.6]' },
+    { input: 'Мгновенное хорошее настроение: ... биг-бэнда (Том 5)', newVol: 6,
+      expected: 'Мгновенное хорошее настроение: ... биг-бэнда [Vol.6]' },
+    { input: 'อารมณ์ดีทันที: ... ที่ช่วยเติมพลัง (เล่ม 5)', newVol: 6,
+      expected: 'อารมณ์ดีทันที: ... ที่ช่วยเติมพลัง [Vol.6]' },
+    { input: '瞬间好心情：... 与活力大乐队经典 (第 5 卷)', newVol: 6,
+      expected: '瞬间好心情：... 与活力大乐队经典 [Vol.6]' },
+    { input: 'Bonne humeur instantanée : ... énergisants de Big Band[5]', newVol: 6,
+      expected: 'Bonne humeur instantanée : ... énergisants de Big Band [Vol.6]' },
+    { input: 'Tâm Trạng Tốt Tức Thì: ... Tiếp Năng Lượng', newVol: 6,
+      expected: 'Tâm Trạng Tốt Tức Thì: ... Tiếp Năng Lượng [Vol.6]' },
+    { input: '[Vol.99]', newVol: 100, expected: '[Vol.100]' },
+    { input: 'Already unified [Vol.5]', newVol: 6, expected: 'Already unified [Vol.6]' },
+  ];
+  let pass = 0;
+  let fail = 0;
+  cases.forEach((c, i) => {
+    const r = unifyVolPattern(c.input, c.newVol);
+    const ok = r === c.expected;
+    console.log(`[Unify] ${ok ? '✓' : '✗'} case ${i + 1}`);
+    if (!ok) {
+      console.log(`  in:       "${c.input}"`);
+      console.log(`  got:      "${r}"`);
+      console.log(`  expected: "${c.expected}"`);
+    }
+    ok ? pass++ : fail++;
   });
+  console.log(`[Unify] ${pass}/${cases.length} pass`);
+}
+if (process.env.NODE_ENV !== 'production') {
+  validateUnifyVol();
 }
 
 // === Vol 해시태그 제거 ===
@@ -2382,16 +2448,22 @@ function replaceTimeline(description, newTracks) {
 }
 
 // === Source 메타 → 변경된 generatedMeta ===
-//  defaultLanguage 의 title/description 은 generated.title.default / .description.default 에.
-//  나머지 언어는 generated.localizations[lang] 에. 빠진 언어는 missingLanguages 배열에.
-//  태그는 그대로 복사.
+//  Vol 패러다임: source title 에서 Vol 숫자 1회 추출 → +1 → 모든 언어 title 에 통일 적용.
+//  description 은 timeline + Vol 해시태그 정리만 (description 의 Vol 미러는 의도적으로 spec 따름).
+//  빠진 언어는 missingLanguages 배열에. 태그는 그대로 복사.
 function reuseMetaWithChanges(sourceMeta, newTracks) {
+  const sourceVol = extractVolNumber(sourceMeta.title);
+  if (!sourceVol) {
+    console.warn('[Vol] 소스 제목에서 Vol 숫자 못 찾음 — 0 부터 시작:', sourceMeta.title);
+  }
+  const newVol = (sourceVol || 0) + 1;
   const defaultLang = sourceMeta.defaultLanguage || 'en';
+
   const result = {
     defaultLanguage: defaultLang,
-    title: { default: incrementVolNumber(sourceMeta.title) },
+    title: { default: unifyVolPattern(sourceMeta.title, newVol) },
     description: {
-      default: removeVolHashtags(replaceTimeline(incrementVolNumber(sourceMeta.description), newTracks)),
+      default: removeVolHashtags(replaceTimeline(sourceMeta.description, newTracks)),
     },
     tags: Array.isArray(sourceMeta.tags) ? [...sourceMeta.tags] : [],
     localizations: {},
@@ -2406,12 +2478,9 @@ function reuseMetaWithChanges(sourceMeta, newTracks) {
       continue;
     }
     result.localizations[lang] = {
-      title: incrementVolNumber(localized.title || sourceMeta.title),
+      title: unifyVolPattern(localized.title || sourceMeta.title, newVol),
       description: removeVolHashtags(
-        replaceTimeline(
-          incrementVolNumber(localized.description || sourceMeta.description),
-          newTracks,
-        ),
+        replaceTimeline(localized.description || sourceMeta.description, newTracks),
       ),
     };
   }

@@ -31,10 +31,19 @@ let pathASelectedSourceVideoId = null;
 let pathACurrentLangTab = 'en';
 
 const PATH_A_LANGUAGES = [
-  'en', 'ko', 'ja', 'zh-CN', 'zh-TW',
+  'en', 'ko', 'ja', 'zh', 'zh-Hant',
   'es', 'fr', 'de', 'it', 'pt',
   'ru', 'nl', 'th', 'vi', 'id', 'ms', 'tl',
 ];
+
+const LANG_LABELS = {
+  'en': 'English', 'ko': '한국어', 'ja': '日本語',
+  'zh': '中文 (简体)', 'zh-Hant': '中文 (繁體)',
+  'es': 'Español', 'fr': 'Français', 'de': 'Deutsch',
+  'it': 'Italiano', 'pt': 'Português', 'ru': 'Русский',
+  'nl': 'Nederlands', 'th': 'ไทย', 'vi': 'Tiếng Việt',
+  'id': 'Bahasa Indonesia', 'ms': 'Bahasa Melayu', 'tl': 'Filipino',
+};
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
@@ -818,8 +827,9 @@ function showPathAPreview(data) {
   const langTabsHtml = PATH_A_LANGUAGES.map((lang) => {
     const isDefault = lang === sourceMeta.defaultLanguage;
     const exists = isDefault || !!generated.localizations?.[lang];
+    const label = LANG_LABELS[lang] || lang;
     return `
-      <button type="button" class="lang-tab" data-lang="${escapeHtml(lang)}"
+      <button type="button" class="lang-tab" data-lang="${escapeHtml(lang)}" title="${escapeHtml(label)}"
         style="padding:5px 9px;background:${exists ? '#1a1a1a' : '#3a1818'};color:${exists ? 'var(--text)' : '#f55'};
                border:1px solid #333;cursor:pointer;border-radius:4px;font-size:11px;font-family:ui-monospace,Menlo,monospace;">
         ${escapeHtml(lang)}${exists ? '' : ' ⚠'}
