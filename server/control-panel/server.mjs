@@ -2486,6 +2486,200 @@ app.post('/api/uploader/path-a/preview', async (req, res) => {
   }
 });
 
+// ─── Phase 5-F: YouTube 적용 (예약 + 재생목록 + 백업/복원) ────────────────
+//
+//  1) GET  /api/uploader/next-schedule          — 다음 월/목 16:30 SGT 슬롯 자동 계산
+//  2) POST /api/uploader/apply { dryRun }       — 백업 + videos.update + playlistItems.insert
+//  3) POST /api/uploader/restore { backupPath } — 백업 복원
+//
+//  백업 파일: secrets/yt-backups/{videoId}-{timestamp}.json (gitignored).
+
+const YT_BACKUP_DIR = resolve(__dirname, '../..', 'secrets', 'yt-backups');
+
+// === 다음 예약 슬롯 (월/목 16:30 SGT = 08:30 UTC) ===
+//  baseTime 보다 미래의 가장 빠른 월요일 또는 목요일 16:30 SGT 반환.
+function getNextScheduleSlot(lastScheduledAt) {
+  const baseTime = lastScheduledAt ? new Date(lastScheduledAt) : new Date();
+  const candidates = [];
+  for (let i = 1; i <= 7; i++) {
+    const candidate = new Date(baseTime);
+    candidate.setUTCDate(candidate.getUTCDate() + i);
+    candidate.setUTCHours(8, 30, 0, 0); // 16:30 SGT = 08:30 UTC
+    const day = candidate.getUTCDay();  // 0=Sun, 1=Mon, 4=Thu
+    if ((day === 1 || day === 4) && candidate > baseTime) {
+      candidates.push(candidate);
+    }
+  }
+  candidates.sort((a, b) => a - b);
+  return candidates[0];
+}
+
+// === GET /api/uploader/next-schedule ===
+//  채널의 가장 늦은 예약 영상 → 그 다음 월/목 16:30 슬롯 계산.
+app.get('/api/uploader/next-schedule', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  try {
+    const videos = await ytGetMyVideos(50);
+    const scheduled = videos
+      .filter((v) => v.publishAt && new Date(v.publishAt) > new Date())
+      .sort((a, b) => new Date(b.publishAt) - new Date(a.publishAt));
+    const lastScheduledAt = scheduled[0]?.publishAt || null;
+    const nextSlot = getNextScheduleSlot(lastScheduledAt);
+    res.json({
+      ok: true,
+      lastScheduledAt,
+      nextSlot: nextSlot.toISOString(),
+      nextSlotSGT: nextSlot.toLocaleString('en-SG', { timeZone: 'Asia/Singapore' }),
+    });
+  } catch (e) {
+    console.error('[Uploader] next-schedule 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// === POST /api/uploader/apply ===
+//  body: { videoId, generatedMeta, scheduleAt?, playlistIds?, dryRun? }
+//  - 백업 (현재 snippet/localizations/status JSON) 항상 생성
+//  - dryRun=true 면 plan 만 반환, 실제 변경 X
+//  - dryRun=false 면 videos.update + playlistItems.insert
+app.post('/api/uploader/apply', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  const { videoId, generatedMeta, scheduleAt, playlistIds, dryRun } = req.body || {};
+  if (!videoId || !generatedMeta) {
+    return res.status(400).json({ ok: false, error: 'videoId + generatedMeta 필요' });
+  }
+
+  try {
+    // 1. 현재 메타 fetch (백업용 + categoryId 보존)
+    const currentRes = await youtube.videos.list({
+      part: ['snippet', 'localizations', 'status'],
+      id: [String(videoId)],
+    });
+    const backupData = currentRes.data.items?.[0];
+    if (!backupData) return res.status(404).json({ ok: false, error: '영상 없음' });
+
+    // 2. 백업 파일 저장
+    if (!fs.existsSync(YT_BACKUP_DIR)) fs.mkdirSync(YT_BACKUP_DIR, { recursive: true });
+    const backupFile = path.join(YT_BACKUP_DIR, `${videoId}-${Date.now()}.json`);
+    fs.writeFileSync(backupFile, JSON.stringify(backupData, null, 2));
+
+    const localizationsCount = Object.keys(generatedMeta.localizations || {}).length;
+    const requestedPlaylists = Array.isArray(playlistIds) ? playlistIds : [];
+
+    if (dryRun) {
+      return res.json({
+        ok: true,
+        dryRun: true,
+        backup: backupFile,
+        plan: {
+          updateSnippet: {
+            title: generatedMeta.title?.default || '',
+            description: generatedMeta.description?.default || '',
+            defaultLanguage: generatedMeta.defaultLanguage || 'en',
+            tags: generatedMeta.tags || [],
+            categoryId: backupData.snippet?.categoryId || null,
+          },
+          updateLocalizations: `${localizationsCount} 개 언어`,
+          updateStatus: scheduleAt ? `예약: ${scheduleAt}` : '변경 X',
+          addToPlaylists: requestedPlaylists,
+        },
+        message: '드라이런 완료. 실제 변경 X.',
+      });
+    }
+
+    // === 진짜 적용 ===
+    const updateBody = {
+      id: videoId,
+      snippet: {
+        title: generatedMeta.title?.default || '',
+        description: generatedMeta.description?.default || '',
+        defaultLanguage: generatedMeta.defaultLanguage || backupData.snippet?.defaultLanguage || 'en',
+        tags: generatedMeta.tags || [],
+        categoryId: backupData.snippet?.categoryId, // 보존
+      },
+      localizations: generatedMeta.localizations || {},
+    };
+    const updateParts = ['snippet', 'localizations'];
+    if (scheduleAt) {
+      updateBody.status = {
+        privacyStatus: 'private',
+        publishAt: scheduleAt,
+      };
+      updateParts.push('status');
+    }
+
+    await youtube.videos.update({
+      part: updateParts,
+      requestBody: updateBody,
+    });
+
+    // 3. playlistItems.insert (각 재생목록)
+    const playlistResults = [];
+    for (const playlistId of requestedPlaylists) {
+      try {
+        await youtube.playlistItems.insert({
+          part: ['snippet'],
+          requestBody: {
+            snippet: {
+              playlistId,
+              resourceId: { kind: 'youtube#video', videoId },
+            },
+          },
+        });
+        playlistResults.push({ playlistId, ok: true });
+      } catch (pe) {
+        playlistResults.push({ playlistId, ok: false, error: pe?.message || String(pe) });
+      }
+    }
+
+    res.json({
+      ok: true,
+      videoId,
+      backup: backupFile,
+      updated: { snippet: true, localizations: true, status: !!scheduleAt },
+      playlists: playlistResults,
+      youtubeUrl: `https://studio.youtube.com/video/${videoId}/edit`,
+    });
+  } catch (e) {
+    console.error('[Uploader] apply 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// === POST /api/uploader/restore ===
+//  body: { backupPath } — apply 응답의 backup 경로 그대로.
+app.post('/api/uploader/restore', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  const { backupPath } = req.body || {};
+  if (!backupPath) return res.status(400).json({ ok: false, error: 'backupPath 필요' });
+
+  // 보안: backupPath 가 YT_BACKUP_DIR 안인지 확인 (path traversal 방지)
+  const resolvedBackup = path.resolve(String(backupPath));
+  if (!resolvedBackup.startsWith(YT_BACKUP_DIR)) {
+    return res.status(400).json({ ok: false, error: 'backupPath 범위 밖' });
+  }
+  if (!fs.existsSync(resolvedBackup)) {
+    return res.status(404).json({ ok: false, error: '백업 파일 없음' });
+  }
+
+  try {
+    const backup = JSON.parse(fs.readFileSync(resolvedBackup, 'utf-8'));
+    await youtube.videos.update({
+      part: ['snippet', 'localizations', 'status'],
+      requestBody: {
+        id: backup.id,
+        snippet: backup.snippet,
+        localizations: backup.localizations || {},
+        status: backup.status,
+      },
+    });
+    res.json({ ok: true, restored: backup.id });
+  } catch (e) {
+    console.error('[Uploader] restore 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
 // Phase 4-D-5-C: 글로벌 에러 핸들러 — 라우트 안에서 throw 가 res 에 처리되지 않은 채
 //   bubble up 한 경우 마지막 안전망. 정상 라우트들은 try/catch 로 직접 500 응답.
 app.use((err, req, res, _next) => {

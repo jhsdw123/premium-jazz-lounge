@@ -244,6 +244,7 @@ function bindOnce() {
   $('#uploaderAuthBtn')?.addEventListener('click', startAuthFlow);
   $('#uploaderRefreshBtn')?.addEventListener('click', () => loadVideos());
   $('#uploaderRefreshPlaylistsBtn')?.addEventListener('click', () => loadPlaylists());
+  $('#uploaderSettingsBtn')?.addEventListener('click', openSettingsModal);
 
   // Phase 5-B: 영상 카드 클릭 → 메타 적용 패널. 위임 이벤트 — 리스트가 다시 그려져도 작동.
   $('#uploaderVideoList')?.addEventListener('click', (ev) => {
@@ -256,6 +257,133 @@ function bindOnce() {
   });
 
   uploader.initialized = true;
+}
+
+// ────────────────────────────────────────────────────────────────
+// Phase 5-F: 설정 (localStorage) — default 재생목록 + 자동 예약
+// ────────────────────────────────────────────────────────────────
+const SETTINGS_KEY = 'pjl.uploader.settings';
+
+function loadSettings() {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return { defaultPlaylists: [], autoSchedule: true };
+    const s = JSON.parse(raw);
+    return {
+      defaultPlaylists: Array.isArray(s.defaultPlaylists) ? s.defaultPlaylists : [],
+      autoSchedule: s.autoSchedule !== false,
+    };
+  } catch (e) {
+    return { defaultPlaylists: [], autoSchedule: true };
+  }
+}
+
+function saveSettings(settings) {
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function ensureSettingsModal() {
+  let modal = document.getElementById('uploaderSettingsModal');
+  if (modal) return modal;
+  modal = document.createElement('div');
+  modal.id = 'uploaderSettingsModal';
+  modal.style.cssText = [
+    'position:fixed;inset:0;background:rgba(0,0,0,0.7);',
+    'z-index:1100;display:none;align-items:flex-start;justify-content:center;',
+    'padding-top:60px;',
+  ].join('');
+  modal.innerHTML = `
+    <div style="background:#0f0f0f;border:1px solid #2a2a2a;border-radius:8px;width:min(560px,90vw);max-height:80vh;overflow-y:auto;padding:24px;color:var(--text);box-shadow:0 12px 48px rgba(0,0,0,0.8);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+        <h3 style="margin:0;color:var(--jazz-gold);font-size:15px;">⚙️ Uploader 설정</h3>
+        <button id="settingsCloseBtn" type="button" style="background:transparent;border:none;color:var(--text-muted);font-size:22px;cursor:pointer;line-height:1;padding:0 6px;">×</button>
+      </div>
+
+      <div style="margin-bottom:24px;">
+        <h4 style="color:var(--jazz-gold);margin:0 0 8px;font-size:12px;font-weight:600;">Default 재생목록 (자동 추가)</h4>
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">선택한 재생목록에 적용 시 자동으로 영상 추가.</div>
+        <div id="defaultPlaylistList" style="max-height:340px;overflow-y:auto;background:#0a0a0a;border:1px solid #2a2a2a;border-radius:6px;">
+          <div style="padding:14px;color:var(--text-muted);font-size:12px;">로딩 중…</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:24px;">
+        <h4 style="color:var(--jazz-gold);margin:0 0 8px;font-size:12px;font-weight:600;">예약 시간</h4>
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer;">
+          <input type="checkbox" id="enableAutoSchedule">
+          자동 예약 (다음 월/목 16:30 SGT 슬롯)
+        </label>
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;">
+        <button id="settingsCancelBtn" type="button" class="te-btn" style="padding:8px 16px;">취소</button>
+        <button id="settingsSaveBtn" type="button" class="te-btn gold" style="padding:8px 16px;">저장</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  modal.querySelector('#settingsCloseBtn').addEventListener('click', () => closeSettingsModal());
+  modal.querySelector('#settingsCancelBtn').addEventListener('click', () => closeSettingsModal());
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeSettingsModal();
+  });
+  modal.querySelector('#settingsSaveBtn').addEventListener('click', () => {
+    const checked = Array.from(
+      modal.querySelectorAll('#defaultPlaylistList input[type="checkbox"]:checked')
+    ).map((cb) => cb.value);
+    const settings = {
+      defaultPlaylists: checked,
+      autoSchedule: modal.querySelector('#enableAutoSchedule').checked,
+    };
+    saveSettings(settings);
+    closeSettingsModal();
+  });
+
+  return modal;
+}
+
+function closeSettingsModal() {
+  const modal = document.getElementById('uploaderSettingsModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function openSettingsModal() {
+  const modal = ensureSettingsModal();
+  const settings = loadSettings();
+  modal.querySelector('#enableAutoSchedule').checked = !!settings.autoSchedule;
+  modal.style.display = 'flex';
+
+  // 재생목록 fetch
+  const list = modal.querySelector('#defaultPlaylistList');
+  list.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:12px;">로딩 중…</div>';
+  try {
+    const r = await fetch('/api/youtube/playlists');
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+    if (!data.playlists.length) {
+      list.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:12px;">재생목록이 없습니다.</div>';
+      return;
+    }
+    list.innerHTML = data.playlists.map((p) => {
+      const checked = settings.defaultPlaylists.includes(p.id) ? 'checked' : '';
+      const thumb = p.thumbnail
+        ? `<img src="${escapeHtml(p.thumbnail)}" style="width:60px;aspect-ratio:16/9;object-fit:cover;border-radius:4px;background:#000;">`
+        : `<div style="width:60px;aspect-ratio:16/9;background:#222;border-radius:4px;"></div>`;
+      return `
+        <label style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-bottom:1px solid #1a1a1a;cursor:pointer;">
+          <input type="checkbox" value="${escapeHtml(p.id)}" ${checked} style="flex:0 0 auto;">
+          ${thumb}
+          <div style="flex:1;min-width:0;">
+            <div style="color:var(--text);font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(p.title)}</div>
+            <div style="color:var(--text-muted);font-size:10px;margin-top:2px;">${p.itemCount} 개 영상</div>
+          </div>
+        </label>
+      `;
+    }).join('');
+  } catch (e) {
+    list.innerHTML = `<div style="padding:14px;color:#f55;font-size:12px;">로드 실패: ${escapeHtml(e.message)}</div>`;
+  }
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -756,11 +884,223 @@ function showPathAPreview(data) {
   // 뒤로
   document.getElementById('pathABackBtn').addEventListener('click', () => showPathASourceSelect());
 
-  // 다음 단계 (Phase 5-F 에서 구현)
-  document.getElementById('pathANextBtn').addEventListener('click', () => {
-    console.log('[Path A] 최종 메타:', window.uploaderState.generatedMeta);
-    alert('Phase 5-F (YouTube 적용) 에서 구현 예정.\n현재 generatedMeta 는 window.uploaderState 에 저장됨 — console 확인.');
+  // 다음 단계 → Phase 5-F (예약 + 재생목록 + 적용)
+  document.getElementById('pathANextBtn').addEventListener('click', () => showApplyStep());
+}
+
+// ────────────────────────────────────────────────────────────────
+// Phase 5-F: 적용 단계 — 예약 + 재생목록 + 드라이런 + 진짜 적용
+// ────────────────────────────────────────────────────────────────
+async function showApplyStep() {
+  const container = document.getElementById('metaNextStep');
+  if (!container) return;
+
+  container.innerHTML = `
+    <h3 style="color:var(--jazz-gold);margin:0 0 14px;font-size:13px;font-weight:600;">YouTube 적용</h3>
+
+    <div style="margin-bottom:18px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:6px;padding:12px;">
+      <div style="color:var(--text-muted);font-size:11px;margin-bottom:8px;font-weight:600;">📅 예약 시간 (SGT)</div>
+      <div id="scheduleInfo" style="font-size:11px;line-height:1.7;color:var(--text);margin-bottom:10px;">
+        <span style="color:var(--text-muted);">계산 중…</span>
+      </div>
+      <label style="display:block;font-size:11px;color:var(--text-muted);margin-bottom:4px;">커스텀 (SGT, 비우면 예약 X)</label>
+      <input type="datetime-local" id="customScheduleAt"
+        style="width:100%;padding:7px 9px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;font-family:inherit;">
+    </div>
+
+    <div style="margin-bottom:18px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:6px;padding:12px;">
+      <div style="color:var(--text-muted);font-size:11px;margin-bottom:8px;font-weight:600;">📋 재생목록 (default 자동 추가)</div>
+      <div id="selectedPlaylists" style="font-size:11px;color:var(--text);">로딩 중…</div>
+    </div>
+
+    <div style="display:flex;gap:8px;margin-bottom:14px;">
+      <button id="applyBackBtn" type="button" class="te-btn" style="flex:0 0 auto;padding:8px 16px;">← 미리보기</button>
+      <button id="dryRunBtn" type="button" class="te-btn" style="flex:1;padding:8px 16px;">🔍 드라이런</button>
+      <button id="realApplyBtn" type="button" class="te-btn gold" style="flex:1;padding:8px 16px;opacity:0.5;cursor:not-allowed;" disabled>🚀 진짜 적용</button>
+    </div>
+
+    <div id="applyResult" style="display:none;"></div>
+  `;
+
+  document.getElementById('applyBackBtn').addEventListener('click', () => {
+    showPathAPreview({
+      generated: window.uploaderState.generatedMeta,
+      sourceMeta: window.uploaderState.reuseSourceVideo,
+    });
   });
+  document.getElementById('dryRunBtn').addEventListener('click', () => runApply(true));
+  document.getElementById('realApplyBtn').addEventListener('click', () => runApply(false));
+
+  // 예약 시간 fetch
+  try {
+    const r = await fetch('/api/uploader/next-schedule');
+    const data = await r.json();
+    if (data.ok) {
+      const info = document.getElementById('scheduleInfo');
+      const lastSGT = data.lastScheduledAt
+        ? new Date(data.lastScheduledAt).toLocaleString('en-SG', { timeZone: 'Asia/Singapore' })
+        : '<span style="color:var(--text-muted);">없음</span>';
+      info.innerHTML = `
+        <div>마지막 예약: ${lastSGT}</div>
+        <div>다음 슬롯: <span style="color:var(--jazz-gold);font-weight:600;">${escapeHtml(data.nextSlotSGT)}</span></div>
+      `;
+      // 커스텀 input default = 다음 슬롯 (SGT 로컬 시간으로 표시)
+      const settings = loadSettings();
+      if (settings.autoSchedule) {
+        document.getElementById('customScheduleAt').value = nextSlotToInputValue(data.nextSlot);
+      }
+    } else {
+      document.getElementById('scheduleInfo').innerHTML = `<span style="color:#f55;">${escapeHtml(data.error || '실패')}</span>`;
+    }
+  } catch (e) {
+    document.getElementById('scheduleInfo').innerHTML = `<span style="color:#f55;">${escapeHtml(e.message)}</span>`;
+  }
+
+  // default 재생목록 표시
+  const settings = loadSettings();
+  const selectedDiv = document.getElementById('selectedPlaylists');
+  if (!settings.defaultPlaylists.length) {
+    selectedDiv.innerHTML = '<span style="color:var(--text-muted);">⚙️ 설정에서 default 재생목록 선택 필요.</span>';
+  } else {
+    try {
+      const r = await fetch('/api/youtube/playlists');
+      const data = await r.json();
+      if (data.ok) {
+        const sel = data.playlists.filter((p) => settings.defaultPlaylists.includes(p.id));
+        selectedDiv.innerHTML = sel.length
+          ? sel.map((p) => `<div style="padding:4px 0;">✅ ${escapeHtml(p.title)}</div>`).join('')
+          : '<span style="color:var(--text-muted);">설정한 재생목록이 채널에 없음.</span>';
+      }
+    } catch (e) {
+      selectedDiv.innerHTML = `<span style="color:#f55;">로드 실패: ${escapeHtml(e.message)}</span>`;
+    }
+  }
+}
+
+// ISO UTC → datetime-local input 값 (SGT 시간으로 표시).
+//  datetime-local 은 timezone 정보 없이 로컬 시간 문자열을 받음.
+//  여기서는 SGT 기준으로 "YYYY-MM-DDTHH:mm" 포맷.
+function nextSlotToInputValue(isoUtc) {
+  const d = new Date(isoUtc);
+  // SGT = UTC+8 — 시간 컴포넌트를 SGT 로 직접 계산
+  const sgtMs = d.getTime() + 8 * 60 * 60 * 1000;
+  const sgt = new Date(sgtMs);
+  const yyyy = sgt.getUTCFullYear();
+  const mm = String(sgt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(sgt.getUTCDate()).padStart(2, '0');
+  const HH = String(sgt.getUTCHours()).padStart(2, '0');
+  const MM = String(sgt.getUTCMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}T${HH}:${MM}`;
+}
+
+// datetime-local input (SGT) → ISO UTC string
+function inputValueToIsoUtc(localStr) {
+  if (!localStr) return null;
+  // localStr = "YYYY-MM-DDTHH:mm" — SGT 로 해석 후 UTC 로 변환
+  const [datePart, timePart] = localStr.split('T');
+  const [y, mo, d] = datePart.split('-').map(Number);
+  const [h, mi] = timePart.split(':').map(Number);
+  // SGT 시각 → UTC = SGT - 8h
+  const sgtMs = Date.UTC(y, mo - 1, d, h, mi, 0, 0);
+  const utcMs = sgtMs - 8 * 60 * 60 * 1000;
+  return new Date(utcMs).toISOString();
+}
+
+async function runApply(dryRun) {
+  const resultDiv = document.getElementById('applyResult');
+  const realBtn = document.getElementById('realApplyBtn');
+  const dryBtn = document.getElementById('dryRunBtn');
+
+  const generated = window.uploaderState.generatedMeta;
+  const selectedVideo = window.uploaderState.selectedVideo;
+  if (!generated || !selectedVideo?.id) {
+    alert('내부 상태 누락 (selectedVideo / generatedMeta).');
+    return;
+  }
+
+  if (!dryRun) {
+    if (!confirm('진짜 YouTube 영상에 적용합니다.\n백업은 자동 생성됩니다. 계속?')) return;
+  }
+
+  const customStr = document.getElementById('customScheduleAt').value;
+  const scheduleAt = inputValueToIsoUtc(customStr);
+  const settings = loadSettings();
+
+  dryBtn.disabled = true;
+  realBtn.disabled = true;
+  resultDiv.style.display = 'block';
+  resultDiv.innerHTML = `<div style="padding:12px;color:var(--text-muted);font-size:11px;">${dryRun ? '드라이런' : '적용'} 진행 중…</div>`;
+
+  try {
+    const r = await fetch('/api/uploader/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        videoId: selectedVideo.id,
+        generatedMeta: generated,
+        scheduleAt,
+        playlistIds: settings.defaultPlaylists,
+        dryRun,
+      }),
+    });
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+
+    if (dryRun) {
+      resultDiv.innerHTML = `
+        <div style="background:#0a2a0a;border-left:3px solid #4c4;padding:12px;margin-top:8px;border-radius:0 4px 4px 0;">
+          <div style="color:#4c4;font-size:12px;font-weight:600;margin-bottom:6px;">✅ 드라이런 완료</div>
+          <div style="color:var(--text-muted);font-size:10px;margin-bottom:8px;">백업: ${escapeHtml(data.backup)}</div>
+          <pre style="font-size:10px;line-height:1.5;color:#ccc;background:#000;padding:10px;border-radius:4px;overflow-x:auto;margin:0;">${escapeHtml(JSON.stringify(data.plan, null, 2))}</pre>
+          <div style="color:var(--text-muted);font-size:11px;margin-top:8px;">검증 후 "🚀 진짜 적용" 클릭.</div>
+        </div>
+      `;
+      // 진짜 적용 활성화
+      realBtn.disabled = false;
+      realBtn.style.opacity = '1';
+      realBtn.style.cursor = 'pointer';
+    } else {
+      const failedPlaylists = (data.playlists || []).filter((p) => !p.ok);
+      const playlistMsg = failedPlaylists.length
+        ? `<div style="color:#f55;font-size:11px;margin-top:6px;">⚠ 재생목록 추가 실패 ${failedPlaylists.length}개:<br>${failedPlaylists.map((p) => escapeHtml(p.error)).join('<br>')}</div>`
+        : `<div style="color:#4c4;font-size:11px;margin-top:6px;">✅ 재생목록 ${data.playlists?.length || 0}개 추가</div>`;
+      resultDiv.innerHTML = `
+        <div style="background:#0a2a0a;border-left:3px solid #4c4;padding:14px;margin-top:8px;border-radius:0 4px 4px 0;">
+          <div style="color:#4c4;font-size:13px;font-weight:600;margin-bottom:8px;">🎉 적용 완료</div>
+          <div style="color:var(--text);font-size:11px;line-height:1.6;">
+            <div>비디오: ${escapeHtml(data.videoId)}</div>
+            <div>제목/설명/언어 업데이트: ✓</div>
+            <div>예약: ${data.updated?.status ? '✓' : '— (변경 X)'}</div>
+            ${playlistMsg}
+            <div style="color:var(--text-muted);margin-top:6px;">백업: ${escapeHtml(data.backup)}</div>
+          </div>
+          <a href="${escapeHtml(data.youtubeUrl)}" target="_blank" rel="noopener"
+            style="display:inline-block;margin-top:10px;padding:6px 12px;background:var(--jazz-gold);color:#000;text-decoration:none;border-radius:4px;font-size:11px;font-weight:700;">
+            🎬 YouTube Studio 에서 확인 →
+          </a>
+        </div>
+      `;
+      // 자동 새 탭 열기
+      window.open(data.youtubeUrl, '_blank');
+    }
+  } catch (e) {
+    resultDiv.innerHTML = `
+      <div style="background:#3a1818;border-left:3px solid #f55;padding:12px;margin-top:8px;border-radius:0 4px 4px 0;">
+        <div style="color:#f55;font-size:12px;font-weight:600;">✗ ${dryRun ? '드라이런' : '적용'} 실패</div>
+        <div style="color:#fdd;font-size:11px;margin-top:4px;">${escapeHtml(e.message)}</div>
+      </div>
+    `;
+    dryBtn.disabled = false;
+    if (!dryRun) {
+      // 진짜 적용 실패 → 드라이런만 다시 가능
+      realBtn.disabled = false;
+      realBtn.style.opacity = '1';
+      realBtn.style.cursor = 'pointer';
+    }
+    return;
+  }
+
+  dryBtn.disabled = false;
 }
 
 function switchLangTab(lang) {
