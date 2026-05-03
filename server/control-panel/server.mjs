@@ -2327,6 +2327,46 @@ function unifyVolPattern(text, newVolNumber) {
   return result ? `${result} [Vol.${newVolNumber}]` : `[Vol.${newVolNumber}]`;
 }
 
+// === 시리즈 키 추출 ===
+//  표준 패턴 [시리즈명] ... 으로 시작하는 영상에서 시리즈명 반환.
+//  안전 장치:
+//    - 시리즈명이 Vol/Volume/Episode/EP/Pt/Part 로 시작 → null (Vol.5 자체 매치 방지)
+//    - 시리즈명이 1~2글자 → null (잘못된 매치 방지)
+//    - 대괄호 X → null (변형/DRAFT 패턴 안전 무시)
+function extractSeriesKey(title) {
+  if (!title) return null;
+  const m = String(title).match(/^\[([^\]]+)\]/);
+  if (!m) return null;
+  const candidate = m[1].trim();
+  if (/^(Vol|Volume|Episode|EP|Pt|Part)[\s.\d]/i.test(candidate)) return null;
+  if (candidate.length < 3) return null;
+  return candidate;
+}
+
+function validateExtractSeriesKey() {
+  const cases = [
+    { input: '[New Orleans Jazz] Upbeat swing jazz [Vol.6]', expected: 'New Orleans Jazz' },
+    { input: '[Showa Era] Smooth jazz [Vol.3]', expected: 'Showa Era' },
+    { input: '[Vol.5] No series', expected: null },
+    { input: 'No bracket title', expected: null },
+    { input: '[ABC]', expected: 'ABC' },
+    { input: '[A] short', expected: null },
+    { input: '[No Ads] New Orleans Jazz...', expected: 'No Ads' }, // 형님 검토 필요
+  ];
+  let pass = 0;
+  cases.forEach((c, i) => {
+    const r = extractSeriesKey(c.input);
+    const ok = r === c.expected;
+    console.log(`[Series] ${ok ? '✓' : '✗'} case ${i + 1}: "${c.input.substring(0, 40)}" → ${r === null ? 'null' : `"${r}"`}`);
+    if (!ok) console.log(`  expected: ${c.expected === null ? 'null' : `"${c.expected}"`}`);
+    ok && pass++;
+  });
+  console.log(`[Series] ${pass}/${cases.length} pass`);
+}
+if (process.env.NODE_ENV !== 'production') {
+  validateExtractSeriesKey();
+}
+
 // === Vol 패턴 in-place 교체 (description 용) ===
 //  description 의 Vol 미러 라인 (예: "[Title] [Vol.8]" 또는 "(8집)") 을 새 Vol 로 갱신.
 //  unifyVolPattern 과 달리 끝에 append 안 함 — 위치 보존, 모든 언어 패턴 in-place 교체.
@@ -2617,39 +2657,56 @@ app.post('/api/uploader/path-a/preview', async (req, res) => {
   }
 });
 
-// === GET /api/youtube/latest-vol ===
+// === GET /api/youtube/latest-vol?series=... ===
 //  채널 최근 50개 영상에서 Vol 숫자 추출 → 최댓값 반환.
+//  series query 있으면 같은 시리즈만 필터링.
 app.get('/api/youtube/latest-vol', async (req, res) => {
   if (!ytAuthGate(req, res)) return;
+  const seriesFilter = req.query.series ? String(req.query.series) : null;
   try {
     const videos = await ytGetMyVideos(50);
-    const volNumbers = videos
+    const filtered = seriesFilter
+      ? videos.filter((v) => extractSeriesKey(v.title) === seriesFilter)
+      : videos;
+    const volNumbers = filtered
       .map((v) => extractVolNumber(v.title))
       .filter((n) => n !== null && Number.isFinite(n));
     const latestVol = volNumbers.length ? Math.max(...volNumbers) : 0;
-    res.json({ ok: true, latestVol, sampleCount: volNumbers.length });
+    res.json({ ok: true, latestVol, sampleCount: volNumbers.length, seriesFilter });
   } catch (e) {
     console.error('[YT] latest-vol 실패:', e?.message || e);
     res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 
-// === GET /api/youtube/check-vol/:volNumber ===
+// === GET /api/youtube/check-vol/:volNumber?series=... ===
 //  채널 영상 중에 같은 Vol 번호 가진 영상이 있는지 검사.
+//  series query 있으면 같은 시리즈만 필터링.
 app.get('/api/youtube/check-vol/:volNumber', async (req, res) => {
   if (!ytAuthGate(req, res)) return;
   const targetVol = parseInt(req.params.volNumber, 10);
+  const seriesFilter = req.query.series ? String(req.query.series) : null;
   if (!Number.isFinite(targetVol) || targetVol < 1) {
     return res.status(400).json({ ok: false, error: '유효한 Vol 번호 필요' });
   }
   try {
     const videos = await ytGetMyVideos(50);
-    const matches = videos.filter((v) => extractVolNumber(v.title) === targetVol);
+    const matches = videos.filter((v) => {
+      if (extractVolNumber(v.title) !== targetVol) return false;
+      if (seriesFilter && extractSeriesKey(v.title) !== seriesFilter) return false;
+      return true;
+    });
     res.json({
       ok: true,
       targetVol,
+      seriesFilter,
       hasDuplicate: matches.length > 0,
-      duplicates: matches.map((v) => ({ id: v.id, title: v.title, publishedAt: v.publishedAt })),
+      duplicates: matches.map((v) => ({
+        id: v.id,
+        title: v.title,
+        publishedAt: v.publishedAt,
+        series: extractSeriesKey(v.title),
+      })),
     });
   } catch (e) {
     console.error('[YT] check-vol 실패:', e?.message || e);

@@ -792,6 +792,17 @@ function extractVolNumberClient(text) {
   return null;
 }
 
+// 클라이언트 측 시리즈 키 추출 (server 의 extractSeriesKey 와 동일)
+function extractSeriesKeyClient(title) {
+  if (!title) return null;
+  const m = String(title).match(/^\[([^\]]+)\]/);
+  if (!m) return null;
+  const candidate = m[1].trim();
+  if (/^(Vol|Volume|Episode|EP|Pt|Part)[\s.\d]/i.test(candidate)) return null;
+  if (candidate.length < 3) return null;
+  return candidate;
+}
+
 let pathAVolCheckTimer = null;
 
 async function selectPathASource(videoId) {
@@ -807,15 +818,21 @@ async function selectPathASource(videoId) {
 }
 
 // Vol 번호 입력 박스 — source 선택 시 표시.
-//  default newVol = max(sourceVol+1, latestVol+1) (서버 fetch).
-//  input change → 300ms debounce → /check-vol/:n → 결과 표시.
+//  시리즈 자동 추출 (제목에 [...] prefix 있으면) → 같은 시리즈 내 검증.
+//  시리즈 인식 X 면 채널 전체 Vol 검증 (변형/DRAFT 패턴 안전).
+//  default newVol = max(sourceVol+1, latestVol+1).
+//  input change → 300ms debounce → /check-vol/:n?series=... → 결과 표시.
 async function showVolNumberInput(videoId) {
   const source = (uploader.videos || []).find((v) => v.id === videoId);
   const sourceVol = source ? extractVolNumberClient(source.title) : null;
+  const seriesKey = source ? extractSeriesKeyClient(source.title) : null;
 
   let latestVol = 0;
   try {
-    const r = await fetch('/api/youtube/latest-vol');
+    const url = seriesKey
+      ? `/api/youtube/latest-vol?series=${encodeURIComponent(seriesKey)}`
+      : '/api/youtube/latest-vol';
+    const r = await fetch(url);
     const data = await r.json();
     if (data.ok) latestVol = data.latestVol || 0;
   } catch (e) {
@@ -834,13 +851,19 @@ async function showVolNumberInput(videoId) {
       cancelBtn.parentElement.parentElement.insertBefore(box, cancelBtn.parentElement);
     }
   }
+  box.dataset.series = seriesKey || '';
+
+  const seriesLine = seriesKey
+    ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;">시리즈: <strong style="color:var(--jazz-gold);">[${escapeHtml(seriesKey)}]</strong></div>`
+    : `<div style="font-size:11px;color:#f55;margin-bottom:6px;">⚠️ 시리즈 인식 X — 제목에 [...] prefix 없음. 채널 전체 Vol 로 검증.</div>`;
 
   box.innerHTML = `
     <div style="color:var(--jazz-gold);font-size:12px;font-weight:600;margin-bottom:6px;">📊 Vol 번호 설정</div>
+    ${seriesLine}
     <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
       Source 영상 Vol: <strong style="color:var(--text);">${sourceVol ?? '?'}</strong>
       &nbsp;·&nbsp;
-      가장 최근 Vol: <strong style="color:var(--text);">${latestVol}</strong>
+      ${seriesKey ? '같은 시리즈 ' : '채널 전체 '}최근 Vol: <strong style="color:var(--text);">${latestVol}</strong>
     </div>
     <div style="display:flex;align-items:center;gap:10px;">
       <label style="color:var(--text-muted);font-size:11px;">새 영상 Vol:</label>
@@ -853,13 +876,13 @@ async function showVolNumberInput(videoId) {
   const input = document.getElementById('newVolInput');
   input.addEventListener('input', () => {
     clearTimeout(pathAVolCheckTimer);
-    pathAVolCheckTimer = setTimeout(() => checkVolDuplicate(parseInt(input.value, 10)), 300);
+    pathAVolCheckTimer = setTimeout(() => checkVolDuplicate(parseInt(input.value, 10), seriesKey), 300);
   });
   // 초기 체크
-  checkVolDuplicate(defaultNewVol);
+  checkVolDuplicate(defaultNewVol, seriesKey);
 }
 
-async function checkVolDuplicate(volNumber) {
+async function checkVolDuplicate(volNumber, seriesKey) {
   const resultEl = document.getElementById('volCheckResult');
   if (!resultEl) return;
   if (!Number.isFinite(volNumber) || volNumber < 1) {
@@ -867,7 +890,10 @@ async function checkVolDuplicate(volNumber) {
     return;
   }
   try {
-    const r = await fetch(`/api/youtube/check-vol/${volNumber}`);
+    const url = seriesKey
+      ? `/api/youtube/check-vol/${volNumber}?series=${encodeURIComponent(seriesKey)}`
+      : `/api/youtube/check-vol/${volNumber}`;
+    const r = await fetch(url);
     const data = await r.json();
     if (!data.ok) {
       resultEl.style.color = '#f55';
@@ -876,10 +902,10 @@ async function checkVolDuplicate(volNumber) {
     }
     if (data.hasDuplicate) {
       resultEl.style.color = '#f55';
-      resultEl.textContent = `⚠️ Vol.${volNumber} 이미 존재 (${data.duplicates.length}개)`;
+      resultEl.textContent = `⚠️ ${seriesKey ? '같은 시리즈 ' : ''}Vol.${volNumber} 이미 존재 (${data.duplicates.length}개)`;
     } else {
       resultEl.style.color = '#4c4';
-      resultEl.textContent = `✓ Vol.${volNumber} 사용 가능`;
+      resultEl.textContent = `✓ ${seriesKey ? `[${seriesKey}] ` : ''}Vol.${volNumber} 사용 가능`;
     }
   } catch (e) {
     resultEl.style.color = '#f55';
@@ -900,13 +926,18 @@ async function applyPathA() {
     return;
   }
 
-  // 중복 시 confirm
+  // 중복 시 confirm — 시리즈 포함 검사
+  const seriesKey = document.getElementById('volInputContainer')?.dataset.series || '';
   try {
-    const cr = await fetch(`/api/youtube/check-vol/${newVol}`);
+    const url = seriesKey
+      ? `/api/youtube/check-vol/${newVol}?series=${encodeURIComponent(seriesKey)}`
+      : `/api/youtube/check-vol/${newVol}`;
+    const cr = await fetch(url);
     const cd = await cr.json();
     if (cd.ok && cd.hasDuplicate) {
       const titles = cd.duplicates.map((d) => `- ${d.title}`).join('\n');
-      const proceed = confirm(`⚠️ Vol.${newVol} 이미 존재 (${cd.duplicates.length}개):\n\n${titles}\n\n그래도 진행?`);
+      const prefix = seriesKey ? `[${seriesKey}] ` : '';
+      const proceed = confirm(`⚠️ ${prefix}Vol.${newVol} 이미 존재 (${cd.duplicates.length}개):\n\n${titles}\n\n그래도 진행?`);
       if (!proceed) {
         if (btn) { btn.disabled = false; btn.textContent = '적용'; }
         return;
@@ -962,6 +993,24 @@ function showPathAPreview(data) {
     `;
   }).join('');
 
+  const seriesKey = extractSeriesKeyClient(sourceMeta.title);
+  const sourceVolForBox = data.sourceVol ?? extractVolNumberClient(sourceMeta.title);
+  const newVolForBox = generated.appliedVol;
+  const volDelta = (Number.isFinite(sourceVolForBox) && Number.isFinite(newVolForBox))
+    ? newVolForBox - sourceVolForBox : null;
+  const deltaStr = volDelta == null ? '' : ` (${volDelta > 0 ? '+' : ''}${volDelta})`;
+  const applyInfoHtml = `
+    <div style="background:#161616;border-left:3px solid var(--jazz-gold);padding:10px 12px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+      <div style="color:var(--jazz-gold);font-size:12px;font-weight:600;">📋 적용 정보</div>
+      <div style="color:var(--text-muted);font-size:11px;margin-top:6px;line-height:1.7;">
+        ${seriesKey ? `시리즈: <strong style="color:var(--text);">[${escapeHtml(seriesKey)}]</strong><br>` : ''}
+        Source: <strong style="color:var(--text);">Vol.${sourceVolForBox ?? '?'}</strong>
+        &nbsp;→&nbsp;
+        New: <strong style="color:var(--jazz-gold);">Vol.${newVolForBox ?? '?'}</strong>${deltaStr}
+      </div>
+    </div>
+  `;
+
   const missingHtml = generated.missingLanguages?.length ? `
     <div style="background:#3a1818;border-left:3px solid #f55;padding:10px 12px;margin-bottom:14px;font-size:11px;color:#fdd;border-radius:0 4px 4px 0;">
       ⚠ Source 영상에 없는 언어 (${generated.missingLanguages.length}개):
@@ -976,6 +1025,7 @@ function showPathAPreview(data) {
 
   container.innerHTML = `
     <h3 style="color:var(--jazz-gold);margin:0 0 12px;font-size:13px;font-weight:600;">미리보기</h3>
+    ${applyInfoHtml}
     ${missingHtml}
     <div id="pathALangTabs" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px;">${langTabsHtml}</div>
 
