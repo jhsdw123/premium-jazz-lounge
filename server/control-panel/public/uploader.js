@@ -45,6 +45,148 @@ const LANG_LABELS = {
   'id': 'Bahasa Indonesia', 'ms': 'Bahasa Melayu', 'tl': 'Filipino',
 };
 
+const CATEGORY_LABELS = {
+  '1': 'Film & Animation', '2': 'Autos & Vehicles', '10': 'Music',
+  '15': 'Pets & Animals', '17': 'Sports', '19': 'Travel & Events',
+  '20': 'Gaming', '22': 'People & Blogs', '23': 'Comedy',
+  '24': 'Entertainment', '25': 'News & Politics', '26': 'Howto & Style',
+  '27': 'Education', '28': 'Science & Technology',
+};
+
+let playlistsCache = null;
+async function getPlaylistsCache() {
+  if (playlistsCache) return playlistsCache;
+  try {
+    const r = await fetch('/api/youtube/playlists');
+    const data = await r.json();
+    if (data.ok) {
+      playlistsCache = (data.playlists || []).reduce((acc, p) => {
+        acc[p.id] = p.title;
+        return acc;
+      }, {});
+    } else {
+      playlistsCache = {};
+    }
+  } catch (e) {
+    console.warn('[Playlists] cache fetch 실패:', e.message);
+    playlistsCache = {};
+  }
+  return playlistsCache;
+}
+
+// 드라이런 결과 카드 렌더링 — 코드 → 카드 형식.
+async function renderDryRunCard(data) {
+  const plan = data.plan || {};
+  const snippet = plan.updateSnippet || {};
+  const desc = snippet.description || '';
+
+  const descAllLines = desc.split('\n');
+  const descPreviewLines = descAllLines.filter((l) => l.trim()).slice(0, 7);
+  const descPreview = descPreviewLines.join('\n');
+  const moreLines = descAllLines.length - descPreviewLines.length;
+
+  const timelineLines = descAllLines.filter((l) => /^\d{1,2}:\d{2}/.test(l.trim()));
+
+  const localizations = window.uploaderState.generatedMeta?.localizations || {};
+  const langList = Object.keys(localizations).sort();
+  const defaultLang = snippet.defaultLanguage;
+  const allLangs = defaultLang
+    ? [defaultLang, ...langList.filter((l) => l !== defaultLang)]
+    : langList;
+
+  const categoryLabel = CATEGORY_LABELS[snippet.categoryId] || `Category ${snippet.categoryId ?? '—'}`;
+
+  // 예약 시간 (SGT + KST)
+  let scheduleHtml = '<div style="color:var(--text-muted);">변경 X (즉시 / 기존 status 유지)</div>';
+  if (plan.updateStatus && /^예약: /.test(plan.updateStatus)) {
+    const isoTime = plan.updateStatus.replace(/^예약:\s*/, '');
+    const dt = new Date(isoTime);
+    if (Number.isFinite(dt.getTime())) {
+      const sgt = dt.toLocaleString('en-SG', { timeZone: 'Asia/Singapore', hour12: false });
+      const kst = dt.toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
+      scheduleHtml = `
+        <div>🇸🇬 <strong>${escapeHtml(sgt)}</strong> SGT</div>
+        <div>🇰🇷 <strong>${escapeHtml(kst)}</strong> KST</div>
+      `;
+    }
+  }
+
+  // 재생목록
+  const playlistIds = plan.addToPlaylists || [];
+  let playlistHtml;
+  if (!playlistIds.length) {
+    playlistHtml = `
+      <div style="color:#f55;">⚠️ 추가될 재생목록 없음</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">⚙️ 설정에서 default 재생목록 ☑ 필요</div>
+    `;
+  } else {
+    const map = await getPlaylistsCache();
+    const items = playlistIds.map((id) => {
+      const name = map[id] || `(이름 미상: ${id})`;
+      return `<div style="font-size:12px;color:var(--text);margin-top:4px;">✅ ${escapeHtml(name)}</div>`;
+    }).join('');
+    playlistHtml = `
+      <div style="color:#4c4;margin-bottom:4px;">${playlistIds.length}개 재생목록 추가 예정</div>
+      ${items}
+    `;
+  }
+
+  const langLabelsLine = allLangs.length
+    ? allLangs.map((l) => `${LANG_LABELS[l] || l}`).join(' · ')
+    : '<span style="color:var(--text-muted);">(없음)</span>';
+
+  const card = (gold, bodyHtml) => `
+    <div style="background:#161616;border:1px solid #2a2a2a;border-radius:6px;padding:12px 14px;margin-top:8px;">
+      <div style="color:var(--jazz-gold);font-size:12px;font-weight:600;margin-bottom:8px;">${gold}</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.6;">${bodyHtml}</div>
+    </div>
+  `;
+
+  return `
+    <div style="background:#0a2a0a;border-left:3px solid #4c4;padding:12px 14px;margin-top:8px;border-radius:0 4px 4px 0;">
+      <div style="color:#4c4;font-size:13px;font-weight:600;">✅ 드라이런 완료</div>
+      <div style="color:var(--text-muted);font-size:11px;margin-top:4px;font-family:ui-monospace,Menlo,monospace;word-break:break-all;">백업: ${escapeHtml(data.backup || '없음')}</div>
+    </div>
+
+    ${card('📝 제목', `<div style="font-size:14px;font-weight:600;line-height:1.4;">${escapeHtml(snippet.title || '')}</div>`)}
+
+    ${card('📋 기본 정보', `
+      <div>기본 언어: <strong>${escapeHtml(LANG_LABELS[defaultLang] || defaultLang || '—')} (${escapeHtml(defaultLang || '—')})</strong></div>
+      <div>카테고리: <strong>${escapeHtml(categoryLabel)}</strong></div>
+      <div>태그 수: <strong>${(snippet.tags || []).length}개</strong></div>
+    `)}
+
+    ${card('⏰ 예약 시간', scheduleHtml)}
+
+    ${card('🌐 다국어 번역', `
+      <div style="margin-bottom:6px;"><strong>${allLangs.length}개 언어</strong> 적용 예정</div>
+      <div style="font-size:11px;color:var(--text-muted);line-height:1.6;">${langLabelsLine}</div>
+    `)}
+
+    ${card('📂 재생목록', playlistHtml)}
+
+    ${card('📜 설명 (앞 7줄)', `
+      <pre style="font-size:11px;color:#ccc;white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto;padding:8px 10px;background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;margin:0;font-family:ui-monospace,Menlo,monospace;line-height:1.5;">${escapeHtml(descPreview)}</pre>
+      ${moreLines > 0 ? `<div style="font-size:11px;color:var(--text-muted);margin-top:6px;">… 외 ${moreLines}줄</div>` : ''}
+    `)}
+
+    ${timelineLines.length ? card(`🎵 타임라인 (${timelineLines.length}곡)`, `
+      <div style="font-size:12px;color:#ccc;line-height:1.7;font-family:ui-monospace,Menlo,monospace;max-height:320px;overflow:auto;padding:8px 10px;background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;">
+        ${timelineLines.map((l) => `<div>${escapeHtml(l)}</div>`).join('')}
+      </div>
+    `) : ''}
+
+    <details style="margin-top:10px;">
+      <summary style="color:var(--text-muted);font-size:11px;cursor:pointer;padding:6px 0;">🔧 Raw JSON (디버그)</summary>
+      <pre style="font-size:10px;color:#888;max-height:240px;overflow:auto;padding:8px 10px;background:#0a0a0a;border:1px solid #1a1a1a;border-radius:4px;margin:6px 0 0;font-family:ui-monospace,Menlo,monospace;line-height:1.5;">${escapeHtml(JSON.stringify(plan, null, 2))}</pre>
+    </details>
+
+    <div style="color:var(--text-muted);font-size:11px;margin-top:10px;text-align:center;">
+      검증 후 "🚀 진짜 적용" 클릭.
+    </div>
+  `;
+}
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -1232,14 +1374,7 @@ async function runApply(dryRun) {
     if (!data.ok) throw new Error(data.error || `HTTP ${r.status}`);
 
     if (dryRun) {
-      resultDiv.innerHTML = `
-        <div style="background:#0a2a0a;border-left:3px solid #4c4;padding:12px;margin-top:8px;border-radius:0 4px 4px 0;">
-          <div style="color:#4c4;font-size:12px;font-weight:600;margin-bottom:6px;">✅ 드라이런 완료</div>
-          <div style="color:var(--text-muted);font-size:10px;margin-bottom:8px;">백업: ${escapeHtml(data.backup)}</div>
-          <pre style="font-size:10px;line-height:1.5;color:#ccc;background:#000;padding:10px;border-radius:4px;overflow-x:auto;margin:0;">${escapeHtml(JSON.stringify(data.plan, null, 2))}</pre>
-          <div style="color:var(--text-muted);font-size:11px;margin-top:8px;">검증 후 "🚀 진짜 적용" 클릭.</div>
-        </div>
-      `;
+      resultDiv.innerHTML = await renderDryRunCard(data);
       // 진짜 적용 활성화
       realBtn.disabled = false;
       realBtn.style.opacity = '1';
