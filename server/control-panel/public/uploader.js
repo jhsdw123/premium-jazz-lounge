@@ -776,21 +776,145 @@ function filterPathASource(ev) {
   });
 }
 
-function selectPathASource(videoId) {
+// 클라이언트 측 Vol 추출 (server 의 extractVolNumber 와 동일)
+function extractVolNumberClient(text) {
+  if (!text) return null;
+  const patterns = [
+    /\[Vol\.?\s*(\d+)\]/i,
+    /\(Vol\.?\s*(\d+)\)/i,
+    /\bVol\.?\s*(\d+)\b/i,
+    /\[(\d{1,3})\]\s*$/,
+  ];
+  for (const p of patterns) {
+    const m = String(text).match(p);
+    if (m) return parseInt(m[1], 10);
+  }
+  return null;
+}
+
+let pathAVolCheckTimer = null;
+
+async function selectPathASource(videoId) {
   pathASelectedSourceVideoId = videoId;
   document.querySelectorAll('.path-a-source-item').forEach((item) => {
     const isSel = item.dataset.videoId === videoId;
     item.style.background = isSel ? '#2a2418' : 'transparent';
     item.style.borderLeft = isSel ? '3px solid var(--jazz-gold)' : '3px solid transparent';
   });
+  await showVolNumberInput(videoId);
   const btn = document.getElementById('pathAApplyBtn');
   if (btn) btn.disabled = false;
+}
+
+// Vol 번호 입력 박스 — source 선택 시 표시.
+//  default newVol = max(sourceVol+1, latestVol+1) (서버 fetch).
+//  input change → 300ms debounce → /check-vol/:n → 결과 표시.
+async function showVolNumberInput(videoId) {
+  const source = (uploader.videos || []).find((v) => v.id === videoId);
+  const sourceVol = source ? extractVolNumberClient(source.title) : null;
+
+  let latestVol = 0;
+  try {
+    const r = await fetch('/api/youtube/latest-vol');
+    const data = await r.json();
+    if (data.ok) latestVol = data.latestVol || 0;
+  } catch (e) {
+    console.warn('[Vol] latest-vol fetch 실패:', e.message);
+  }
+
+  const defaultNewVol = Math.max((sourceVol || 0) + 1, latestVol + 1);
+
+  let box = document.getElementById('volInputContainer');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'volInputContainer';
+    box.style.cssText = 'margin:14px 0;padding:12px 14px;background:#161616;border:1px solid #2a2a2a;border-radius:6px;';
+    const cancelBtn = document.getElementById('pathACancelBtn');
+    if (cancelBtn?.parentElement) {
+      cancelBtn.parentElement.parentElement.insertBefore(box, cancelBtn.parentElement);
+    }
+  }
+
+  box.innerHTML = `
+    <div style="color:var(--jazz-gold);font-size:12px;font-weight:600;margin-bottom:6px;">📊 Vol 번호 설정</div>
+    <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
+      Source 영상 Vol: <strong style="color:var(--text);">${sourceVol ?? '?'}</strong>
+      &nbsp;·&nbsp;
+      가장 최근 Vol: <strong style="color:var(--text);">${latestVol}</strong>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <label style="color:var(--text-muted);font-size:11px;">새 영상 Vol:</label>
+      <input type="number" id="newVolInput" value="${defaultNewVol}" min="1" max="9999"
+        style="width:80px;padding:5px 7px;background:#0a0a0a;color:var(--text);border:1px solid #444;border-radius:4px;font-size:13px;font-family:ui-monospace,Menlo,monospace;">
+      <span id="volCheckResult" style="font-size:11px;"></span>
+    </div>
+  `;
+
+  const input = document.getElementById('newVolInput');
+  input.addEventListener('input', () => {
+    clearTimeout(pathAVolCheckTimer);
+    pathAVolCheckTimer = setTimeout(() => checkVolDuplicate(parseInt(input.value, 10)), 300);
+  });
+  // 초기 체크
+  checkVolDuplicate(defaultNewVol);
+}
+
+async function checkVolDuplicate(volNumber) {
+  const resultEl = document.getElementById('volCheckResult');
+  if (!resultEl) return;
+  if (!Number.isFinite(volNumber) || volNumber < 1) {
+    resultEl.textContent = '';
+    return;
+  }
+  try {
+    const r = await fetch(`/api/youtube/check-vol/${volNumber}`);
+    const data = await r.json();
+    if (!data.ok) {
+      resultEl.style.color = '#f55';
+      resultEl.textContent = `(검사 실패: ${data.error || ''})`;
+      return;
+    }
+    if (data.hasDuplicate) {
+      resultEl.style.color = '#f55';
+      resultEl.textContent = `⚠️ Vol.${volNumber} 이미 존재 (${data.duplicates.length}개)`;
+    } else {
+      resultEl.style.color = '#4c4';
+      resultEl.textContent = `✓ Vol.${volNumber} 사용 가능`;
+    }
+  } catch (e) {
+    resultEl.style.color = '#f55';
+    resultEl.textContent = `(검사 실패: ${e.message})`;
+  }
 }
 
 async function applyPathA() {
   if (!pathASelectedSourceVideoId) return;
   const btn = document.getElementById('pathAApplyBtn');
   if (btn) { btn.disabled = true; btn.textContent = '처리 중…'; }
+
+  const newVolRaw = parseInt(document.getElementById('newVolInput')?.value, 10);
+  const newVol = Number.isFinite(newVolRaw) && newVolRaw >= 1 ? newVolRaw : null;
+  if (newVol == null) {
+    alert('유효한 Vol 번호 입력 필요');
+    if (btn) { btn.disabled = false; btn.textContent = '적용'; }
+    return;
+  }
+
+  // 중복 시 confirm
+  try {
+    const cr = await fetch(`/api/youtube/check-vol/${newVol}`);
+    const cd = await cr.json();
+    if (cd.ok && cd.hasDuplicate) {
+      const titles = cd.duplicates.map((d) => `- ${d.title}`).join('\n');
+      const proceed = confirm(`⚠️ Vol.${newVol} 이미 존재 (${cd.duplicates.length}개):\n\n${titles}\n\n그래도 진행?`);
+      if (!proceed) {
+        if (btn) { btn.disabled = false; btn.textContent = '적용'; }
+        return;
+      }
+    }
+  } catch (e) {
+    console.warn('[Vol] check-vol 실패 (계속 진행):', e.message);
+  }
 
   let data;
   try {
@@ -800,6 +924,7 @@ async function applyPathA() {
       body: JSON.stringify({
         sourceVideoId: pathASelectedSourceVideoId,
         newTracks: window.uploaderState.tracks,
+        newVol,
       }),
     });
     data = await r.json();
@@ -814,7 +939,7 @@ async function applyPathA() {
   window.uploaderState.reuseSourceVideo = data.sourceMeta;
   window.uploaderState.generatedMeta = data.generated;
   window.uploaderState.missingLanguages = data.generated.missingLanguages || [];
-  console.log('[Path A] generatedMeta:', data.generated);
+  console.log('[Path A] generatedMeta:', data.generated, 'sourceVol:', data.sourceVol, 'appliedVol:', data.generated.appliedVol);
   showPathAPreview(data);
 }
 

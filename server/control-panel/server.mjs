@@ -2327,6 +2327,55 @@ function unifyVolPattern(text, newVolNumber) {
   return result ? `${result} [Vol.${newVolNumber}]` : `[Vol.${newVolNumber}]`;
 }
 
+// === Vol 패턴 in-place 교체 (description 용) ===
+//  description 의 Vol 미러 라인 (예: "[Title] [Vol.8]" 또는 "(8집)") 을 새 Vol 로 갱신.
+//  unifyVolPattern 과 달리 끝에 append 안 함 — 위치 보존, 모든 언어 패턴 in-place 교체.
+//  주의: 프랑스어의 끝-[N] 패턴은 description 에서 매치 X (1930 등 4자리 안전).
+function replaceVolPattern(text, newVolNumber) {
+  if (!text) return text;
+  const newPattern = `[Vol.${newVolNumber}]`;
+  let result = String(text);
+  result = result.replace(/\[Vol\.?\s*\d+\]/gi, newPattern);     // [Vol.5] / [Vol5]
+  result = result.replace(/\(Vol\.?\s*\d+\)/gi, newPattern);     // (Vol 5)
+  result = result.replace(/\(\s*\d+\s*집\s*\)/g, newPattern);    // (5집)
+  result = result.replace(/\(Том\s*\d+\)/gi, newPattern);        // (Том 5)
+  result = result.replace(/\(เล่ม\s*\d+\)/g, newPattern);        // (เล่ม 5)
+  result = result.replace(/\(第\s*\d+\s*卷\)/g, newPattern);     // (第 5 卷)
+  return result;
+}
+
+function validateReplaceVolPattern() {
+  const cases = [
+    { input: '[New Orleans Jazz] Upbeat swing jazz [Vol.8]', newVol: 9,
+      expected: '[New Orleans Jazz] Upbeat swing jazz [Vol.9]' },
+    { input: '한국어 제목 (8집)\n설명', newVol: 9,
+      expected: '한국어 제목 [Vol.9]\n설명' },
+    { input: '中文 (第 8 卷) 설명', newVol: 9,
+      expected: '中文 [Vol.9] 설명' },
+    { input: 'Multi line\n[Vol.8] middle\nmore text', newVol: 9,
+      expected: 'Multi line\n[Vol.9] middle\nmore text' },
+    { input: 'No vol here', newVol: 9, expected: 'No vol here' },
+    { input: 'Big Band Classics from the [1930] era', newVol: 9,
+      expected: 'Big Band Classics from the [1930] era' },
+  ];
+  let pass = 0;
+  cases.forEach((c, i) => {
+    const r = replaceVolPattern(c.input, c.newVol);
+    const ok = r === c.expected;
+    console.log(`[ReplaceVol] ${ok ? '✓' : '✗'} case ${i + 1}`);
+    if (!ok) {
+      console.log(`  in:       "${c.input}"`);
+      console.log(`  got:      "${r}"`);
+      console.log(`  expected: "${c.expected}"`);
+    }
+    ok && pass++;
+  });
+  console.log(`[ReplaceVol] ${pass}/${cases.length} pass`);
+}
+if (process.env.NODE_ENV !== 'production') {
+  validateReplaceVolPattern();
+}
+
 // === 검증 (개발 환경 1회): 형님 17개 언어 진짜 데이터 ===
 function validateUnifyVol() {
   const cases = [
@@ -2448,22 +2497,30 @@ function replaceTimeline(description, newTracks) {
 }
 
 // === Source 메타 → 변경된 generatedMeta ===
-//  Vol 패러다임: source title 에서 Vol 숫자 1회 추출 → +1 → 모든 언어 title 에 통일 적용.
-//  description 은 timeline + Vol 해시태그 정리만 (description 의 Vol 미러는 의도적으로 spec 따름).
+//  Vol 패러다임:
+//    title    — 알려진 모든 Vol 패턴 제거 + 끝에 [Vol.N] 통일 추가 (unifyVolPattern)
+//    description — Vol 미러 in-place 교체 ([Vol.X] / (X집) / (Том X) / (第 X 卷) 등 → [Vol.N])
+//  newVol 명시 없으면 source title 의 Vol +1 사용 (기본).
 //  빠진 언어는 missingLanguages 배열에. 태그는 그대로 복사.
-function reuseMetaWithChanges(sourceMeta, newTracks) {
-  const sourceVol = extractVolNumber(sourceMeta.title);
-  if (!sourceVol) {
-    console.warn('[Vol] 소스 제목에서 Vol 숫자 못 찾음 — 0 부터 시작:', sourceMeta.title);
+function reuseMetaWithChanges(sourceMeta, newTracks, newVol) {
+  let appliedVol = newVol;
+  if (typeof appliedVol !== 'number' || !Number.isFinite(appliedVol)) {
+    const sourceVol = extractVolNumber(sourceMeta.title);
+    if (!sourceVol) {
+      console.warn('[Vol] 소스 제목에서 Vol 숫자 못 찾음 — 0 부터 시작:', sourceMeta.title);
+    }
+    appliedVol = (sourceVol || 0) + 1;
   }
-  const newVol = (sourceVol || 0) + 1;
   const defaultLang = sourceMeta.defaultLanguage || 'en';
 
   const result = {
     defaultLanguage: defaultLang,
-    title: { default: unifyVolPattern(sourceMeta.title, newVol) },
+    appliedVol,
+    title: { default: unifyVolPattern(sourceMeta.title, appliedVol) },
     description: {
-      default: removeVolHashtags(replaceTimeline(sourceMeta.description, newTracks)),
+      default: removeVolHashtags(
+        replaceVolPattern(replaceTimeline(sourceMeta.description, newTracks), appliedVol),
+      ),
     },
     tags: Array.isArray(sourceMeta.tags) ? [...sourceMeta.tags] : [],
     localizations: {},
@@ -2478,9 +2535,12 @@ function reuseMetaWithChanges(sourceMeta, newTracks) {
       continue;
     }
     result.localizations[lang] = {
-      title: unifyVolPattern(localized.title || sourceMeta.title, newVol),
+      title: unifyVolPattern(localized.title || sourceMeta.title, appliedVol),
       description: removeVolHashtags(
-        replaceTimeline(localized.description || sourceMeta.description, newTracks),
+        replaceVolPattern(
+          replaceTimeline(localized.description || sourceMeta.description, newTracks),
+          appliedVol,
+        ),
       ),
     };
   }
@@ -2526,7 +2586,7 @@ app.get('/api/youtube/videos/:id/meta', async (req, res) => {
 //  source 영상 fetch → Vol +1 + 타임라인 교체 → generatedMeta + missingLanguages 반환.
 app.post('/api/uploader/path-a/preview', async (req, res) => {
   if (!ytAuthGate(req, res)) return;
-  const { sourceVideoId, newTracks } = req.body || {};
+  const { sourceVideoId, newTracks, newVol } = req.body || {};
   if (!sourceVideoId || !Array.isArray(newTracks)) {
     return res.status(400).json({ ok: false, error: 'sourceVideoId + newTracks 필요' });
   }
@@ -2547,10 +2607,52 @@ app.post('/api/uploader/path-a/preview', async (req, res) => {
       localizations: video.localizations || {},
     };
 
-    const generated = reuseMetaWithChanges(sourceMeta, newTracks);
-    res.json({ ok: true, generated, sourceMeta });
+    const explicitVol = (typeof newVol === 'number' && Number.isFinite(newVol)) ? newVol : undefined;
+    const generated = reuseMetaWithChanges(sourceMeta, newTracks, explicitVol);
+    const sourceVol = extractVolNumber(sourceMeta.title);
+    res.json({ ok: true, generated, sourceMeta, sourceVol });
   } catch (e) {
     console.error('[Path A] preview 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// === GET /api/youtube/latest-vol ===
+//  채널 최근 50개 영상에서 Vol 숫자 추출 → 최댓값 반환.
+app.get('/api/youtube/latest-vol', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  try {
+    const videos = await ytGetMyVideos(50);
+    const volNumbers = videos
+      .map((v) => extractVolNumber(v.title))
+      .filter((n) => n !== null && Number.isFinite(n));
+    const latestVol = volNumbers.length ? Math.max(...volNumbers) : 0;
+    res.json({ ok: true, latestVol, sampleCount: volNumbers.length });
+  } catch (e) {
+    console.error('[YT] latest-vol 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// === GET /api/youtube/check-vol/:volNumber ===
+//  채널 영상 중에 같은 Vol 번호 가진 영상이 있는지 검사.
+app.get('/api/youtube/check-vol/:volNumber', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  const targetVol = parseInt(req.params.volNumber, 10);
+  if (!Number.isFinite(targetVol) || targetVol < 1) {
+    return res.status(400).json({ ok: false, error: '유효한 Vol 번호 필요' });
+  }
+  try {
+    const videos = await ytGetMyVideos(50);
+    const matches = videos.filter((v) => extractVolNumber(v.title) === targetVol);
+    res.json({
+      ok: true,
+      targetVol,
+      hasDuplicate: matches.length > 0,
+      duplicates: matches.map((v) => ({ id: v.id, title: v.title, publishedAt: v.publishedAt })),
+    });
+  } catch (e) {
+    console.error('[YT] check-vol 실패:', e?.message || e);
     res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
