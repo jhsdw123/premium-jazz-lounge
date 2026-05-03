@@ -2270,6 +2270,174 @@ app.get('/api/youtube/playlists', async (req, res) => {
   }
 });
 
+// ─── Phase 5-C: Path A — 기존 영상 메타 재사용 ────────────────────────────
+//
+//  형님 워크플로우:
+//    1) 새 영상 카드 클릭 (=적용 대상)
+//    2) 첫 곡 입력 → 14곡 자동 매칭 (Phase 5-B)
+//    3) "Path A" 선택 → 과거 영상 1개 (재사용 source) 선택
+//    4) 서버가 source 영상의 16개 언어 메타 fetch
+//       - [Vol.숫자] +1 정규식 교체
+//       - 설명란 타임라인 (MM:SS - Title) 새 곡으로 교체
+//       - 해시태그 그대로 유지
+//    5) 빠진 언어가 있으면 missingLanguages 로 알림
+//    6) (Phase 5-F 에서) YouTube API 로 적용
+
+const PATH_A_TARGET_LANGUAGES = [
+  'ko', 'en', 'ja', 'zh-CN', 'zh-TW',
+  'es', 'fr', 'de', 'it', 'pt',
+  'ru', 'nl', 'th', 'vi', 'id',
+  'ms', 'tl',
+];
+
+// === Vol 숫자 +1 정규식 ===
+//  예: "[ニューオーリンズ・ジャズ] 설명 [Vol.5]" → "[Vol.6]"
+//  대괄호 포함, 여러 번 등장해도 모두 +1.
+function incrementVolNumber(text) {
+  if (!text) return text;
+  return String(text).replace(/\[Vol\.(\d+)\]/g, (_match, num) => {
+    return `[Vol.${parseInt(num, 10) + 1}]`;
+  });
+}
+
+// === 설명란 타임라인 교체 ===
+//  형님 타임라인 형식: "00:00 - Track Title" (한 줄씩, MM:SS 또는 HH:MM:SS).
+//  연속된 타임라인 블록을 찾아서 새 newTracks 로 통째 교체. 빈 줄은 블록 안에서 허용.
+//  타임라인 블록 못 찾으면 description 그대로 반환.
+function replaceTimeline(description, newTracks) {
+  if (!description || !Array.isArray(newTracks) || !newTracks.length) return description;
+  const lines = String(description).split('\n');
+  const timelineRegex = /^(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*.+$/;
+
+  let timelineStartIdx = -1;
+  let timelineEndIdx = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (timelineRegex.test(trimmed)) {
+      if (timelineStartIdx === -1) timelineStartIdx = i;
+      timelineEndIdx = i;
+    } else if (timelineStartIdx !== -1 && trimmed === '') {
+      // 타임라인 안의 빈 줄 — 계속 검사
+      continue;
+    } else if (timelineStartIdx !== -1) {
+      // 타임라인이 끝남
+      break;
+    }
+  }
+
+  if (timelineStartIdx === -1) {
+    console.warn('[Path A] 기존 타임라인 못 찾음');
+    return description;
+  }
+
+  const newTimeline = newTracks.map((t) => `${t.timecode} - ${t.title}`).join('\n');
+  const before = lines.slice(0, timelineStartIdx);
+  const after = lines.slice(timelineEndIdx + 1);
+  return [...before, newTimeline, ...after].join('\n');
+}
+
+// === Source 메타 → 변경된 generatedMeta ===
+//  defaultLanguage 의 title/description 은 generated.title.default / .description.default 에.
+//  나머지 언어는 generated.localizations[lang] 에. 빠진 언어는 missingLanguages 배열에.
+//  태그는 그대로 복사.
+function reuseMetaWithChanges(sourceMeta, newTracks) {
+  const defaultLang = sourceMeta.defaultLanguage || 'en';
+  const result = {
+    defaultLanguage: defaultLang,
+    title: { default: incrementVolNumber(sourceMeta.title) },
+    description: { default: replaceTimeline(incrementVolNumber(sourceMeta.description), newTracks) },
+    tags: Array.isArray(sourceMeta.tags) ? [...sourceMeta.tags] : [],
+    localizations: {},
+    missingLanguages: [],
+  };
+
+  for (const lang of PATH_A_TARGET_LANGUAGES) {
+    if (lang === defaultLang) continue;
+    const localized = sourceMeta.localizations?.[lang];
+    if (!localized || (!localized.title && !localized.description)) {
+      result.missingLanguages.push(lang);
+      continue;
+    }
+    result.localizations[lang] = {
+      title: incrementVolNumber(localized.title || sourceMeta.title),
+      description: replaceTimeline(
+        incrementVolNumber(localized.description || sourceMeta.description),
+        newTracks,
+      ),
+    };
+  }
+
+  return result;
+}
+
+// === GET /api/youtube/videos/:id/meta ===
+//  영상 1개의 모든 16개 언어 메타 + 태그.
+app.get('/api/youtube/videos/:id/meta', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  const videoId = String(req.params.id || '').trim();
+  if (!videoId) return res.status(400).json({ ok: false, error: 'videoId 필요' });
+
+  try {
+    const response = await youtube.videos.list({
+      part: ['snippet', 'localizations', 'status'],
+      id: [videoId],
+    });
+    const video = response.data.items?.[0];
+    if (!video) return res.status(404).json({ ok: false, error: '영상 없음' });
+
+    res.json({
+      ok: true,
+      meta: {
+        videoId,
+        defaultLanguage: video.snippet?.defaultLanguage || 'en',
+        title: video.snippet?.title || '',
+        description: video.snippet?.description || '',
+        tags: video.snippet?.tags || [],
+        localizations: video.localizations || {},
+        publishedAt: video.snippet?.publishedAt || null,
+      },
+    });
+  } catch (e) {
+    console.error('[YT] 메타 조회 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// === POST /api/uploader/path-a/preview ===
+//  body: { sourceVideoId, newTracks: [{ timecode, title, ... }] }
+//  source 영상 fetch → Vol +1 + 타임라인 교체 → generatedMeta + missingLanguages 반환.
+app.post('/api/uploader/path-a/preview', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  const { sourceVideoId, newTracks } = req.body || {};
+  if (!sourceVideoId || !Array.isArray(newTracks)) {
+    return res.status(400).json({ ok: false, error: 'sourceVideoId + newTracks 필요' });
+  }
+
+  try {
+    const response = await youtube.videos.list({
+      part: ['snippet', 'localizations'],
+      id: [String(sourceVideoId)],
+    });
+    const video = response.data.items?.[0];
+    if (!video) return res.status(404).json({ ok: false, error: 'Source 영상 없음' });
+
+    const sourceMeta = {
+      defaultLanguage: video.snippet?.defaultLanguage || 'en',
+      title: video.snippet?.title || '',
+      description: video.snippet?.description || '',
+      tags: video.snippet?.tags || [],
+      localizations: video.localizations || {},
+    };
+
+    const generated = reuseMetaWithChanges(sourceMeta, newTracks);
+    res.json({ ok: true, generated, sourceMeta });
+  } catch (e) {
+    console.error('[Path A] preview 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
 // Phase 4-D-5-C: 글로벌 에러 핸들러 — 라우트 안에서 throw 가 res 에 처리되지 않은 채
 //   bubble up 한 경우 마지막 안전망. 정상 라우트들은 try/catch 로 직접 500 응답.
 app.use((err, req, res, _next) => {

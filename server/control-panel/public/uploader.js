@@ -14,12 +14,27 @@ const uploader = {
   acResults: [],
 };
 
-// Phase 5-B: 메타 패널이 다음 단계 (Phase 5-C/D) 에 넘겨주는 상태.
+// Phase 5-B/5-C: 메타 패널이 다음 단계 (5-D ~ 5-F) 에 넘겨주는 상태.
 window.uploaderState = window.uploaderState || {
-  selectedVideo: null,         // { id, title, thumbnail }
+  selectedVideo: null,         // { id, title, thumbnail } — 적용 대상 영상
   sourceVideoId: null,         // 매칭된 영상 (DB 의 video_id, 예: 'vid_2026-...')
   tracks: [],                  // [{ position, track_id, title, length_sec, start_sec, timecode }]
+  // === Phase 5-C ===
+  path: null,                  // 'A' | 'B' (사용자 선택)
+  reuseSourceVideo: null,      // Path A 의 재사용 source 영상 (sourceMeta)
+  generatedMeta: null,         // 자동 생성된 메타 (title.default / description.default / localizations / tags / missingLanguages)
+  missingLanguages: [],        // 재사용 source 에 빠진 언어 코드 배열
 };
+
+// Phase 5-C: Path A workflow 의 ephemeral 상태 (한 번에 하나의 패널만 살아있음).
+let pathASelectedSourceVideoId = null;
+let pathACurrentLangTab = 'en';
+
+const PATH_A_LANGUAGES = [
+  'en', 'ko', 'ja', 'zh-CN', 'zh-TW',
+  'es', 'fr', 'de', 'it', 'pt',
+  'ru', 'nl', 'th', 'vi', 'id', 'ms', 'tl',
+];
 
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({
@@ -501,14 +516,307 @@ function renderMatchedTracks(matchData) {
 
 function confirmTracks(matchData) {
   const pending = uploader._pendingVideo || null;
-  window.uploaderState = {
+  Object.assign(window.uploaderState, {
     selectedVideo: pending,
     sourceVideoId: matchData.video_id,
     tracks: matchData.tracks,
-  };
+    path: null,
+    reuseSourceVideo: null,
+    generatedMeta: null,
+    missingLanguages: [],
+  });
   console.log('[Uploader] 곡 확정:', window.uploaderState);
-  document.getElementById('metaNextStep').style.display = 'block';
-  alert(`✓ 곡 ${matchData.track_count}개 확정.\n\n다음 단계 (Phase 5-C/D) 에서 메타 자동 생성 진행.`);
+  renderPathSelector();
+}
+
+// ────────────────────────────────────────────────────────────────
+// Phase 5-C: Path A — 기존 영상 메타 재사용 + Vol +1
+// ────────────────────────────────────────────────────────────────
+function renderPathSelector() {
+  const container = document.getElementById('metaNextStep');
+  if (!container) return;
+  container.style.display = 'block';
+  container.innerHTML = `
+    <h3 style="color:var(--jazz-gold);margin:0 0 12px;font-size:13px;font-weight:600;">메타데이터 적용 방식</h3>
+    <div style="display:flex;gap:10px;">
+      <button id="pathABtn" type="button" class="te-btn gold" style="flex:1;padding:14px;text-align:left;cursor:pointer;">
+        <div style="font-size:13px;font-weight:700;">📋 Path A: 기존 영상 재사용</div>
+        <div style="font-size:11px;color:rgba(0,0,0,0.7);margin-top:4px;font-weight:500;">시리즈 영상 (Vol.X+1) — Vol 숫자만 교체</div>
+      </button>
+      <button id="pathBBtn" type="button" class="te-btn" style="flex:1;padding:14px;text-align:left;cursor:pointer;">
+        <div style="font-size:13px;font-weight:600;">✨ Path B: 새 메타 생성</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">새 테마 (Vol.1) — Gemini 새로 생성</div>
+      </button>
+    </div>
+  `;
+
+  document.getElementById('pathABtn').addEventListener('click', () => {
+    window.uploaderState.path = 'A';
+    showPathASourceSelect();
+  });
+  document.getElementById('pathBBtn').addEventListener('click', () => {
+    alert('Path B (새 메타 생성) 는 Phase 5-D 에서 구현 예정입니다.');
+  });
+}
+
+// === Path A — 재사용 source 영상 선택 화면 ===
+function showPathASourceSelect() {
+  const container = document.getElementById('metaNextStep');
+  if (!container) return;
+  pathASelectedSourceVideoId = null;
+
+  container.innerHTML = `
+    <h3 style="color:var(--jazz-gold);margin:0 0 12px;font-size:13px;font-weight:600;">재사용할 영상 선택</h3>
+    <div style="margin-bottom:10px;">
+      <input type="text" id="pathASearch" placeholder="제목 검색 (예: Showa Vol.5)"
+        autocomplete="off" spellcheck="false"
+        style="width:100%;padding:9px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
+    </div>
+    <div id="pathASourceList" style="max-height:380px;overflow-y:auto;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:6px;"></div>
+    <div style="display:flex;gap:8px;margin-top:14px;">
+      <button id="pathACancelBtn" type="button" class="te-btn" style="flex:0 0 auto;padding:8px 16px;">← 뒤로</button>
+      <button id="pathAApplyBtn" type="button" class="te-btn gold" style="flex:1;padding:8px 16px;" disabled>적용</button>
+    </div>
+  `;
+
+  loadPathASourceList();
+
+  document.getElementById('pathASearch').addEventListener('input', filterPathASource);
+  document.getElementById('pathACancelBtn').addEventListener('click', () => renderPathSelector());
+  document.getElementById('pathAApplyBtn').addEventListener('click', applyPathA);
+}
+
+function loadPathASourceList() {
+  const videos = uploader.videos || [];
+  const excludedId = window.uploaderState.selectedVideo?.id || null;
+  const list = videos.filter((v) => v.id !== excludedId);
+  renderPathASourceList(list);
+}
+
+function renderPathASourceList(videos) {
+  const container = document.getElementById('pathASourceList');
+  if (!container) return;
+  if (!videos.length) {
+    container.innerHTML = `<div style="padding:14px;color:var(--text-muted);font-size:12px;text-align:center;">재사용 가능한 영상이 없습니다.</div>`;
+    return;
+  }
+  container.innerHTML = videos.map((v) => {
+    const dateStr = fmtDateLocal(v.publishedAt);
+    const thumb = v.thumbnail
+      ? `<img src="${escapeHtml(v.thumbnail)}" loading="lazy" alt="" style="width:80px;aspect-ratio:16/9;object-fit:cover;border-radius:4px;background:#000;flex:0 0 auto;">`
+      : `<div style="width:80px;aspect-ratio:16/9;background:#000;border-radius:4px;flex:0 0 auto;"></div>`;
+    return `
+      <div class="path-a-source-item" data-video-id="${escapeHtml(v.id)}"
+        style="display:flex;gap:10px;padding:8px 10px;border-bottom:1px solid #1f1f1f;cursor:pointer;align-items:flex-start;">
+        ${thumb}
+        <div style="flex:1;min-width:0;">
+          <div class="pa-title" style="color:var(--text);font-size:12px;line-height:1.35;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${escapeHtml(v.title)}</div>
+          <div style="color:var(--text-muted);font-size:11px;margin-top:4px;">
+            👁 ${(v.viewCount || 0).toLocaleString()} · 🌐 ${v.localizationCount || 0}/${TOTAL_LANGS} · ${dateStr}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  container.querySelectorAll('.path-a-source-item').forEach((item) => {
+    item.addEventListener('click', () => selectPathASource(item.dataset.videoId));
+    item.addEventListener('mouseover', () => {
+      if (item.dataset.videoId !== pathASelectedSourceVideoId) item.style.background = '#1a1a1a';
+    });
+    item.addEventListener('mouseout', () => {
+      if (item.dataset.videoId !== pathASelectedSourceVideoId) item.style.background = 'transparent';
+    });
+  });
+}
+
+function filterPathASource(ev) {
+  const q = String(ev.target.value || '').toLowerCase().trim();
+  const items = document.querySelectorAll('.path-a-source-item');
+  items.forEach((item) => {
+    const title = (item.querySelector('.pa-title')?.textContent || '').toLowerCase();
+    item.style.display = title.includes(q) ? 'flex' : 'none';
+  });
+}
+
+function selectPathASource(videoId) {
+  pathASelectedSourceVideoId = videoId;
+  document.querySelectorAll('.path-a-source-item').forEach((item) => {
+    const isSel = item.dataset.videoId === videoId;
+    item.style.background = isSel ? '#2a2418' : 'transparent';
+    item.style.borderLeft = isSel ? '3px solid var(--jazz-gold)' : '3px solid transparent';
+  });
+  const btn = document.getElementById('pathAApplyBtn');
+  if (btn) btn.disabled = false;
+}
+
+async function applyPathA() {
+  if (!pathASelectedSourceVideoId) return;
+  const btn = document.getElementById('pathAApplyBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '처리 중…'; }
+
+  let data;
+  try {
+    const r = await fetch('/api/uploader/path-a/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sourceVideoId: pathASelectedSourceVideoId,
+        newTracks: window.uploaderState.tracks,
+      }),
+    });
+    data = await r.json();
+    if (!data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  } catch (e) {
+    alert(`Path A 실패: ${e.message}`);
+    if (btn) { btn.disabled = false; btn.textContent = '적용'; }
+    return;
+  }
+
+  window.uploaderState.path = 'A';
+  window.uploaderState.reuseSourceVideo = data.sourceMeta;
+  window.uploaderState.generatedMeta = data.generated;
+  window.uploaderState.missingLanguages = data.generated.missingLanguages || [];
+  console.log('[Path A] generatedMeta:', data.generated);
+  showPathAPreview(data);
+}
+
+function showPathAPreview(data) {
+  const { generated, sourceMeta } = data;
+  const container = document.getElementById('metaNextStep');
+  if (!container) return;
+  pathACurrentLangTab = sourceMeta.defaultLanguage || 'en';
+
+  const langTabsHtml = PATH_A_LANGUAGES.map((lang) => {
+    const isDefault = lang === sourceMeta.defaultLanguage;
+    const exists = isDefault || !!generated.localizations?.[lang];
+    return `
+      <button type="button" class="lang-tab" data-lang="${escapeHtml(lang)}"
+        style="padding:5px 9px;background:${exists ? '#1a1a1a' : '#3a1818'};color:${exists ? 'var(--text)' : '#f55'};
+               border:1px solid #333;cursor:pointer;border-radius:4px;font-size:11px;font-family:ui-monospace,Menlo,monospace;">
+        ${escapeHtml(lang)}${exists ? '' : ' ⚠'}
+      </button>
+    `;
+  }).join('');
+
+  const missingHtml = generated.missingLanguages?.length ? `
+    <div style="background:#3a1818;border-left:3px solid #f55;padding:10px 12px;margin-bottom:14px;font-size:11px;color:#fdd;border-radius:0 4px 4px 0;">
+      ⚠ Source 영상에 없는 언어 (${generated.missingLanguages.length}개):
+      <strong style="color:#fff;">${generated.missingLanguages.map(escapeHtml).join(', ')}</strong>
+      <div style="color:#caa;margin-top:4px;">이 언어들은 적용되지 않음. 필요하면 Phase 5-D 의 Gemini 번역 사용.</div>
+    </div>
+  ` : '';
+
+  const tagsHtml = (sourceMeta.tags || []).length
+    ? sourceMeta.tags.map((t) => escapeHtml(t)).join(', ')
+    : '<span style="color:var(--text-muted);">(없음)</span>';
+
+  container.innerHTML = `
+    <h3 style="color:var(--jazz-gold);margin:0 0 12px;font-size:13px;font-weight:600;">미리보기</h3>
+    ${missingHtml}
+    <div id="pathALangTabs" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px;">${langTabsHtml}</div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">제목</label>
+      <textarea id="pathAPreviewTitle" rows="2"
+        style="width:100%;padding:8px 9px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;resize:vertical;font-family:inherit;"></textarea>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">설명</label>
+      <textarea id="pathAPreviewDescription" rows="18"
+        style="width:100%;padding:8px 9px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;resize:vertical;"></textarea>
+    </div>
+
+    <div style="margin-bottom:14px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">해시태그 (Source 그대로)</label>
+      <div style="padding:8px 9px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:4px;font-size:11px;color:var(--text-muted);word-break:break-all;">
+        ${tagsHtml}
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;">
+      <button id="pathABackBtn" type="button" class="te-btn" style="flex:0 0 auto;padding:8px 16px;">← 뒤로</button>
+      <button id="pathANextBtn" type="button" class="te-btn gold" style="flex:1;padding:8px 16px;">다음 단계 (Phase 5-F: 적용)</button>
+    </div>
+  `;
+
+  // 첫 언어 탭 활성화
+  switchLangTab(pathACurrentLangTab);
+
+  // 탭 클릭
+  container.querySelectorAll('.lang-tab').forEach((tab) => {
+    tab.addEventListener('click', () => switchLangTab(tab.dataset.lang));
+  });
+
+  // 텍스트 편집 → state 저장
+  document.getElementById('pathAPreviewTitle').addEventListener('input', saveCurrentLangEdit);
+  document.getElementById('pathAPreviewDescription').addEventListener('input', saveCurrentLangEdit);
+
+  // 뒤로
+  document.getElementById('pathABackBtn').addEventListener('click', () => showPathASourceSelect());
+
+  // 다음 단계 (Phase 5-F 에서 구현)
+  document.getElementById('pathANextBtn').addEventListener('click', () => {
+    console.log('[Path A] 최종 메타:', window.uploaderState.generatedMeta);
+    alert('Phase 5-F (YouTube 적용) 에서 구현 예정.\n현재 generatedMeta 는 window.uploaderState 에 저장됨 — console 확인.');
+  });
+}
+
+function switchLangTab(lang) {
+  pathACurrentLangTab = lang;
+  const generated = window.uploaderState.generatedMeta;
+  const sourceMeta = window.uploaderState.reuseSourceVideo;
+  if (!generated || !sourceMeta) return;
+
+  // 탭 시각 갱신
+  document.querySelectorAll('.lang-tab').forEach((t) => {
+    const isSel = t.dataset.lang === lang;
+    const isDefault = t.dataset.lang === sourceMeta.defaultLanguage;
+    const exists = isDefault || !!generated.localizations?.[t.dataset.lang];
+    t.style.background = isSel ? 'var(--jazz-gold)' : (exists ? '#1a1a1a' : '#3a1818');
+    t.style.color = isSel ? '#000' : (exists ? 'var(--text)' : '#f55');
+    t.style.fontWeight = isSel ? '700' : 'normal';
+  });
+
+  let title = '';
+  let description = '';
+  if (lang === sourceMeta.defaultLanguage) {
+    title = generated.title?.default || '';
+    description = generated.description?.default || '';
+  } else if (generated.localizations?.[lang]) {
+    title = generated.localizations[lang].title || '';
+    description = generated.localizations[lang].description || '';
+  } else {
+    title = '(이 언어는 source 영상에 없음 — 적용 시 무시됨)';
+    description = '';
+  }
+
+  const titleEl = document.getElementById('pathAPreviewTitle');
+  const descEl = document.getElementById('pathAPreviewDescription');
+  if (titleEl) titleEl.value = title;
+  if (descEl) descEl.value = description;
+}
+
+function saveCurrentLangEdit() {
+  const generated = window.uploaderState.generatedMeta;
+  const sourceMeta = window.uploaderState.reuseSourceVideo;
+  if (!generated || !sourceMeta) return;
+  const lang = pathACurrentLangTab;
+  const title = document.getElementById('pathAPreviewTitle')?.value ?? '';
+  const description = document.getElementById('pathAPreviewDescription')?.value ?? '';
+
+  if (lang === sourceMeta.defaultLanguage) {
+    generated.title = generated.title || {};
+    generated.description = generated.description || {};
+    generated.title.default = title;
+    generated.description.default = description;
+  } else {
+    generated.localizations = generated.localizations || {};
+    if (!generated.localizations[lang]) generated.localizations[lang] = {};
+    generated.localizations[lang].title = title;
+    generated.localizations[lang].description = description;
+  }
 }
 
 function formatTrackLength(sec) {
