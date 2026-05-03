@@ -2300,21 +2300,52 @@ function incrementVolNumber(text) {
   });
 }
 
+// === 타임라인 정규식 ===
+//  형님 영상 실제 형식: "00:00 Sideburn Trim Crooked" (대시 없이 시간 + 공백 + 제목).
+//  대시/하이픈/em-dash 도 허용 (옵션). 공백은 필수 (시간과 제목 분리).
+const TIMELINE_REGEX = /^(\d{1,2}:\d{2}(?::\d{2})?)\s+[-–—]?\s*.+$/;
+
+// === 검증: 타임라인 정규식 케이스 (개발 환경 1회) ===
+function validateTimelineRegex() {
+  const cases = [
+    { text: '00:00 Sideburn Trim Crooked', expected: true },
+    { text: '02:16 Bowtie Clip Broken', expected: true },
+    { text: '00:00 - Track Name', expected: true },
+    { text: '00:00 — Em Dash Track', expected: true },
+    { text: '1:23:45 Long Track', expected: true },
+    { text: '00:00  Multiple Spaces', expected: true },
+    { text: 'No timecode here', expected: false },
+    { text: '0:00NoSpace', expected: false },
+  ];
+  let pass = 0;
+  let fail = 0;
+  cases.forEach((c) => {
+    const result = TIMELINE_REGEX.test(c.text);
+    const ok = result === c.expected;
+    const status = ok ? '✓' : '✗';
+    console.log(`[Timeline regex] ${status} "${c.text}" → ${result} (expected ${c.expected})`);
+    if (ok) pass++; else fail++;
+  });
+  console.log(`[Timeline regex] ${pass}/${pass + fail} pass`);
+}
+if (process.env.NODE_ENV !== 'production') {
+  validateTimelineRegex();
+}
+
 // === 설명란 타임라인 교체 ===
-//  형님 타임라인 형식: "00:00 - Track Title" (한 줄씩, MM:SS 또는 HH:MM:SS).
+//  형님 타임라인 형식: "00:00 Track Title" (대시 없이 공백만, MM:SS 또는 HH:MM:SS).
 //  연속된 타임라인 블록을 찾아서 새 newTracks 로 통째 교체. 빈 줄은 블록 안에서 허용.
 //  타임라인 블록 못 찾으면 description 그대로 반환.
 function replaceTimeline(description, newTracks) {
   if (!description || !Array.isArray(newTracks) || !newTracks.length) return description;
   const lines = String(description).split('\n');
-  const timelineRegex = /^(\d{1,2}:\d{2}(?::\d{2})?)\s*-\s*.+$/;
 
   let timelineStartIdx = -1;
   let timelineEndIdx = -1;
 
   for (let i = 0; i < lines.length; i++) {
     const trimmed = lines[i].trim();
-    if (timelineRegex.test(trimmed)) {
+    if (TIMELINE_REGEX.test(trimmed)) {
       if (timelineStartIdx === -1) timelineStartIdx = i;
       timelineEndIdx = i;
     } else if (timelineStartIdx !== -1 && trimmed === '') {
@@ -2331,7 +2362,7 @@ function replaceTimeline(description, newTracks) {
     return description;
   }
 
-  const newTimeline = newTracks.map((t) => `${t.timecode} - ${t.title}`).join('\n');
+  const newTimeline = newTracks.map((t) => `${t.timecode} ${t.title}`).join('\n');
   const before = lines.slice(0, timelineStartIdx);
   const after = lines.slice(timelineEndIdx + 1);
   return [...before, newTimeline, ...after].join('\n');
