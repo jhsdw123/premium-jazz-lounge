@@ -2300,6 +2300,19 @@ function incrementVolNumber(text) {
   });
 }
 
+// === Vol 해시태그 제거 ===
+//  #jazzvol8, #Vol2024, #SwingVol3 같은 Vol+숫자 해시태그 제거.
+//  newline 은 보존 (description 의 헤더/타임라인/푸터 구조 유지).
+//  가로 공백만 collapse, 빈 줄에 남은 공백은 trim.
+function removeVolHashtags(text) {
+  if (!text) return text;
+  return String(text)
+    .replace(/[ \t]*#\w*[Vv]ol\w*\d+\w*/g, '') // 해시태그 + 앞쪽 가로 공백 제거
+    .replace(/ {2,}/g, ' ')                      // 연속 공백 collapse (newline 보존)
+    .replace(/[ \t]+\n/g, '\n')                  // 줄 끝 공백 제거
+    .trim();
+}
+
 // === 타임라인 정규식 ===
 //  형님 영상 실제 형식: "00:00 Sideburn Trim Crooked" (대시 없이 시간 + 공백 + 제목).
 //  대시/하이픈/em-dash 도 허용 (옵션). 공백은 필수 (시간과 제목 분리).
@@ -2377,7 +2390,9 @@ function reuseMetaWithChanges(sourceMeta, newTracks) {
   const result = {
     defaultLanguage: defaultLang,
     title: { default: incrementVolNumber(sourceMeta.title) },
-    description: { default: replaceTimeline(incrementVolNumber(sourceMeta.description), newTracks) },
+    description: {
+      default: removeVolHashtags(replaceTimeline(incrementVolNumber(sourceMeta.description), newTracks)),
+    },
     tags: Array.isArray(sourceMeta.tags) ? [...sourceMeta.tags] : [],
     localizations: {},
     missingLanguages: [],
@@ -2392,9 +2407,11 @@ function reuseMetaWithChanges(sourceMeta, newTracks) {
     }
     result.localizations[lang] = {
       title: incrementVolNumber(localized.title || sourceMeta.title),
-      description: replaceTimeline(
-        incrementVolNumber(localized.description || sourceMeta.description),
-        newTracks,
+      description: removeVolHashtags(
+        replaceTimeline(
+          incrementVolNumber(localized.description || sourceMeta.description),
+          newTracks,
+        ),
       ),
     };
   }
