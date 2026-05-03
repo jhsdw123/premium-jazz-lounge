@@ -111,22 +111,28 @@ async function renderDryRunCard(data) {
     }
   }
 
-  // 재생목록
+  // 재생목록 — server 가 env DEFAULT_PLAYLIST_IDS 또는 body.playlistIds 적용
   const playlistIds = plan.addToPlaylists || [];
+  const playlistSource = plan.playlistSource || 'none';
   let playlistHtml;
   if (!playlistIds.length) {
     playlistHtml = `
-      <div style="color:#f55;">⚠️ 추가될 재생목록 없음</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">⚙️ 설정에서 default 재생목록 ☑ 필요</div>
+      <div style="color:#f80;">⚠️ 추가될 재생목록 없음</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:4px;">.env.local 의 <code>DEFAULT_PLAYLIST_IDS</code> 설정 확인</div>
     `;
   } else {
     const map = await getPlaylistsCache();
     const items = playlistIds.map((id) => {
-      const name = map[id] || `(이름 미상: ${id})`;
+      const name = map[id] || `(ID: ${id})`;
       return `<div style="font-size:12px;color:var(--text);margin-top:4px;">✅ ${escapeHtml(name)}</div>`;
     }).join('');
+    const sourceLabel = playlistSource === 'env'
+      ? '<span style="color:var(--text-muted);font-size:11px;font-weight:400;">(env)</span>'
+      : playlistSource === 'body'
+        ? '<span style="color:var(--text-muted);font-size:11px;font-weight:400;">(설정 모달)</span>'
+        : '';
     playlistHtml = `
-      <div style="color:#4c4;margin-bottom:4px;">${playlistIds.length}개 재생목록 추가 예정</div>
+      <div style="color:#4c4;margin-bottom:4px;">${playlistIds.length}개 재생목록 자동 추가 ${sourceLabel}</div>
       ${items}
     `;
   }

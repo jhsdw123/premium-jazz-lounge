@@ -2792,7 +2792,19 @@ app.post('/api/uploader/apply', async (req, res) => {
     fs.writeFileSync(backupFile, JSON.stringify(backupData, null, 2));
 
     const localizationsCount = Object.keys(generatedMeta.localizations || {}).length;
-    const requestedPlaylists = Array.isArray(playlistIds) ? playlistIds : [];
+
+    // 재생목록: body.playlistIds 가 비어있으면 .env.local 의 DEFAULT_PLAYLIST_IDS (csv) 사용.
+    //   ⚙️ 설정 모달은 fallback. 환경변수가 1차 truth.
+    const bodyPlaylists = Array.isArray(playlistIds) ? playlistIds.filter(Boolean) : [];
+    const envPlaylists = (process.env.DEFAULT_PLAYLIST_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const requestedPlaylists = bodyPlaylists.length ? bodyPlaylists : envPlaylists;
+    const playlistSource = bodyPlaylists.length ? 'body' : (envPlaylists.length ? 'env' : 'none');
+    if (playlistSource === 'env') {
+      console.log('[Apply] Using env DEFAULT_PLAYLIST_IDS:', envPlaylists);
+    }
 
     if (dryRun) {
       return res.json({
@@ -2810,6 +2822,7 @@ app.post('/api/uploader/apply', async (req, res) => {
           updateLocalizations: `${localizationsCount} 개 언어`,
           updateStatus: scheduleAt ? `예약: ${scheduleAt}` : '변경 X',
           addToPlaylists: requestedPlaylists,
+          playlistSource, // 'body' | 'env' | 'none'
         },
         message: '드라이런 완료. 실제 변경 X.',
       });
