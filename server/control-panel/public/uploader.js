@@ -861,13 +861,14 @@ function showPathBInputForm() {
     </div>
 
     <div style="margin-bottom:12px;">
-      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">시리즈명 <span style="color:#f55;">*</span></label>
-      <input type="text" id="pathBSeriesName" placeholder="예: New Orleans Jazz, Showa Era, Bayou Swing"
-        autocomplete="off" spellcheck="false"
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">시리즈명 <span style="color:#f55;">*</span> (짧은 키워드)</label>
+      <input type="text" id="pathBSeriesName" placeholder="예: New Orleans, Showa Era, Bayou Swing"
+        autocomplete="off" spellcheck="false" maxlength="30"
         style="width:100%;padding:8px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
-      <div style="font-size:10px;color:var(--text-muted);margin-top:3px;">
-        제목이 [시리즈명] 본문 [Vol.N] 형식으로 생성됨
+      <div style="font-size:10px;color:var(--text-muted);margin-top:3px;line-height:1.5;">
+        ⚠ 짧은 키워드 1~3 단어, 30자 이내. 대괄호 [] 자동 제거됨. 본문은 Gemini 가 만듦.
       </div>
+      <div id="pathBTitlePreview" style="font-size:11px;color:#4c4;margin-top:6px;font-family:ui-monospace,Menlo,monospace;"></div>
     </div>
 
     <div style="margin-bottom:12px;display:flex;gap:10px;align-items:center;">
@@ -918,11 +919,28 @@ function showPathBInputForm() {
   document.getElementById('pathBCancelBtn').addEventListener('click', () => renderPathSelector());
   document.getElementById('pathBGenerateBtn').addEventListener('click', generatePathBMeta);
 
-  // Vol 번호 중복 검증 (debounce) — 시리즈명 + Vol 둘 다 있을 때만.
+  // Vol 번호 중복 검증 + 제목 미리보기 (debounce)
   const volInput = document.getElementById('pathBVolNumber');
   const seriesInput = document.getElementById('pathBSeriesName');
+  const previewEl = document.getElementById('pathBTitlePreview');
+
+  const updatePreview = () => {
+    const series = sanitizeSeriesName(seriesInput.value);
+    const vol = parseInt(volInput.value, 10) || 1;
+    if (!series) {
+      previewEl.innerHTML = '';
+    } else {
+      // YouTube max 100자 — [시리즈명] (본문) [Vol.N] 형식에서 본문 가능 길이 표시
+      const fixedLen = series.length + 4 + 7 + String(vol).length; // "[" + "] " + " [Vol." + N + "]"
+      const bodyMax = Math.max(0, 100 - fixedLen);
+      const colorBody = bodyMax >= 30 ? '#4c4' : bodyMax >= 15 ? '#d4af37' : '#f55';
+      previewEl.innerHTML = `예상: <span style="color:var(--jazz-gold);">[${escapeHtml(series)}] (Gemini 본문) [Vol.${vol}]</span><br>` +
+        `본문 가능 길이: <span style="color:${colorBody};">${bodyMax}자</span> (총 100자 한도)`;
+    }
+  };
+
   const checkVol = () => {
-    const series = seriesInput.value.trim();
+    const series = sanitizeSeriesName(seriesInput.value);
     const vol = parseInt(volInput.value, 10);
     if (!series || !Number.isFinite(vol) || vol < 1) {
       document.getElementById('pathBVolCheck').textContent = '';
@@ -931,8 +949,18 @@ function showPathBInputForm() {
     clearTimeout(pathBVolCheckTimer);
     pathBVolCheckTimer = setTimeout(() => checkPathBVolDuplicate(vol, series), 300);
   };
-  volInput.addEventListener('input', checkVol);
-  seriesInput.addEventListener('input', checkVol);
+
+  const onChange = () => { updatePreview(); checkVol(); };
+  volInput.addEventListener('input', onChange);
+  seriesInput.addEventListener('input', onChange);
+}
+
+// 시리즈명 cleanse — 대괄호 제거 + 공백 collapse + trim
+function sanitizeSeriesName(raw) {
+  return String(raw || '')
+    .replace(/[\[\]]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 let pathBVolCheckTimer = null;
@@ -963,21 +991,27 @@ async function checkPathBVolDuplicate(vol, series) {
 }
 
 async function generatePathBMeta() {
-  const seriesName = document.getElementById('pathBSeriesName').value.trim();
+  const seriesName = sanitizeSeriesName(document.getElementById('pathBSeriesName').value);
   const volNumber = parseInt(document.getElementById('pathBVolNumber').value, 10);
   const mood = document.getElementById('pathBMood').value.trim();
   const scenarios = document.getElementById('pathBScenarios').value.trim();
   const era = document.getElementById('pathBEra').value.trim();
   const notes = document.getElementById('pathBNotes').value.trim();
 
-  if (!seriesName) {
-    alert('시리즈명 필수');
+  if (!seriesName || seriesName.length < 2) {
+    alert('시리즈명 필수 (2자 이상, 대괄호 자동 제거됨)');
+    return;
+  }
+  if (seriesName.length > 30) {
+    alert('시리즈명 30자 이내 (현재 ' + seriesName.length + '자)');
     return;
   }
   if (!Number.isFinite(volNumber) || volNumber < 1) {
     alert('유효한 Vol 번호 필요 (≥1)');
     return;
   }
+  // cleanse 한 결과를 input 에 반영 (사용자에게 보이게)
+  document.getElementById('pathBSeriesName').value = seriesName;
 
   // 중복 검증 (시리즈별)
   try {

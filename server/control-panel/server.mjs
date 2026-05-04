@@ -2744,6 +2744,10 @@ function buildPathBPrompt(inputs) {
   const allLangs = ['en', ...PATH_B_LANGUAGES];
   const langList = allLangs.join(', ');
 
+  // 제목 fixed 부분 길이 = "[" + series + "] " + " [Vol." + N + "]"
+  const fixedLen = seriesName.length + 4 + 7 + String(volNumber).length;
+  const bodyMax = Math.max(20, 100 - fixedLen);
+
   return `You are a YouTube SEO expert for "Premium Jazz Lounge" — a 24/7 jazz music streaming channel for international audience (especially Japan, US, France, Italy, Korea).
 
 Generate complete metadata for a new jazz video in ${allLangs.length} languages: ${langList}.
@@ -2784,10 +2788,22 @@ Generate complete metadata for a new jazz video in ${allLangs.length} languages:
   "tl": { ... }
 }
 
+## CRITICAL TITLE LENGTH RULE (YouTube max = 100 characters per title)
+Format: [${seriesName}] (description) [Vol.${volNumber}]
+- The fixed parts "[${seriesName}] " + " [Vol.${volNumber}]" already take ~${fixedLen} characters.
+- The (description) middle MUST be max ${bodyMax} characters total (count emojis as 2 chars each).
+- KEEP DESCRIPTIONS PUNCHY AND SHORT. Do not exceed 100 chars total per title in any language.
+
+Examples (good length):
+✅ "[Showa Era] Smooth Jazz for Cozy Evenings 🌙 [Vol.1]"  (51 chars)
+✅ "[New Orleans] Energetic Swing for Workouts 💪 [Vol.3]"  (51 chars)
+❌ "[New Orleans] Uplifting & Happy Instrumental Music for Good Mood and Stress Relief [Vol.1]"  (90+ chars — too long)
+
 ## Title Rules
 - Format: [${seriesName}] (description in target language) [Vol.${volNumber}]
 - The literal "[${seriesName}]" prefix and "[Vol.${volNumber}]" suffix MUST stay identical in every language (universal).
 - Description in the middle: catchy, mentions mood/scenario, in target language.
+- TOTAL title length MUST be ≤100 characters in EVERY language. Verify each language before output.
 
 ## Body Rules
 - 2-3 sentences in target language.
@@ -2875,6 +2891,32 @@ async function generatePathBWithRetry(prompt, maxRetries = 2) {
       if (missingLangs.length) {
         console.warn(`[Path B] 시도 ${attempt}: ${missingLangs.length}개 언어 누락 (${missingLangs.join(',')}) — 진행`);
       }
+
+      // 길이 검증 — 영어 제목이 100자 초과면 재시도, 마지막 시도면 trim.
+      const enTitleLen = parsed.en.title.length;
+      if (enTitleLen > 100) {
+        if (attempt < maxRetries) {
+          console.warn(`[Path B] 시도 ${attempt}: 영어 제목 ${enTitleLen}자 (max 100) → 재시도`);
+          continue;
+        }
+        // 마지막 시도 — auto-trim
+        const trimmed = parsed.en.title.slice(0, 97).trimEnd() + '...';
+        console.warn(`[Path B] 자동 trim: en ${enTitleLen}자 → 100자 ("${trimmed}")`);
+        parsed.en.title = trimmed;
+      }
+      // 다른 언어들도 100자 초과 시 자동 trim (재시도 비용 안 들이고 즉시 처리)
+      let trimmedCount = 0;
+      for (const lang of PATH_B_LANGUAGES) {
+        const langData = parsed[lang];
+        if (!langData?.title) continue;
+        if (langData.title.length > 100) {
+          const before = langData.title.length;
+          langData.title = langData.title.slice(0, 97).trimEnd() + '...';
+          console.warn(`[Path B] 자동 trim: ${lang} ${before}자 → ${langData.title.length}자`);
+          trimmedCount++;
+        }
+      }
+      if (trimmedCount) console.warn(`[Path B] ${trimmedCount}개 언어 제목 100자 초과로 trim`);
 
       return { parsed, elapsed, attemptCount: attempt };
     } catch (e) {
@@ -3130,6 +3172,36 @@ app.post('/api/uploader/apply', async (req, res) => {
   const { videoId, generatedMeta, scheduleAt, playlistIds, dryRun } = req.body || {};
   if (!videoId || !generatedMeta) {
     return res.status(400).json({ ok: false, error: 'videoId + generatedMeta 필요' });
+  }
+
+  // 진단 로그 — Path A/B 둘 다 메타 구조 확인
+  const defaultTitle = generatedMeta?.title?.default || '';
+  const defaultDescPreview = (generatedMeta?.description?.default || '').slice(0, 100);
+  console.log('[Apply] generatedMeta 진단:');
+  console.log(`  defaultLanguage: ${generatedMeta?.defaultLanguage}`);
+  console.log(`  title (default) [${defaultTitle.length}자]: ${defaultTitle}`);
+  console.log(`  description (default) 앞 100자: ${defaultDescPreview}`);
+  console.log(`  localizations 수: ${Object.keys(generatedMeta?.localizations || {}).length}`);
+
+  // === 길이 검증 + 자동 trim (apply 직전 마지막 안전망) ===
+  if (defaultTitle.length < 1) {
+    return res.status(400).json({ ok: false, error: '영어 제목 비어있음. 메타 다시 생성 필요.' });
+  }
+  if (defaultTitle.length > 100) {
+    return res.status(400).json({
+      ok: false,
+      error: `영어 제목 ${defaultTitle.length}자 (YouTube max 100자). Path B 다시 생성 필요.`,
+    });
+  }
+  // 다른 언어들은 즉시 trim (apply 흐름 깨지 않도록)
+  if (generatedMeta.localizations) {
+    for (const [lang, loc] of Object.entries(generatedMeta.localizations)) {
+      if (loc?.title && loc.title.length > 100) {
+        const before = loc.title.length;
+        generatedMeta.localizations[lang].title = loc.title.slice(0, 97).trimEnd() + '...';
+        console.warn(`[Apply] ${lang} 제목 ${before}자 → 100자 자동 trim`);
+      }
+    }
   }
 
   try {
