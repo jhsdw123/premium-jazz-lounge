@@ -2697,40 +2697,76 @@ const PATH_B_LANGUAGES = [
   'ru', 'nl', 'th', 'vi', 'id', 'ms', 'tl',
 ];  // 16개 (en 제외 — Path B default)
 
-// PJL 영구 템플릿 — 헤더 + 본문 + 타임라인 + 채널 안내 + 저작권 + 해시태그
-const PJL_HEADER_TEMPLATE = `🐾 Follow Us for the earliest release → [https://www.youtube.com/@PremiumJazzLounge]
-{TITLE}
+// 영어 풀 description — Path A 의 영어 영상과 동일 (헤더 + 본문 + 멤버십 + 타임라인 + about + 크레딧 + 연락처 + 저작권 + 해시태그)
+function buildEnglishDescription(en, timeline) {
+  return [
+    '🐾 Follow Us for the earliest release → [ / https://www.youtube.com/@PremiumJazzLounge ]',
+    en.title || '',
+    '',
+    '',
+    en.body || '',
+    '',
+    '',
+    '',
+    en.hashtags_top || '',
+    '-------------------------------------------------------------------------------------------------------------------------',
+    '',
+    '🐾 Join the Premium Jazz Lounge Family! → https://www.youtube.com/@PremiumJazzLounge✔️',
+    'Channel memberships allow you to join our channel and get Members-Only Perks like Badges, Emojis, early access to New Videos, and even Access to All Orchid Tones Library (Access to All Constantly Updated Music 🎧 included in the Premium Jazz Lounge Videos)!',
+    '❤️ Become a Premium Jazz Lounge channel member!',
+    '',
+    timeline,
+    '',
+    '',
+    '',
+    '☕ About Premium Jazz Lounge channel:',
+    'At Premium Jazz Lounge, we categorize our playlists according to the mood, tempo, genre, and intended use of each jazz track. We hope our subscribers enjoy exploring these curated selections.',
+    'Thank you for your support and happy listening',
+    '',
+    '🎵 All music in this video and on this channel is original music created by us. ',
+    '🎵 All songs are performed by our musicians and AI. All music is composed by our authors. ',
+    '🎥 All videos on this channel are original videos produced by us.',
+    '',
+    '📩 Contact For business inquiries and licensing of our music, contact us via the following email address: ',
+    'Official contact: [dain.lim@outlook.com]',
+    '',
+    '© All rights reserved. ',
+    '℗ Music is Copyrighted by Premium Jazz Lounge. ',
+    '© Video is Copyrighted by Premium Jazz Lounge.',
+    '',
+    '🚫 Any reproduction or republication of all or part of this video/audio is prohibited.',
+    '',
+    'Hashtags',
+    en.hashtags_bottom || '',
+  ].join('\n');
+}
 
-{BODY}
-
-{HASHTAGS_TOP}
--------------------------------------------------------------------------------------------------------------------------
-
-🐾 Join the Premium Jazz Lounge Family! → https://www.youtube.com/@PremiumJazzLounge ✔️
-Channel memberships allow you to join our channel and get Members-Only Perks like Badges, Emojis, early access to New Videos, and even Access to All Orchid Tones Library (Access to All Constantly Updated Music 🎧 included in the Premium Jazz Lounge Videos)!
-❤️ Become a Premium Jazz Lounge channel member!
-
-{TIMELINE}
-
-☕ About Premium Jazz Lounge channel:
-At Premium Jazz Lounge, we categorize our playlists according to the mood, tempo, genre, and intended use of each jazz track. We hope our subscribers enjoy exploring these curated selections.
-Thank you for your support and happy listening
-
-🎵 All music in this video and on this channel is original music created by us.
-🎵 All songs are performed by our musicians and AI. All music is composed by our authors.
-🎥 All videos on this channel are original videos produced by us.
-
-📩 Contact For business inquiries and licensing of our music, contact us via the following email address:
-Official contact: [dain.lim@outlook.com]
-
-© All rights reserved.
-℗ Music is Copyrighted by Premium Jazz Lounge.
-© Video is Copyrighted by Premium Jazz Lounge.
-
-🚫 Any reproduction or republication of all or part of this video/audio is prohibited.
-
-Hashtags
-{HASHTAGS_BOTTOM}`;
+// 16개 언어 단순 description — native 해시태그 + tagline + [[제목]] + 타임라인 + body + 짧은 영어 푸터
+function buildLocalizedDescription(langData, timeline) {
+  return [
+    langData.hashtags_top || '',
+    langData.tagline || '',
+    '',
+    `[[${langData.title || ''}]]`,
+    '',
+    timeline,
+    '',
+    '',
+    langData.body || '',
+    '',
+    '',
+    '🐾 Follow Us for the earliest release → https://www.youtube.com/@PremiumJazzLounge',
+    '',
+    '☕ About Premium Jazz Lounge:',
+    'We categorize our playlists according to the mood, tempo, genre.',
+    '🎵 All music is original music created by us (Premium Jazz Lounge).',
+    '📩 Contact: [dain.lim@outlook.com]',
+    '© All rights reserved by Premium Jazz Lounge.',
+    '',
+    'Hashtags:',
+    langData.hashtags_bottom || '',
+  ].join('\n');
+}
 
 // 타임라인 텍스트 — newTracks → "00:00 Title\n02:34 Title2\n..." 형식
 function generatePathBTimeline(newTracks) {
@@ -2738,22 +2774,24 @@ function generatePathBTimeline(newTracks) {
   return newTracks.map((t) => `${t.timecode} ${t.title}`).join('\n');
 }
 
-// Gemini prompt 빌더 — 17개 언어 메타 동시 생성 (영어 base + 16개 번역)
+// Gemini prompt 빌더 — 17개 언어 동시 생성. 영어와 16개 언어가 다른 schema.
+//   영어: {title, body, hashtags_top(15), hashtags_bottom(24)} — 풀 형식
+//   16개 언어: {title, tagline, body, hashtags_top(2-3 native), hashtags_bottom(15 native)} — 단순 형식
+//   시리즈명은 각 언어로 native 번역 ([뉴올리언스] / [ニューオーリンズ] / [新奥尔良] ...)
 function buildPathBPrompt(inputs) {
   const { seriesName, volNumber, mood, scenarios, era, notes } = inputs;
   const allLangs = ['en', ...PATH_B_LANGUAGES];
-  const langList = allLangs.join(', ');
 
-  // 제목 fixed 부분 길이 = "[" + series + "] " + " [Vol." + N + "]"
+  // 영어 제목 fixed 부분 길이 = "[" + series + "] " + " [Vol." + N + "]"
   const fixedLen = seriesName.length + 4 + 7 + String(volNumber).length;
   const bodyMax = Math.max(20, 100 - fixedLen);
 
   return `You are a YouTube SEO expert for "Premium Jazz Lounge" — a 24/7 jazz music streaming channel for international audience (especially Japan, US, France, Italy, Korea).
 
-Generate complete metadata for a new jazz video in ${allLangs.length} languages: ${langList}.
+Generate complete metadata for a new jazz video in ${allLangs.length} languages: ${allLangs.join(', ')}.
 
 ## Video Info
-- Series: ${seriesName}
+- Series (English source): ${seriesName}
 - Volume: ${volNumber}
 - Mood: ${mood || 'jazz'}
 - Use Scenarios: ${scenarios || 'general listening'}
@@ -2763,61 +2801,91 @@ Generate complete metadata for a new jazz video in ${allLangs.length} languages:
 
 ## Output Format (STRICT JSON ONLY — no markdown, no commentary)
 
+English uses one schema; the other 16 languages use a DIFFERENT schema (with extra "tagline" field, native hashtags).
+
 {
   "en": {
     "title": "[${seriesName}] (catchy English description) [Vol.${volNumber}]",
-    "body": "(2-3 English sentences, 1-2 emojis, mention scenarios/mood + Midroll-Ad-Free)",
-    "hashtags_top": "#tag1 #tag2 #tag3 ... (15 hashtags, single line, space-separated, all lowercase, jazz/mood/scenario related)",
-    "hashtags_bottom": "#tag1, #tag2, #tag3, ... (24 hashtags, single line, comma-separated, lowercase, more diverse SEO)"
+    "body": "(1-2 English sentences with 2-3 emojis, mention scenarios/mood + Midroll-Ad-Free)",
+    "hashtags_top": "#tag1 #tag2 ... (15 hashtags, single line, space-separated, lowercase, ENGLISH keywords)",
+    "hashtags_bottom": "#tag1 #tag2 #tag3 #tag4 #tag5 #neworleansjazz, #swingjazz, ... (24 hashtags total — first 5 space-separated, rest comma-separated, lowercase, ENGLISH)"
   },
-  "ko": { "title": "...", "body": "...", "hashtags_top": "...", "hashtags_bottom": "..." },
-  "ja": { ... },
-  "zh": { ... },
-  "zh-Hant": { ... },
-  "es": { ... },
-  "fr": { ... },
-  "de": { ... },
-  "it": { ... },
-  "pt": { ... },
-  "ru": { ... },
-  "nl": { ... },
-  "th": { ... },
-  "vi": { ... },
-  "id": { ... },
-  "ms": { ... },
-  "tl": { ... }
+  "ko": {
+    "title": "[(시리즈 한국어 번역)] (한국어 매력적 설명) [Vol.${volNumber}]",
+    "tagline": "(한국어 1줄 hook 문장 + 1-2 이모지 옵션)",
+    "body": "(한국어 3-4 문장, Vol.${volNumber} 언급, 분위기/시나리오/시대 언급, 1-2 이모지)",
+    "hashtags_top": "#태그1 #태그2 (한국어 해시태그 2-3개, 한 줄)",
+    "hashtags_bottom": "#태그1 #태그2 ... (한국어 해시태그 15개, 공백 구분)"
+  },
+  "ja": {
+    "title": "[(시리즈 日本語 번역)] (日本語 catchy description) [Vol.${volNumber}]",
+    "tagline": "(日本語 1줄 hook 문장)",
+    "body": "(日本語 3-4 문장, Vol.${volNumber} 언급)",
+    "hashtags_top": "#ハッシュタグ1 #ハッシュタグ2 (日本語 2-3개)",
+    "hashtags_bottom": "#ハッシュタグ1 ... (日本語 15개)"
+  },
+  "zh": { /* 简体中文, same schema as ko/ja */ },
+  "zh-Hant": { /* 繁體中文 */ },
+  "es": { /* Español */ },
+  "fr": { /* Français */ },
+  "de": { /* Deutsch */ },
+  "it": { /* Italiano */ },
+  "pt": { /* Português */ },
+  "ru": { /* Русский */ },
+  "nl": { /* Nederlands */ },
+  "th": { /* ไทย */ },
+  "vi": { /* Tiếng Việt */ },
+  "id": { /* Bahasa Indonesia */ },
+  "ms": { /* Bahasa Melayu */ },
+  "tl": { /* Filipino */ }
 }
 
-## CRITICAL TITLE LENGTH RULE (YouTube max = 100 characters per title)
-Format: [${seriesName}] (description) [Vol.${volNumber}]
-- The fixed parts "[${seriesName}] " + " [Vol.${volNumber}]" already take ~${fixedLen} characters.
-- The (description) middle MUST be max ${bodyMax} characters total (count emojis as 2 chars each).
-- KEEP DESCRIPTIONS PUNCHY AND SHORT. Do not exceed 100 chars total per title in any language.
+## CRITICAL Translation Rules
 
-Examples (good length):
-✅ "[Showa Era] Smooth Jazz for Cozy Evenings 🌙 [Vol.1]"  (51 chars)
-✅ "[New Orleans] Energetic Swing for Workouts 💪 [Vol.3]"  (51 chars)
-❌ "[New Orleans] Uplifting & Happy Instrumental Music for Good Mood and Stress Relief [Vol.1]"  (90+ chars — too long)
+1. **Series Name (NATIVE TRANSLATION)** — the series name "${seriesName}" MUST be NATIVELY TRANSLATED into each target language:
+   - "New Orleans" → "ニューオーリンズ" (ja), "뉴올리언스" (ko), "新奥尔良" (zh, Simplified), "紐奧良" (zh-Hant), "Nueva Orleans" (es), "La Nouvelle-Orléans" (fr), "Neue Orleans" (de), etc.
+   - Always wrapped in single brackets [].
+   - English uses the original "${seriesName}".
 
-## Title Rules
-- Format: [${seriesName}] (description in target language) [Vol.${volNumber}]
-- The literal "[${seriesName}]" prefix and "[Vol.${volNumber}]" suffix MUST stay identical in every language (universal).
-- Description in the middle: catchy, mentions mood/scenario, in target language.
-- TOTAL title length MUST be ≤100 characters in EVERY language. Verify each language before output.
+2. **Title Length ≤ 100 chars per language** (YouTube max). Count emojis as 2 chars.
+   - English fixed parts "[${seriesName}] " + " [Vol.${volNumber}]" already take ~${fixedLen} chars → description max ~${bodyMax} chars.
+   - For non-English, native translation may be shorter or longer — keep TOTAL title ≤100.
 
-## Body Rules
-- 2-3 sentences in target language.
-- 1-2 emojis (jazz/mood related: 🎷 💃 🌟 🎵 ☕ 🌙 🚗 🎺 etc).
-- Mention "Midroll-Ad-Free" or its target-language equivalent.
-- Engaging tone, written for the listener.
+3. **English schema (en)** — Path A 영어 영상과 동일 풀 형식:
+   - body: 1-2 sentences with 2-3 emojis. Mention mood/scenarios + Midroll-Ad-Free.
+   - hashtags_top: 15 ENGLISH hashtags, space-separated, lowercase.
+   - hashtags_bottom: 24 ENGLISH hashtags — first 5 space-separated, rest comma-separated.
 
-## Hashtags Rules
-- hashtags_top: 15 hashtags total, space-separated, lowercase, ENGLISH keywords only (global SEO).
-- hashtags_bottom: 24 hashtags total, comma-separated, lowercase, ENGLISH keywords only (more diverse SEO).
-- Both fields use the SAME English hashtags across ALL 17 languages — viewers find the channel via English keywords.
-- Topics: jazz, swing, big band, ${mood}, ${scenarios}, vintage, classic, instrumental, premium jazz lounge, etc.
+4. **Non-English schema (ko/ja/zh/...)** — 단순 형식 (영어와 다름):
+   - tagline: ONE catchy hook sentence (different from body, used as first-impression line).
+   - body: 3-4 sentences. Mention Vol.${volNumber}, mood, scenarios, era. 1-2 emojis.
+   - hashtags_top: 2-3 NATIVE-LANGUAGE hashtags only (very short — first line of description).
+   - hashtags_bottom: 15 NATIVE-LANGUAGE hashtags, space-separated.
 
-Return ${allLangs.length} language entries. JSON only.`;
+## Title Examples (length-checked)
+
+en:
+✅ "[New Orleans] Energetic Swing Jazz for Workouts 💪 [Vol.${volNumber}]"
+✅ "[Showa Era] Smooth Jazz for Cozy Evenings 🌙 [Vol.${volNumber}]"
+
+ko:
+✅ "[뉴올리언스] 워크아웃에 어울리는 활기찬 스윙 재즈 [Vol.${volNumber}]"
+
+ja:
+✅ "[ニューオーリンズ] ワークアウト向けエネルギッシュなスウィングジャズ [Vol.${volNumber}]"
+
+## Body Examples (matching scenarios)
+
+en (1-2 sentences, 2-3 emojis):
+"feel the lively swing rhythms perfect for morning workouts! 💪🎷 enjoy energetic big band jazz with premium jazz lounge — 100% midroll-ad-free. 🌟"
+
+ko (3-4 sentences, Vol 언급, 1-2 이모지):
+"이 경쾌한 스윙 컬렉션과 함께 뉴올리언스 재즈의 활기찬 세계로 빠져보세요. 워크아웃, 모닝 루틴, 또는 일상에 활력을 더하는 데 완벽한 배경음악입니다. ${volNumber}번째 볼륨은 여러분의 일상 플레이리스트에 더 큰 에너지를 불어넣어 줄 것입니다. 🎷 미드롤 광고 없이 끊김 없이 즐기세요. 💪"
+
+ja (3-4 文, Vol 言及):
+"この陽気なスウィングコレクションで、ニューオーリンズ・ジャズの活気あふれる世界に浸りましょう。ワークアウト、朝のルーティン、あるいは日常に活力を与えるのに最適な選曲です。第${volNumber}弾は、あなたの日常のプレイリストにさらなるエネルギーを届けます。🎷 ミッドロール広告なしで快適にお楽しみください。💪"
+
+Generate now. Return JSON only — all ${allLangs.length} languages.`;
 }
 
 // Path B 전용 Gemini 모델 — pro 가 maxOutputTokens 65536 지원 (flash 는 8192 한계로 17개 언어 잘림).
@@ -2929,26 +2997,18 @@ async function generatePathBWithRetry(prompt, maxRetries = 2) {
   throw lastError || new Error('Gemini 호출 실패 (알 수 없음)');
 }
 
-// 파싱된 JSON → generatedMeta (Path A 와 동일 구조).
-//  파싱은 generatePathBWithRetry 가 담당 — 여기는 객체 받음.
+// 파싱된 JSON → generatedMeta (Path A 와 동일 구조, 단 description 형식이 lang 별로 다름).
+//  영어: buildEnglishDescription (풀 형식 — Path A 영어 영상과 동일)
+//  16개 언어: buildLocalizedDescription (단순 형식 — native 해시태그 + tagline + [[제목]] + 짧은 영어 푸터)
 function buildPathBMeta(parsed, inputs, newTracks) {
   const { seriesName, volNumber } = inputs;
   const timeline = generatePathBTimeline(newTracks);
-
-  function buildDescription(langData) {
-    return PJL_HEADER_TEMPLATE
-      .replace('{TITLE}', langData.title || '')
-      .replace('{BODY}', langData.body || '')
-      .replace('{HASHTAGS_TOP}', langData.hashtags_top || '')
-      .replace('{TIMELINE}', timeline)
-      .replace('{HASHTAGS_BOTTOM}', langData.hashtags_bottom || '');
-  }
 
   const result = {
     defaultLanguage: 'en',
     appliedVol: volNumber,
     title: { default: parsed.en.title },
-    description: { default: buildDescription(parsed.en) },
+    description: { default: buildEnglishDescription(parsed.en, timeline) },
     tags: [],
     localizations: {},
     missingLanguages: [],
@@ -2963,8 +3023,22 @@ function buildPathBMeta(parsed, inputs, newTracks) {
     }
     result.localizations[lang] = {
       title: langData.title,
-      description: buildDescription(langData),
+      description: buildLocalizedDescription(langData, timeline),
     };
+  }
+
+  // 진단 로그 — 각 언어 제목 길이 + 누락 / tagline 누락 체크
+  console.log('[Path B] generated 진단:');
+  console.log(`  defaultLanguage: ${result.defaultLanguage}`);
+  console.log(`  en title (${result.title.default.length}자): ${result.title.default}`);
+  console.log(`  localizations 수: ${Object.keys(result.localizations).length}/${PATH_B_LANGUAGES.length}`);
+  if (result.missingLanguages.length) {
+    console.log(`  missingLanguages: ${result.missingLanguages.join(', ')}`);
+  }
+  for (const [lang, loc] of Object.entries(result.localizations)) {
+    const titlePreview = loc.title.length > 80 ? loc.title.slice(0, 77) + '...' : loc.title;
+    const taglineMissing = !parsed[lang]?.tagline ? ' ⚠ tagline 누락' : '';
+    console.log(`  [${lang}] (${loc.title.length}자)${taglineMissing}: ${titlePreview}`);
   }
 
   return result;
