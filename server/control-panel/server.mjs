@@ -2804,27 +2804,93 @@ Generate complete metadata for a new jazz video in ${allLangs.length} languages:
 Return ${allLangs.length} language entries. JSON only.`;
 }
 
-// Gemini 응답 → generatedMeta (Path A 와 동일 구조)
-function buildPathBMeta(geminiResponseText, inputs, newTracks) {
-  const { seriesName, volNumber } = inputs;
+// Path B 전용 Gemini 모델 — pro 가 maxOutputTokens 65536 지원 (flash 는 8192 한계로 17개 언어 잘림).
+//   .env.local 에서 PATH_B_GEMINI_MODEL 로 override 가능 (예: gemini-3-pro-preview).
+const PATH_B_MODEL = process.env.PATH_B_GEMINI_MODEL || 'gemini-2.5-pro';
 
-  // 응답 cleanse + JSON.parse
-  let cleaned = String(geminiResponseText || '').trim();
+// Gemini 응답 텍스트 cleanse + JSON.parse — retry 함수와 미리보기 둘 다 사용.
+//   responseMimeType: 'application/json' 가 lib/llm.mjs 에 hardcoded 되어있어
+//   markdown fence 안 붙는 게 정상이지만, 모델이 가끔 fence 붙이는 케이스 보험.
+function parsePathBResponse(text) {
+  let cleaned = String(text || '').trim();
   if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7).trim();
   else if (cleaned.startsWith('```')) cleaned = cleaned.slice(3).trim();
   if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3).trim();
+  return JSON.parse(cleaned);
+}
 
-  let parsed;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch (e) {
-    throw new Error(`Gemini JSON 파싱 실패: ${e.message}. 응답 앞 200자: ${cleaned.slice(0, 200)}`);
+// === Path B Gemini 호출 + retry (최대 2회) ===
+//  실패 케이스:
+//    (a) JSON 파싱 실패 (응답 잘림 — maxOutputTokens 부족 or 모델 max 초과)
+//    (b) 17개 언어 중 4개 이상 누락 → 재시도
+//  마지막 시도까지 실패하면 throw.
+async function generatePathBWithRetry(prompt, maxRetries = 2) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`[Path B] Gemini 시도 ${attempt}/${maxRetries} (model: ${PATH_B_MODEL})...`);
+      const startTime = Date.now();
+
+      const text = await callGemini(prompt, {
+        model: PATH_B_MODEL,
+        temperature: 0.85,
+        maxOutputTokens: 65536, // pro 모델 한계까지 — 17개 언어 안전
+      });
+
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`[Path B] 응답 (${elapsed}초, ${text.length} chars)`);
+
+      let parsed;
+      try {
+        parsed = parsePathBResponse(text);
+      } catch (parseErr) {
+        const err = new Error(
+          `JSON 파싱 실패: ${parseErr.message}. 응답 ${text.length} chars (잘렸을 가능성 — maxOutputTokens 또는 모델 max 초과).`,
+        );
+        if (attempt < maxRetries) {
+          console.warn(`[Path B] 시도 ${attempt} 파싱 실패 → 재시도:`, parseErr.message);
+          lastError = err;
+          continue;
+        }
+        throw err;
+      }
+
+      if (!parsed.en || !parsed.en.title) {
+        const err = new Error('Gemini 응답에 en 또는 en.title 누락 (default language 빠짐)');
+        if (attempt < maxRetries) {
+          console.warn(`[Path B] 시도 ${attempt} en 누락 → 재시도`);
+          lastError = err;
+          continue;
+        }
+        throw err;
+      }
+
+      const expectedLangs = ['en', ...PATH_B_LANGUAGES];
+      const missingLangs = expectedLangs.filter((l) => !parsed[l] || !parsed[l].title);
+
+      if (missingLangs.length > 3 && attempt < maxRetries) {
+        console.warn(`[Path B] 시도 ${attempt}: ${missingLangs.length}개 언어 누락 (${missingLangs.join(',')}) → 재시도`);
+        continue;
+      }
+      if (missingLangs.length) {
+        console.warn(`[Path B] 시도 ${attempt}: ${missingLangs.length}개 언어 누락 (${missingLangs.join(',')}) — 진행`);
+      }
+
+      return { parsed, elapsed, attemptCount: attempt };
+    } catch (e) {
+      lastError = e;
+      if (attempt < maxRetries) {
+        console.warn(`[Path B] 시도 ${attempt} 예외 → 재시도:`, e.message);
+      }
+    }
   }
+  throw lastError || new Error('Gemini 호출 실패 (알 수 없음)');
+}
 
-  if (!parsed.en || !parsed.en.title) {
-    throw new Error('Gemini 응답에 en 항목 또는 en.title 누락');
-  }
-
+// 파싱된 JSON → generatedMeta (Path A 와 동일 구조).
+//  파싱은 generatePathBWithRetry 가 담당 — 여기는 객체 받음.
+function buildPathBMeta(parsed, inputs, newTracks) {
+  const { seriesName, volNumber } = inputs;
   const timeline = generatePathBTimeline(newTracks);
 
   function buildDescription(langData) {
@@ -2896,27 +2962,16 @@ app.post('/api/uploader/path-b/generate', async (req, res) => {
 
   try {
     const prompt = buildPathBPrompt(inputs);
-    console.log(`[Path B] Gemini 호출 시작 — 시리즈: "${inputs.seriesName}", Vol.${inputs.volNumber}`);
-    const startTime = Date.now();
+    console.log(`[Path B] 시작 — 시리즈: "${inputs.seriesName}", Vol.${inputs.volNumber}`);
 
-    // 17개 언어 × ~250 토큰 = ~4500. 8000 으로 여유.
-    const text = await callGemini(prompt, {
-      temperature: 0.85,
-      maxOutputTokens: 8192,
-    });
+    const { parsed, elapsed, attemptCount } = await generatePathBWithRetry(prompt, 2);
 
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[Path B] Gemini 응답 받음 (${elapsed}초, ${text.length} chars)`);
+    const generated = buildPathBMeta(parsed, inputs, newTracks);
+    console.log(`[Path B] generatedMeta 조립 OK — ${Object.keys(generated.localizations).length}/${PATH_B_LANGUAGES.length} 언어 (시도 ${attemptCount}회)`);
 
-    const generated = buildPathBMeta(text, inputs, newTracks);
-    console.log(`[Path B] generatedMeta 조립 OK — ${Object.keys(generated.localizations).length}/${PATH_B_LANGUAGES.length} 언어`);
-    if (generated.missingLanguages.length) {
-      console.warn(`[Path B] 누락 언어: ${generated.missingLanguages.join(', ')}`);
-    }
-
-    res.json({ ok: true, generated, geminiElapsed: elapsed });
+    res.json({ ok: true, generated, geminiElapsed: elapsed, attemptCount });
   } catch (e) {
-    console.error('[Path B] 실패:', e?.message || e);
+    console.error('[Path B] 최종 실패:', e?.message || e);
     res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
