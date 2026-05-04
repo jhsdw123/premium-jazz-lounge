@@ -2292,13 +2292,16 @@ const PATH_A_TARGET_LANGUAGES = [
 
 // === Vol 숫자 추출 (어떤 언어 제목이든) ===
 //  여러 패턴 중 첫 매치 → 정수 반환. 못 찾으면 null.
+//  Phase 5-D: 비표준 (vol.X) / (vol N-M) 패턴 지원 — The Grand Fanfare 시리즈.
 function extractVolNumber(text) {
   if (!text) return null;
   const patterns = [
-    /\[Vol\.?\s*(\d+)\]/i,
-    /\(Vol\.?\s*(\d+)\)/i,
-    /\bVol\.?\s*(\d+)\b/i,
-    /\[(\d{1,3})\]\s*$/, // 프랑스어 [5]
+    /\[Vol\.?\s*(\d+)\]/i,            // [Vol.5] / [Vol5]
+    /\(Vol\.?\s*(\d+)\)/i,            // (Vol 5) / (Vol5)
+    /\(vol\.(\d+)\)/i,                 // (vol.5) — 비표준 The Grand Fanfare
+    /\(vol\s+(\d+)(?:[\s\-\d]*)\)/i,  // (vol 1-2) — 첫 숫자만
+    /\bVol\.?\s*(\d+)\b/i,            // bare Vol 5
+    /\[(\d{1,3})\]\s*$/,              // 프랑스어 끝 [5]
   ];
   for (const p of patterns) {
     const m = String(text).match(p);
@@ -2317,6 +2320,8 @@ function unifyVolPattern(text, newVolNumber) {
   // 알려진 Vol 패턴 모두 제거 (앞쪽 가로공백 흡수)
   result = result.replace(/\s*\[Vol\.?\s*\d+\]/gi, '');         // [Vol.5] / [Vol5]
   result = result.replace(/\s*\(Vol\.?\s*\d+\)/gi, '');         // (Vol 5) / (Vol5)
+  result = result.replace(/\s*\(vol\.\d+\)/gi, '');             // (vol.5) — 비표준 The Grand Fanfare
+  result = result.replace(/\s*\(vol\s+\d+(?:[\s\-\d]*)\)/gi, ''); // (vol 1-2) — 범위
   result = result.replace(/\s*\(\d+\s*집\)/g, '');              // 한국어 (5집)
   result = result.replace(/\s*\(Том\s*\d+\)/gi, '');            // 러시아 (Том 5)
   result = result.replace(/\s*\(เล่ม\s*\d+\)/g, '');            // 태국 (เล่ม 5)
@@ -2328,19 +2333,38 @@ function unifyVolPattern(text, newVolNumber) {
 }
 
 // === 시리즈 키 추출 ===
-//  표준 패턴 [시리즈명] ... 으로 시작하는 영상에서 시리즈명 반환.
+//  패턴 1 (표준): [시리즈명] ... 으로 시작하는 영상.
+//  패턴 2 (Phase 5-D 비표준): 콜론(:) 또는 (vol N) 앞까지가 시리즈명.
+//                예: "The Grand 🎺Fanfare🎺: Nostalgic Big Band Swing for a Powerful Start(vol.5)"
 //  안전 장치:
-//    - 시리즈명이 Vol/Volume/Episode/EP/Pt/Part 로 시작 → null (Vol.5 자체 매치 방지)
-//    - 시리즈명이 1~2글자 → null (잘못된 매치 방지)
-//    - 대괄호 X → null (변형/DRAFT 패턴 안전 무시)
+//    - 시리즈명이 Vol/Volume/Episode/EP/Pt/Part 로 시작 → null
+//    - 시리즈명 길이 < 3 → null (패턴 1) / < 5 → null (패턴 2 더 엄격)
 function extractSeriesKey(title) {
   if (!title) return null;
-  const m = String(title).match(/^\[([^\]]+)\]/);
-  if (!m) return null;
-  const candidate = m[1].trim();
-  if (/^(Vol|Volume|Episode|EP|Pt|Part)[\s.\d]/i.test(candidate)) return null;
-  if (candidate.length < 3) return null;
-  return candidate;
+  const t = String(title);
+
+  // 패턴 1: [시리즈명] prefix
+  const bracket = t.match(/^\[([^\]]+)\]/);
+  if (bracket) {
+    const candidate = bracket[1].trim();
+    if (/^(Vol|Volume|Episode|EP|Pt|Part)[\s.\d]/i.test(candidate)) return null;
+    if (candidate.length < 3) return null;
+    return candidate;
+  }
+
+  // 패턴 2: "(vol N)" / "(vol.N)" 류 vol 패턴 직전까지를 시리즈명.
+  //   콜론(:) / 한글 / 이모지 / 공백 모두 시리즈명 안에 포함 가능 (The Grand Fanfare).
+  //   vol 패턴이 없으면 null (변형/DRAFT 안전 무시).
+  const volMatch = t.match(/^(.+?)\s*\(vol\.?\s*\d/i);
+  if (volMatch) {
+    const candidate = volMatch[1].trim();
+    if (candidate.length >= 5 && candidate.length <= 120) {
+      if (/^(Vol|Volume|Episode|EP|Pt|Part)[\s.\d]/i.test(candidate)) return null;
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 function validateExtractSeriesKey() {
@@ -2352,12 +2376,17 @@ function validateExtractSeriesKey() {
     { input: '[ABC]', expected: 'ABC' },
     { input: '[A] short', expected: null },
     { input: '[No Ads] New Orleans Jazz...', expected: 'No Ads' }, // 형님 검토 필요
+    // Phase 5-D 비표준 시리즈
+    { input: 'The Grand 🎺Fanfare🎺: Nostalgic Big Band Swing for a Powerful Start(vol.5)',
+      expected: 'The Grand 🎺Fanfare🎺: Nostalgic Big Band Swing for a Powerful Start' },
+    { input: 'Title without colon or paren', expected: null },
+    { input: 'Tiny: x', expected: null }, // 길이 < 5
   ];
   let pass = 0;
   cases.forEach((c, i) => {
     const r = extractSeriesKey(c.input);
     const ok = r === c.expected;
-    console.log(`[Series] ${ok ? '✓' : '✗'} case ${i + 1}: "${c.input.substring(0, 40)}" → ${r === null ? 'null' : `"${r}"`}`);
+    console.log(`[Series] ${ok ? '✓' : '✗'} case ${i + 1}: "${c.input.substring(0, 60)}" → ${r === null ? 'null' : `"${r}"`}`);
     if (!ok) console.log(`  expected: ${c.expected === null ? 'null' : `"${c.expected}"`}`);
     ok && pass++;
   });
@@ -2365,6 +2394,30 @@ function validateExtractSeriesKey() {
 }
 if (process.env.NODE_ENV !== 'production') {
   validateExtractSeriesKey();
+}
+
+function validateExtractVolNumber() {
+  const cases = [
+    { input: '[Vol.5]', expected: 5 },
+    { input: '(Vol 5)', expected: 5 },
+    { input: '(vol.5)', expected: 5 },         // 신규 비표준
+    { input: '(vol 1-2)', expected: 1 },        // 신규 범위 — 첫 숫자만
+    { input: 'No vol', expected: null },
+    { input: 'Bare Vol 7 inline', expected: 7 },
+    { input: 'French ending [42]', expected: 42 },
+  ];
+  let pass = 0;
+  cases.forEach((c, i) => {
+    const r = extractVolNumber(c.input);
+    const ok = r === c.expected;
+    console.log(`[Vol] ${ok ? '✓' : '✗'} case ${i + 1}: "${c.input}" → ${r === null ? 'null' : r}`);
+    if (!ok) console.log(`  expected: ${c.expected === null ? 'null' : c.expected}`);
+    ok && pass++;
+  });
+  console.log(`[Vol] ${pass}/${cases.length} pass`);
+}
+if (process.env.NODE_ENV !== 'production') {
+  validateExtractVolNumber();
 }
 
 // === Vol 패턴 in-place 교체 (description 용) ===
@@ -2377,6 +2430,8 @@ function replaceVolPattern(text, newVolNumber) {
   let result = String(text);
   result = result.replace(/\[Vol\.?\s*\d+\]/gi, newPattern);     // [Vol.5] / [Vol5]
   result = result.replace(/\(Vol\.?\s*\d+\)/gi, newPattern);     // (Vol 5)
+  result = result.replace(/\(vol\.\d+\)/gi, newPattern);          // (vol.5) — 비표준
+  result = result.replace(/\(vol\s+\d+(?:[\s\-\d]*)\)/gi, newPattern); // (vol 1-2)
   result = result.replace(/\(\s*\d+\s*집\s*\)/g, newPattern);    // (5집)
   result = result.replace(/\(Том\s*\d+\)/gi, newPattern);        // (Том 5)
   result = result.replace(/\(เล่ม\s*\d+\)/g, newPattern);        // (เล่ม 5)
@@ -2397,6 +2452,10 @@ function validateReplaceVolPattern() {
     { input: 'No vol here', newVol: 9, expected: 'No vol here' },
     { input: 'Big Band Classics from the [1930] era', newVol: 9,
       expected: 'Big Band Classics from the [1930] era' },
+    { input: 'Grand Fanfare(vol.5) line', newVol: 6,
+      expected: 'Grand Fanfare[Vol.6] line' },
+    { input: 'Range (vol 1-2) sample', newVol: 3,
+      expected: 'Range [Vol.3] sample' },
   ];
   let pass = 0;
   cases.forEach((c, i) => {
@@ -2435,6 +2494,11 @@ function validateUnifyVol() {
       expected: 'Tâm Trạng Tốt Tức Thì: ... Tiếp Năng Lượng [Vol.6]' },
     { input: '[Vol.99]', newVol: 100, expected: '[Vol.100]' },
     { input: 'Already unified [Vol.5]', newVol: 6, expected: 'Already unified [Vol.6]' },
+    // Phase 5-D 비표준 시리즈
+    { input: 'The Grand 🎺Fanfare🎺: Nostalgic Big Band Swing for a Powerful Start(vol.5)', newVol: 6,
+      expected: 'The Grand 🎺Fanfare🎺: Nostalgic Big Band Swing for a Powerful Start [Vol.6]' },
+    { input: 'Grand Fanfare title (vol 1-2)', newVol: 3,
+      expected: 'Grand Fanfare title [Vol.3]' },
   ];
   let pass = 0;
   let fail = 0;
@@ -2617,6 +2681,242 @@ app.get('/api/youtube/videos/:id/meta', async (req, res) => {
     });
   } catch (e) {
     console.error('[YT] 메타 조회 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// ─── Phase 5-D: Path B — Gemini 새 메타 생성 (17개 언어) ──────────────────
+//
+//  새 시리즈 첫 영상 또는 기존 시리즈 새 본문 — Path A 처럼 source 재사용 X.
+//  Gemini 가 영어 base 생성 → 16개 언어 번역 → 영구 PJL 템플릿 (헤더/푸터) 적용.
+//  결과 구조는 Path A 와 동일 (generatedMeta) — 후속 미리보기/적용 단계 그대로 재사용.
+
+const PATH_B_LANGUAGES = [
+  'ko', 'ja', 'zh', 'zh-Hant',
+  'es', 'fr', 'de', 'it', 'pt',
+  'ru', 'nl', 'th', 'vi', 'id', 'ms', 'tl',
+];  // 16개 (en 제외 — Path B default)
+
+// PJL 영구 템플릿 — 헤더 + 본문 + 타임라인 + 채널 안내 + 저작권 + 해시태그
+const PJL_HEADER_TEMPLATE = `🐾 Follow Us for the earliest release → [https://www.youtube.com/@PremiumJazzLounge]
+{TITLE}
+
+{BODY}
+
+{HASHTAGS_TOP}
+-------------------------------------------------------------------------------------------------------------------------
+
+🐾 Join the Premium Jazz Lounge Family! → https://www.youtube.com/@PremiumJazzLounge ✔️
+Channel memberships allow you to join our channel and get Members-Only Perks like Badges, Emojis, early access to New Videos, and even Access to All Orchid Tones Library (Access to All Constantly Updated Music 🎧 included in the Premium Jazz Lounge Videos)!
+❤️ Become a Premium Jazz Lounge channel member!
+
+{TIMELINE}
+
+☕ About Premium Jazz Lounge channel:
+At Premium Jazz Lounge, we categorize our playlists according to the mood, tempo, genre, and intended use of each jazz track. We hope our subscribers enjoy exploring these curated selections.
+Thank you for your support and happy listening
+
+🎵 All music in this video and on this channel is original music created by us.
+🎵 All songs are performed by our musicians and AI. All music is composed by our authors.
+🎥 All videos on this channel are original videos produced by us.
+
+📩 Contact For business inquiries and licensing of our music, contact us via the following email address:
+Official contact: [dain.lim@outlook.com]
+
+© All rights reserved.
+℗ Music is Copyrighted by Premium Jazz Lounge.
+© Video is Copyrighted by Premium Jazz Lounge.
+
+🚫 Any reproduction or republication of all or part of this video/audio is prohibited.
+
+Hashtags
+{HASHTAGS_BOTTOM}`;
+
+// 타임라인 텍스트 — newTracks → "00:00 Title\n02:34 Title2\n..." 형식
+function generatePathBTimeline(newTracks) {
+  if (!Array.isArray(newTracks)) return '';
+  return newTracks.map((t) => `${t.timecode} ${t.title}`).join('\n');
+}
+
+// Gemini prompt 빌더 — 17개 언어 메타 동시 생성 (영어 base + 16개 번역)
+function buildPathBPrompt(inputs) {
+  const { seriesName, volNumber, mood, scenarios, era, notes } = inputs;
+  const allLangs = ['en', ...PATH_B_LANGUAGES];
+  const langList = allLangs.join(', ');
+
+  return `You are a YouTube SEO expert for "Premium Jazz Lounge" — a 24/7 jazz music streaming channel for international audience (especially Japan, US, France, Italy, Korea).
+
+Generate complete metadata for a new jazz video in ${allLangs.length} languages: ${langList}.
+
+## Video Info
+- Series: ${seriesName}
+- Volume: ${volNumber}
+- Mood: ${mood || 'jazz'}
+- Use Scenarios: ${scenarios || 'general listening'}
+- Era/Genre: ${era || ''}
+- Additional Notes: ${notes || ''}
+- Important: This video is Midroll-Ad-Free (no ads in the middle)
+
+## Output Format (STRICT JSON ONLY — no markdown, no commentary)
+
+{
+  "en": {
+    "title": "[${seriesName}] (catchy English description) [Vol.${volNumber}]",
+    "body": "(2-3 English sentences, 1-2 emojis, mention scenarios/mood + Midroll-Ad-Free)",
+    "hashtags_top": "#tag1 #tag2 #tag3 ... (15 hashtags, single line, space-separated, all lowercase, jazz/mood/scenario related)",
+    "hashtags_bottom": "#tag1, #tag2, #tag3, ... (24 hashtags, single line, comma-separated, lowercase, more diverse SEO)"
+  },
+  "ko": { "title": "...", "body": "...", "hashtags_top": "...", "hashtags_bottom": "..." },
+  "ja": { ... },
+  "zh": { ... },
+  "zh-Hant": { ... },
+  "es": { ... },
+  "fr": { ... },
+  "de": { ... },
+  "it": { ... },
+  "pt": { ... },
+  "ru": { ... },
+  "nl": { ... },
+  "th": { ... },
+  "vi": { ... },
+  "id": { ... },
+  "ms": { ... },
+  "tl": { ... }
+}
+
+## Title Rules
+- Format: [${seriesName}] (description in target language) [Vol.${volNumber}]
+- The literal "[${seriesName}]" prefix and "[Vol.${volNumber}]" suffix MUST stay identical in every language (universal).
+- Description in the middle: catchy, mentions mood/scenario, in target language.
+
+## Body Rules
+- 2-3 sentences in target language.
+- 1-2 emojis (jazz/mood related: 🎷 💃 🌟 🎵 ☕ 🌙 🚗 🎺 etc).
+- Mention "Midroll-Ad-Free" or its target-language equivalent.
+- Engaging tone, written for the listener.
+
+## Hashtags Rules
+- hashtags_top: 15 hashtags total, space-separated, lowercase, ENGLISH keywords only (global SEO).
+- hashtags_bottom: 24 hashtags total, comma-separated, lowercase, ENGLISH keywords only (more diverse SEO).
+- Both fields use the SAME English hashtags across ALL 17 languages — viewers find the channel via English keywords.
+- Topics: jazz, swing, big band, ${mood}, ${scenarios}, vintage, classic, instrumental, premium jazz lounge, etc.
+
+Return ${allLangs.length} language entries. JSON only.`;
+}
+
+// Gemini 응답 → generatedMeta (Path A 와 동일 구조)
+function buildPathBMeta(geminiResponseText, inputs, newTracks) {
+  const { seriesName, volNumber } = inputs;
+
+  // 응답 cleanse + JSON.parse
+  let cleaned = String(geminiResponseText || '').trim();
+  if (cleaned.startsWith('```json')) cleaned = cleaned.slice(7).trim();
+  else if (cleaned.startsWith('```')) cleaned = cleaned.slice(3).trim();
+  if (cleaned.endsWith('```')) cleaned = cleaned.slice(0, -3).trim();
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (e) {
+    throw new Error(`Gemini JSON 파싱 실패: ${e.message}. 응답 앞 200자: ${cleaned.slice(0, 200)}`);
+  }
+
+  if (!parsed.en || !parsed.en.title) {
+    throw new Error('Gemini 응답에 en 항목 또는 en.title 누락');
+  }
+
+  const timeline = generatePathBTimeline(newTracks);
+
+  function buildDescription(langData) {
+    return PJL_HEADER_TEMPLATE
+      .replace('{TITLE}', langData.title || '')
+      .replace('{BODY}', langData.body || '')
+      .replace('{HASHTAGS_TOP}', langData.hashtags_top || '')
+      .replace('{TIMELINE}', timeline)
+      .replace('{HASHTAGS_BOTTOM}', langData.hashtags_bottom || '');
+  }
+
+  const result = {
+    defaultLanguage: 'en',
+    appliedVol: volNumber,
+    title: { default: parsed.en.title },
+    description: { default: buildDescription(parsed.en) },
+    tags: [],
+    localizations: {},
+    missingLanguages: [],
+    pathBInputs: { seriesName, volNumber },
+  };
+
+  for (const lang of PATH_B_LANGUAGES) {
+    const langData = parsed[lang];
+    if (!langData || !langData.title) {
+      result.missingLanguages.push(lang);
+      continue;
+    }
+    result.localizations[lang] = {
+      title: langData.title,
+      description: buildDescription(langData),
+    };
+  }
+
+  return result;
+}
+
+// === POST /api/uploader/path-b/generate ===
+//  body: { seriesName, volNumber, mood?, scenarios?, era?, notes?, newTracks }
+//  Gemini 호출 → 17개 언어 generatedMeta + missingLanguages 반환.
+app.post('/api/uploader/path-b/generate', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(500).json({
+      ok: false,
+      error: 'GEMINI_API_KEY 환경변수 없음. .env.local 에 추가 필요.',
+    });
+  }
+
+  const { seriesName, volNumber, mood, scenarios, era, notes, newTracks } = req.body || {};
+  if (!seriesName || typeof seriesName !== 'string' || !seriesName.trim()) {
+    return res.status(400).json({ ok: false, error: 'seriesName 필요' });
+  }
+  if (!Number.isFinite(volNumber) || volNumber < 1) {
+    return res.status(400).json({ ok: false, error: '유효한 volNumber 필요' });
+  }
+  if (!Array.isArray(newTracks) || !newTracks.length) {
+    return res.status(400).json({ ok: false, error: 'newTracks 배열 필요' });
+  }
+
+  const inputs = {
+    seriesName: seriesName.trim(),
+    volNumber,
+    mood: (mood || '').trim(),
+    scenarios: (scenarios || '').trim(),
+    era: (era || '').trim(),
+    notes: (notes || '').trim(),
+  };
+
+  try {
+    const prompt = buildPathBPrompt(inputs);
+    console.log(`[Path B] Gemini 호출 시작 — 시리즈: "${inputs.seriesName}", Vol.${inputs.volNumber}`);
+    const startTime = Date.now();
+
+    // 17개 언어 × ~250 토큰 = ~4500. 8000 으로 여유.
+    const text = await callGemini(prompt, {
+      temperature: 0.85,
+      maxOutputTokens: 8192,
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[Path B] Gemini 응답 받음 (${elapsed}초, ${text.length} chars)`);
+
+    const generated = buildPathBMeta(text, inputs, newTracks);
+    console.log(`[Path B] generatedMeta 조립 OK — ${Object.keys(generated.localizations).length}/${PATH_B_LANGUAGES.length} 언어`);
+    if (generated.missingLanguages.length) {
+      console.warn(`[Path B] 누락 언어: ${generated.missingLanguages.join(', ')}`);
+    }
+
+    res.json({ ok: true, generated, geminiElapsed: elapsed });
+  } catch (e) {
+    console.error('[Path B] 실패:', e?.message || e);
     res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });

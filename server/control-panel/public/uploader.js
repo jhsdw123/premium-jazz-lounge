@@ -840,8 +840,299 @@ function renderPathSelector() {
     showPathASourceSelect();
   });
   document.getElementById('pathBBtn').addEventListener('click', () => {
-    alert('Path B (새 메타 생성) 는 Phase 5-D 에서 구현 예정입니다.');
+    window.uploaderState.path = 'B';
+    showPathBInputForm();
   });
+}
+
+// ────────────────────────────────────────────────────────────────
+// Phase 5-D: Path B — Gemini 새 메타 생성 (17개 언어)
+// ────────────────────────────────────────────────────────────────
+function showPathBInputForm() {
+  const container = document.getElementById('metaNextStep');
+  if (!container) return;
+
+  container.innerHTML = `
+    <h3 style="color:var(--jazz-gold);margin:0 0 12px;font-size:13px;font-weight:600;">✨ Path B: 새 메타 생성</h3>
+
+    <div style="background:#161616;border-left:3px solid var(--jazz-gold);padding:10px 12px;margin-bottom:14px;border-radius:0 4px 4px 0;font-size:11px;color:var(--text-muted);line-height:1.6;">
+      Gemini 가 영어 base 생성 → 16개 언어 자동 번역.<br>
+      형님이 각 언어 검토 + 수정 가능. 응답 ~10–60초.
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">시리즈명 <span style="color:#f55;">*</span></label>
+      <input type="text" id="pathBSeriesName" placeholder="예: New Orleans Jazz, Showa Era, Bayou Swing"
+        autocomplete="off" spellcheck="false"
+        style="width:100%;padding:8px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
+      <div style="font-size:10px;color:var(--text-muted);margin-top:3px;">
+        제목이 [시리즈명] 본문 [Vol.N] 형식으로 생성됨
+      </div>
+    </div>
+
+    <div style="margin-bottom:12px;display:flex;gap:10px;align-items:center;">
+      <label style="color:var(--text-muted);font-size:11px;">Vol 번호:</label>
+      <input type="number" id="pathBVolNumber" value="1" min="1" max="9999"
+        style="width:80px;padding:6px 8px;background:#0a0a0a;color:var(--text);border:1px solid #444;border-radius:4px;font-size:13px;font-family:ui-monospace,Menlo,monospace;">
+      <span id="pathBVolCheck" style="font-size:11px;"></span>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">분위기 키워드</label>
+      <input type="text" id="pathBMood" placeholder="예: Energetic, Smooth, Nostalgic, Cheerful"
+        autocomplete="off" spellcheck="false"
+        style="width:100%;padding:8px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">사용 시나리오</label>
+      <input type="text" id="pathBScenarios" placeholder="예: Morning, Workout, Driving, Cafe, Sleep"
+        autocomplete="off" spellcheck="false"
+        style="width:100%;padding:8px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">시대/장르 (선택)</label>
+      <input type="text" id="pathBEra" placeholder="예: 1930s Big Band, 1950s Bebop, 1970s Smooth Jazz"
+        autocomplete="off" spellcheck="false"
+        style="width:100%;padding:8px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
+    </div>
+
+    <div style="margin-bottom:14px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">추가 메모 (선택)</label>
+      <textarea id="pathBNotes" rows="3"
+        placeholder="예: Premium Jazz Lounge 채널 안내, Midroll ad-free 강조"
+        style="width:100%;padding:8px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;font-family:inherit;resize:vertical;"></textarea>
+    </div>
+
+    <div style="display:flex;gap:8px;">
+      <button id="pathBCancelBtn" type="button" class="te-btn" style="flex:0 0 auto;padding:8px 16px;">← 뒤로</button>
+      <button id="pathBGenerateBtn" type="button" class="te-btn gold" style="flex:1;padding:8px 16px;">🎨 Gemini 로 생성</button>
+    </div>
+
+    <div id="pathBLoadingMsg" style="display:none;margin-top:12px;padding:10px 12px;background:#1a1a1a;color:var(--jazz-gold);text-align:center;border-radius:4px;font-size:12px;">
+      ⏳ Gemini 가 17개 언어 메타 생성 중… (보통 10–60초)
+    </div>
+  `;
+
+  document.getElementById('pathBCancelBtn').addEventListener('click', () => renderPathSelector());
+  document.getElementById('pathBGenerateBtn').addEventListener('click', generatePathBMeta);
+
+  // Vol 번호 중복 검증 (debounce) — 시리즈명 + Vol 둘 다 있을 때만.
+  const volInput = document.getElementById('pathBVolNumber');
+  const seriesInput = document.getElementById('pathBSeriesName');
+  const checkVol = () => {
+    const series = seriesInput.value.trim();
+    const vol = parseInt(volInput.value, 10);
+    if (!series || !Number.isFinite(vol) || vol < 1) {
+      document.getElementById('pathBVolCheck').textContent = '';
+      return;
+    }
+    clearTimeout(pathBVolCheckTimer);
+    pathBVolCheckTimer = setTimeout(() => checkPathBVolDuplicate(vol, series), 300);
+  };
+  volInput.addEventListener('input', checkVol);
+  seriesInput.addEventListener('input', checkVol);
+}
+
+let pathBVolCheckTimer = null;
+
+async function checkPathBVolDuplicate(vol, series) {
+  const resultEl = document.getElementById('pathBVolCheck');
+  if (!resultEl) return;
+  try {
+    const url = `/api/youtube/check-vol/${vol}?series=${encodeURIComponent(series)}`;
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!data.ok) {
+      resultEl.style.color = '#f55';
+      resultEl.textContent = `(검사 실패)`;
+      return;
+    }
+    if (data.hasDuplicate) {
+      resultEl.style.color = '#f55';
+      resultEl.textContent = `⚠️ [${series}] Vol.${vol} 이미 존재 (${data.duplicates.length}개)`;
+    } else {
+      resultEl.style.color = '#4c4';
+      resultEl.textContent = `✓ [${series}] Vol.${vol} 사용 가능`;
+    }
+  } catch (e) {
+    resultEl.style.color = '#f55';
+    resultEl.textContent = `(검사 실패: ${e.message})`;
+  }
+}
+
+async function generatePathBMeta() {
+  const seriesName = document.getElementById('pathBSeriesName').value.trim();
+  const volNumber = parseInt(document.getElementById('pathBVolNumber').value, 10);
+  const mood = document.getElementById('pathBMood').value.trim();
+  const scenarios = document.getElementById('pathBScenarios').value.trim();
+  const era = document.getElementById('pathBEra').value.trim();
+  const notes = document.getElementById('pathBNotes').value.trim();
+
+  if (!seriesName) {
+    alert('시리즈명 필수');
+    return;
+  }
+  if (!Number.isFinite(volNumber) || volNumber < 1) {
+    alert('유효한 Vol 번호 필요 (≥1)');
+    return;
+  }
+
+  // 중복 검증 (시리즈별)
+  try {
+    const cr = await fetch(`/api/youtube/check-vol/${volNumber}?series=${encodeURIComponent(seriesName)}`);
+    const cd = await cr.json();
+    if (cd.ok && cd.hasDuplicate) {
+      const titles = cd.duplicates.map((d) => `- ${d.title}`).join('\n');
+      const proceed = confirm(`⚠️ [${seriesName}] Vol.${volNumber} 이미 존재 (${cd.duplicates.length}개):\n\n${titles}\n\n그래도 진행?`);
+      if (!proceed) return;
+    }
+  } catch (e) {
+    console.warn('[Path B] check-vol 실패 (계속 진행):', e.message);
+  }
+
+  const loadingMsg = document.getElementById('pathBLoadingMsg');
+  const generateBtn = document.getElementById('pathBGenerateBtn');
+  loadingMsg.style.display = 'block';
+  generateBtn.disabled = true;
+  generateBtn.style.opacity = '0.6';
+  generateBtn.style.cursor = 'wait';
+
+  try {
+    const r = await fetch('/api/uploader/path-b/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        seriesName, volNumber, mood, scenarios, era, notes,
+        newTracks: window.uploaderState.tracks,
+      }),
+    });
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+
+    window.uploaderState.path = 'B';
+    window.uploaderState.reuseSourceVideo = null;
+    window.uploaderState.generatedMeta = data.generated;
+    window.uploaderState.missingLanguages = data.generated.missingLanguages || [];
+    window.uploaderState.pathBInputs = { seriesName, volNumber, mood, scenarios, era, notes };
+
+    console.log(`[Path B] generatedMeta (${data.geminiElapsed}s):`, data.generated);
+    showPathBPreview(data.generated);
+  } catch (e) {
+    alert(`Path B 실패: ${e.message}`);
+  } finally {
+    loadingMsg.style.display = 'none';
+    generateBtn.disabled = false;
+    generateBtn.style.opacity = '1';
+    generateBtn.style.cursor = 'pointer';
+  }
+}
+
+function showPathBPreview(generated) {
+  const container = document.getElementById('metaNextStep');
+  if (!container) return;
+  const defaultLang = generated.defaultLanguage || 'en';
+  pathACurrentLangTab = defaultLang;
+
+  const langTabsHtml = PATH_A_LANGUAGES.map((lang) => {
+    const isDefault = lang === defaultLang;
+    const exists = isDefault || !!generated.localizations?.[lang];
+    const label = LANG_LABELS[lang] || lang;
+    return `
+      <button type="button" class="lang-tab" data-lang="${escapeHtml(lang)}" title="${escapeHtml(label)}"
+        style="padding:5px 9px;background:${exists ? '#1a1a1a' : '#3a1818'};color:${exists ? 'var(--text)' : '#f55'};
+               border:1px solid #333;cursor:pointer;border-radius:4px;font-size:11px;font-family:ui-monospace,Menlo,monospace;">
+        ${escapeHtml(lang)}${exists ? '' : ' ⚠'}
+      </button>
+    `;
+  }).join('');
+
+  const inputs = window.uploaderState.pathBInputs || {};
+  const applyInfoHtml = `
+    <div style="background:#161616;border-left:3px solid var(--jazz-gold);padding:10px 12px;margin-bottom:14px;border-radius:0 4px 4px 0;">
+      <div style="color:var(--jazz-gold);font-size:12px;font-weight:600;">✨ Path B (Gemini 생성)</div>
+      <div style="color:var(--text-muted);font-size:11px;margin-top:6px;line-height:1.7;">
+        시리즈: <strong style="color:var(--text);">[${escapeHtml(inputs.seriesName || '')}]</strong>
+        &nbsp;·&nbsp;
+        Vol: <strong style="color:var(--jazz-gold);">${generated.appliedVol ?? '?'}</strong>
+        ${inputs.mood ? `<br>분위기: ${escapeHtml(inputs.mood)}` : ''}
+        ${inputs.scenarios ? ` · 시나리오: ${escapeHtml(inputs.scenarios)}` : ''}
+      </div>
+    </div>
+  `;
+
+  const missingHtml = generated.missingLanguages?.length ? `
+    <div style="background:#3a1818;border-left:3px solid #f55;padding:10px 12px;margin-bottom:14px;font-size:11px;color:#fdd;border-radius:0 4px 4px 0;">
+      ⚠ Gemini 가 생성 안 한 언어 (${generated.missingLanguages.length}개):
+      <strong style="color:#fff;">${generated.missingLanguages.map(escapeHtml).join(', ')}</strong>
+      <div style="color:#caa;margin-top:4px;">"다시 생성" 으로 재시도 가능. 누락 언어는 적용 시 무시.</div>
+    </div>
+  ` : '';
+
+  container.innerHTML = `
+    <h3 style="color:var(--jazz-gold);margin:0 0 12px;font-size:13px;font-weight:600;">미리보기</h3>
+    ${applyInfoHtml}
+    ${missingHtml}
+    <div id="pathALangTabs" style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:14px;">${langTabsHtml}</div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">제목</label>
+      <textarea id="pathAPreviewTitle" rows="2"
+        style="width:100%;padding:8px 9px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;resize:vertical;font-family:inherit;"></textarea>
+    </div>
+
+    <div style="margin-bottom:12px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">설명</label>
+      <textarea id="pathAPreviewDescription" rows="18"
+        style="width:100%;padding:8px 9px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;resize:vertical;"></textarea>
+    </div>
+
+    <div style="margin-bottom:14px;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">해시태그 (Gemini 가 description 안에 직접 포함)</label>
+      <div style="padding:8px 9px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:4px;font-size:11px;color:var(--text-muted);">
+        (description 본문 안에 해시태그 포함됨 — YouTube tags 필드는 비움)
+      </div>
+    </div>
+
+    <div style="display:flex;gap:8px;">
+      <button id="pathBBackBtn" type="button" class="te-btn" style="flex:0 0 auto;padding:8px 16px;">← 입력 다시</button>
+      <button id="pathBRegenerateBtn" type="button" class="te-btn" style="flex:0 0 auto;padding:8px 16px;">🔄 다시 생성</button>
+      <button id="pathBNextBtn" type="button" class="te-btn gold" style="flex:1;padding:8px 16px;">다음 단계 (Phase 5-F: 적용)</button>
+    </div>
+  `;
+
+  switchLangTab(pathACurrentLangTab);
+
+  container.querySelectorAll('.lang-tab').forEach((tab) => {
+    tab.addEventListener('click', () => switchLangTab(tab.dataset.lang));
+  });
+
+  document.getElementById('pathAPreviewTitle').addEventListener('input', saveCurrentLangEdit);
+  document.getElementById('pathAPreviewDescription').addEventListener('input', saveCurrentLangEdit);
+
+  document.getElementById('pathBBackBtn').addEventListener('click', () => showPathBInputForm());
+  document.getElementById('pathBRegenerateBtn').addEventListener('click', () => {
+    if (!confirm('현재 메타를 버리고 같은 입력값으로 Gemini 다시 호출?')) return;
+    const inputs = window.uploaderState.pathBInputs;
+    if (!inputs) {
+      alert('이전 입력값 없음 — 입력 폼으로 돌아가세요.');
+      return;
+    }
+    showPathBInputForm();
+    // 입력값 복원 + 즉시 재생성
+    setTimeout(() => {
+      document.getElementById('pathBSeriesName').value = inputs.seriesName || '';
+      document.getElementById('pathBVolNumber').value = inputs.volNumber || 1;
+      document.getElementById('pathBMood').value = inputs.mood || '';
+      document.getElementById('pathBScenarios').value = inputs.scenarios || '';
+      document.getElementById('pathBEra').value = inputs.era || '';
+      document.getElementById('pathBNotes').value = inputs.notes || '';
+      generatePathBMeta();
+    }, 50);
+  });
+
+  document.getElementById('pathBNextBtn').addEventListener('click', () => showApplyStep());
 }
 
 // === Path A — 재사용 source 영상 선택 화면 ===
@@ -924,12 +1215,14 @@ function filterPathASource(ev) {
   });
 }
 
-// 클라이언트 측 Vol 추출 (server 의 extractVolNumber 와 동일)
+// 클라이언트 측 Vol 추출 (server 의 extractVolNumber 와 동일 — Phase 5-D 비표준 패턴 포함)
 function extractVolNumberClient(text) {
   if (!text) return null;
   const patterns = [
     /\[Vol\.?\s*(\d+)\]/i,
     /\(Vol\.?\s*(\d+)\)/i,
+    /\(vol\.(\d+)\)/i,                 // 비표준 (vol.5)
+    /\(vol\s+(\d+)(?:[\s\-\d]*)\)/i,  // 비표준 (vol 1-2)
     /\bVol\.?\s*(\d+)\b/i,
     /\[(\d{1,3})\]\s*$/,
   ];
@@ -940,15 +1233,32 @@ function extractVolNumberClient(text) {
   return null;
 }
 
-// 클라이언트 측 시리즈 키 추출 (server 의 extractSeriesKey 와 동일)
+// 클라이언트 측 시리즈 키 추출 (server 의 extractSeriesKey 와 동일 — 패턴 1 + 2)
 function extractSeriesKeyClient(title) {
   if (!title) return null;
-  const m = String(title).match(/^\[([^\]]+)\]/);
-  if (!m) return null;
-  const candidate = m[1].trim();
-  if (/^(Vol|Volume|Episode|EP|Pt|Part)[\s.\d]/i.test(candidate)) return null;
-  if (candidate.length < 3) return null;
-  return candidate;
+  const t = String(title);
+
+  // 패턴 1: [시리즈명] prefix
+  const bracket = t.match(/^\[([^\]]+)\]/);
+  if (bracket) {
+    const candidate = bracket[1].trim();
+    if (/^(Vol|Volume|Episode|EP|Pt|Part)[\s.\d]/i.test(candidate)) return null;
+    if (candidate.length < 3) return null;
+    return candidate;
+  }
+
+  // 패턴 2 (Phase 5-D): "(vol N)" 류 패턴 직전까지를 시리즈명 — 비표준 시리즈
+  //   콜론/이모지/한글 모두 시리즈명 안에 포함 가능 (The Grand 🎺Fanfare🎺: ...).
+  const volMatch = t.match(/^(.+?)\s*\(vol\.?\s*\d/i);
+  if (volMatch) {
+    const candidate = volMatch[1].trim();
+    if (candidate.length >= 5 && candidate.length <= 120) {
+      if (/^(Vol|Volume|Episode|EP|Pt|Part)[\s.\d]/i.test(candidate)) return null;
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 let pathAVolCheckTimer = null;
@@ -1256,10 +1566,14 @@ async function showApplyStep() {
   `;
 
   document.getElementById('applyBackBtn').addEventListener('click', () => {
-    showPathAPreview({
-      generated: window.uploaderState.generatedMeta,
-      sourceMeta: window.uploaderState.reuseSourceVideo,
-    });
+    if (window.uploaderState.path === 'B') {
+      showPathBPreview(window.uploaderState.generatedMeta);
+    } else {
+      showPathAPreview({
+        generated: window.uploaderState.generatedMeta,
+        sourceMeta: window.uploaderState.reuseSourceVideo,
+      });
+    }
   });
   document.getElementById('dryRunBtn').addEventListener('click', () => runApply(true));
   document.getElementById('realApplyBtn').addEventListener('click', () => runApply(false));
@@ -1432,13 +1746,15 @@ async function runApply(dryRun) {
 function switchLangTab(lang) {
   pathACurrentLangTab = lang;
   const generated = window.uploaderState.generatedMeta;
+  if (!generated) return;
   const sourceMeta = window.uploaderState.reuseSourceVideo;
-  if (!generated || !sourceMeta) return;
+  // Path A: sourceMeta.defaultLanguage / Path B: generated.defaultLanguage
+  const defaultLang = sourceMeta?.defaultLanguage || generated.defaultLanguage || 'en';
 
   // 탭 시각 갱신
   document.querySelectorAll('.lang-tab').forEach((t) => {
     const isSel = t.dataset.lang === lang;
-    const isDefault = t.dataset.lang === sourceMeta.defaultLanguage;
+    const isDefault = t.dataset.lang === defaultLang;
     const exists = isDefault || !!generated.localizations?.[t.dataset.lang];
     t.style.background = isSel ? 'var(--jazz-gold)' : (exists ? '#1a1a1a' : '#3a1818');
     t.style.color = isSel ? '#000' : (exists ? 'var(--text)' : '#f55');
@@ -1447,14 +1763,16 @@ function switchLangTab(lang) {
 
   let title = '';
   let description = '';
-  if (lang === sourceMeta.defaultLanguage) {
+  if (lang === defaultLang) {
     title = generated.title?.default || '';
     description = generated.description?.default || '';
   } else if (generated.localizations?.[lang]) {
     title = generated.localizations[lang].title || '';
     description = generated.localizations[lang].description || '';
   } else {
-    title = '(이 언어는 source 영상에 없음 — 적용 시 무시됨)';
+    title = window.uploaderState.path === 'B'
+      ? '(Gemini 가 이 언어 생성 안 함 — 적용 시 무시됨)'
+      : '(이 언어는 source 영상에 없음 — 적용 시 무시됨)';
     description = '';
   }
 
@@ -1466,13 +1784,14 @@ function switchLangTab(lang) {
 
 function saveCurrentLangEdit() {
   const generated = window.uploaderState.generatedMeta;
+  if (!generated) return;
   const sourceMeta = window.uploaderState.reuseSourceVideo;
-  if (!generated || !sourceMeta) return;
+  const defaultLang = sourceMeta?.defaultLanguage || generated.defaultLanguage || 'en';
   const lang = pathACurrentLangTab;
   const title = document.getElementById('pathAPreviewTitle')?.value ?? '';
   const description = document.getElementById('pathAPreviewDescription')?.value ?? '';
 
-  if (lang === sourceMeta.defaultLanguage) {
+  if (lang === defaultLang) {
     generated.title = generated.title || {};
     generated.description = generated.description || {};
     generated.title.default = title;
