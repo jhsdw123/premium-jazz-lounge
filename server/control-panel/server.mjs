@@ -2779,8 +2779,15 @@ function generatePathBTimeline(newTracks) {
 //   16개 언어: {title, tagline, body, hashtags_top(2-3 native), hashtags_bottom(15 native)} — 단순 형식
 //   시리즈명은 각 언어로 native 번역 ([뉴올리언스] / [ニューオーリンズ] / [新奥尔良] ...)
 function buildPathBPrompt(inputs) {
-  const { seriesName, volNumber, mood, scenarios, era, notes } = inputs;
+  const { seriesName, volNumber, mood, scenarios, era, notes, baseTitle } = inputs;
   const allLangs = ['en', ...PATH_B_LANGUAGES];
+  const hasBase = !!(baseTitle && baseTitle.trim());
+  const enTitleSpec = hasBase
+    ? `[${seriesName}] ${baseTitle} [Vol.${volNumber}]   (use this EXACT English body verbatim — do NOT rewrite, paraphrase, or drop emojis)`
+    : `[${seriesName}] (catchy English description) [Vol.${volNumber}]`;
+  const baseTitleRule = hasBase
+    ? `\n0. **BASE TITLE PROVIDED (HIGHEST PRIORITY)** — the English title body is FIXED to: "${baseTitle}".\n   - English "en.title" MUST be exactly: [${seriesName}] ${baseTitle} [Vol.${volNumber}] (keep emojis, keep wording verbatim).\n   - For EVERY other language, the title body MUST be a NATURAL, FLUENT translation of "${baseTitle}" that conveys the same mood/meaning idiomatically (NOT a new invented description, NOT an awkward word-for-word translation). Keep the same emojis where they read naturally, wrapped as [native series translation] (translated body) [Vol.${volNumber}].\n   - description "body", taglines and hashtags are still generated freshly per language as normal.\n`
+    : '';
 
   // 영어 제목 fixed 부분 길이 = "[" + series + "] " + " [Vol." + N + "]"
   const fixedLen = seriesName.length + 4 + 7 + String(volNumber).length;
@@ -2805,7 +2812,7 @@ English uses one schema; the other 16 languages use a DIFFERENT schema (with ext
 
 {
   "en": {
-    "title": "[${seriesName}] (catchy English description) [Vol.${volNumber}]",
+    "title": "${enTitleSpec}",
     "body": "(1-2 English sentences with 2-3 emojis, mention scenarios/mood + Midroll-Ad-Free)",
     "hashtags_top": "#tag1 #tag2 ... (15 hashtags, single line, space-separated, lowercase, ENGLISH keywords)",
     "hashtags_bottom": "#tag1 #tag2 #tag3 #tag4 #tag5 #neworleansjazz, #swingjazz, ... (24 hashtags total — first 5 space-separated, rest comma-separated, lowercase, ENGLISH)"
@@ -2841,7 +2848,7 @@ English uses one schema; the other 16 languages use a DIFFERENT schema (with ext
 }
 
 ## CRITICAL Translation Rules
-
+${baseTitleRule}
 1. **Series Name (NATIVE TRANSLATION)** — the series name "${seriesName}" MUST be NATIVELY TRANSLATED into each target language:
    - "New Orleans" → "ニューオーリンズ" (ja), "뉴올리언스" (ko), "新奥尔良" (zh, Simplified), "紐奧良" (zh-Hant), "Nueva Orleans" (es), "La Nouvelle-Orléans" (fr), "Neue Orleans" (de), etc.
    - Always wrapped in single brackets [].
@@ -3001,8 +3008,15 @@ async function generatePathBWithRetry(prompt, maxRetries = 2) {
 //  영어: buildEnglishDescription (풀 형식 — Path A 영어 영상과 동일)
 //  16개 언어: buildLocalizedDescription (단순 형식 — native 해시태그 + tagline + [[제목]] + 짧은 영어 푸터)
 function buildPathBMeta(parsed, inputs, newTracks) {
-  const { seriesName, volNumber } = inputs;
+  const { seriesName, volNumber, baseTitle } = inputs;
   const timeline = generatePathBTimeline(newTracks);
+
+  // baseTitle (360 라이브러리 선택) 있으면 영어 제목을 서버측에서 정확히 고정 —
+  // Gemini 가 본문을 바꿔치기/이모지 누락하는 케이스 방지. description 헤더도 같은 제목 쓰도록 parsed.en 보정.
+  if (baseTitle && baseTitle.trim()) {
+    const enTitle = `[${seriesName}] ${baseTitle} [Vol.${volNumber}]`;
+    parsed.en = { ...parsed.en, title: enTitle };
+  }
 
   const result = {
     defaultLanguage: 'en',
@@ -3012,7 +3026,7 @@ function buildPathBMeta(parsed, inputs, newTracks) {
     tags: [],
     localizations: {},
     missingLanguages: [],
-    pathBInputs: { seriesName, volNumber },
+    pathBInputs: { seriesName, volNumber, baseTitle: (baseTitle || '') },
   };
 
   for (const lang of PATH_B_LANGUAGES) {
@@ -3044,8 +3058,39 @@ function buildPathBMeta(parsed, inputs, newTracks) {
   return result;
 }
 
+// === GET /api/titles/library ===
+//  base 영어 제목 라이브러리 (월별 30개 × 12 = 360). Path B "360 제목에서 선택" 모드용.
+//  server/control-panel/video-titles.json 에서 읽음 (jazz-lounge-content repo 의 data/titles.json 사본).
+//  파일 갱신 시 서버 재시작하거나 캐시 무효화 필요 — 캐시는 프로세스 수명 동안 유지.
+let _titleLibraryCache = null;
+function loadTitleLibrary() {
+  if (_titleLibraryCache) return _titleLibraryCache;
+  const p = resolve(__dirname, 'video-titles.json');
+  const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
+  const months = Array.isArray(raw.result) ? raw.result : [];
+  const laneSet = new Set();
+  for (const m of months) for (const t of (m.titles || [])) if (t.lane) laneSet.add(t.lane);
+  _titleLibraryCache = { months, lanes: [...laneSet].sort() };
+  return _titleLibraryCache;
+}
+app.get('/api/titles/library', (_req, res) => {
+  try {
+    const lib = loadTitleLibrary();
+    res.json({
+      ok: true,
+      months: lib.months,
+      lanes: lib.lanes,
+      total: lib.months.reduce((a, m) => a + (m.titles?.length || 0), 0),
+    });
+  } catch (e) {
+    console.error('[titles/library] 실패:', e?.message || e);
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
 // === POST /api/uploader/path-b/generate ===
-//  body: { seriesName, volNumber, mood?, scenarios?, era?, notes?, newTracks }
+//  body: { seriesName, volNumber, mood?, scenarios?, era?, notes?, baseTitle?, newTracks }
+//  baseTitle 있으면 → 360 라이브러리에서 고른 영어 제목을 본문으로 고정 (Gemini 창작 대신 번역).
 //  Gemini 호출 → 17개 언어 generatedMeta + missingLanguages 반환.
 app.post('/api/uploader/path-b/generate', async (req, res) => {
   if (!ytAuthGate(req, res)) return;
@@ -3056,7 +3101,7 @@ app.post('/api/uploader/path-b/generate', async (req, res) => {
     });
   }
 
-  const { seriesName, volNumber, mood, scenarios, era, notes, newTracks } = req.body || {};
+  const { seriesName, volNumber, mood, scenarios, era, notes, baseTitle, newTracks } = req.body || {};
   if (!seriesName || typeof seriesName !== 'string' || !seriesName.trim()) {
     return res.status(400).json({ ok: false, error: 'seriesName 필요' });
   }
@@ -3074,6 +3119,7 @@ app.post('/api/uploader/path-b/generate', async (req, res) => {
     scenarios: (scenarios || '').trim(),
     era: (era || '').trim(),
     notes: (notes || '').trim(),
+    baseTitle: (typeof baseTitle === 'string' ? baseTitle : '').trim(),
   };
 
   try {

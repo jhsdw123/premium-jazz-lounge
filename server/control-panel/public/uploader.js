@@ -848,27 +848,36 @@ function renderPathSelector() {
 // ────────────────────────────────────────────────────────────────
 // Phase 5-D: Path B — Gemini 새 메타 생성 (17개 언어)
 // ────────────────────────────────────────────────────────────────
+// Path B 모드: 'picker' = 360 라이브러리에서 base 영어 제목 선택 / 'series' = 시리즈명 직접 입력 (Gemini 창작)
+let pathBMode = 'picker';
+let pathBLibraryCache = null;       // { months:[{month,titles:[{n,title,lane}]}], lanes:[] }
+let pathBSelectedTitle = '';        // picker 모드에서 고른 base 영어 제목
+
 function showPathBInputForm() {
   const container = document.getElementById('metaNextStep');
   if (!container) return;
 
+  pathBSelectedTitle = '';
+
   container.innerHTML = `
     <h3 style="color:var(--jazz-gold);margin:0 0 12px;font-size:13px;font-weight:600;">✨ Path B: 새 메타 생성</h3>
 
-    <div style="background:#161616;border-left:3px solid var(--jazz-gold);padding:10px 12px;margin-bottom:14px;border-radius:0 4px 4px 0;font-size:11px;color:var(--text-muted);line-height:1.6;">
-      Gemini 가 영어 base 생성 → 16개 언어 자동 번역.<br>
-      형님이 각 언어 검토 + 수정 가능. 응답 ~10–60초.
+    <div style="display:flex;gap:6px;margin-bottom:12px;">
+      <button id="pathBModePicker" type="button" class="te-btn" style="flex:1;padding:8px;font-size:11px;">🎵 360 제목에서 선택</button>
+      <button id="pathBModeSeries" type="button" class="te-btn" style="flex:1;padding:8px;font-size:11px;">✏️ 시리즈명 직접 입력</button>
     </div>
 
+    <div id="pathBModeHint" style="background:#161616;border-left:3px solid var(--jazz-gold);padding:10px 12px;margin-bottom:14px;border-radius:0 4px 4px 0;font-size:11px;color:var(--text-muted);line-height:1.6;"></div>
+
     <div style="margin-bottom:12px;">
-      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">시리즈명 <span style="color:#f55;">*</span> (짧은 키워드)</label>
-      <input type="text" id="pathBSeriesName" placeholder="예: New Orleans, Showa Era, Bayou Swing"
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">시리즈명 <span style="color:#f55;">*</span> (짧은 키워드 — 제목의 [브래킷]에 들어감)</label>
+      <input type="text" id="pathBSeriesName" placeholder="예: Swing, Showa, Gypsy, Speakeasy"
         autocomplete="off" spellcheck="false" maxlength="30"
         style="width:100%;padding:8px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
       <div style="font-size:10px;color:var(--text-muted);margin-top:3px;line-height:1.5;">
-        ⚠ 짧은 키워드 1~3 단어, 30자 이내. 대괄호 [] 자동 제거됨. 본문은 Gemini 가 만듦.
+        ⚠ 짧은 키워드 1~3 단어, 30자 이내. 대괄호 [] 자동 제거됨. 각 언어로 native 번역됨.
       </div>
-      <div id="pathBTitlePreview" style="font-size:11px;color:#4c4;margin-top:6px;font-family:ui-monospace,Menlo,monospace;"></div>
+      <div id="pathBTitlePreview" style="font-size:11px;color:#4c4;margin-top:6px;font-family:ui-monospace,Menlo,monospace;line-height:1.5;"></div>
     </div>
 
     <div style="margin-bottom:12px;display:flex;gap:10px;align-items:center;">
@@ -878,8 +887,23 @@ function showPathBInputForm() {
       <span id="pathBVolCheck" style="font-size:11px;"></span>
     </div>
 
+    <div id="pathBPickerBlock" style="margin-bottom:14px;border:1px solid #2a2a2a;border-radius:4px;padding:10px;background:#121212;">
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:6px;">base 영어 제목 선택 <span style="color:#f55;">*</span> (방금 만든 360개 — 영상 음악 분위기에 맞춰 고르기)</label>
+      <div style="display:flex;gap:6px;margin-bottom:8px;">
+        <select id="pathBFilterMonth" style="flex:0 0 auto;padding:6px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:11px;"><option value="">월 전체</option></select>
+        <select id="pathBFilterLane" style="flex:1;padding:6px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:11px;"><option value="">분위기(lane) 전체</option></select>
+      </div>
+      <input type="text" id="pathBFilterSearch" placeholder="🔎 제목 검색 (예: swing, whiskey, autumn)"
+        autocomplete="off" spellcheck="false"
+        style="width:100%;padding:7px 9px;margin-bottom:8px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
+      <div id="pathBTitleList" style="max-height:260px;overflow-y:auto;border:1px solid #222;border-radius:4px;background:#0d0d0d;font-size:12px;">
+        <div style="padding:14px;text-align:center;color:var(--text-muted);">로딩 중…</div>
+      </div>
+      <div id="pathBSelectedDisplay" style="margin-top:8px;font-size:11px;color:var(--text-muted);"></div>
+    </div>
+
     <div style="margin-bottom:12px;">
-      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">분위기 키워드</label>
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:4px;">분위기 키워드 <span id="pathBMoodReq" style="color:#f55;display:none;">*</span></label>
       <input type="text" id="pathBMood" placeholder="예: Energetic, Smooth, Nostalgic, Cheerful"
         autocomplete="off" spellcheck="false"
         style="width:100%;padding:8px 10px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
@@ -918,28 +942,31 @@ function showPathBInputForm() {
 
   document.getElementById('pathBCancelBtn').addEventListener('click', () => renderPathSelector());
   document.getElementById('pathBGenerateBtn').addEventListener('click', generatePathBMeta);
+  document.getElementById('pathBModePicker').addEventListener('click', () => setPathBMode('picker'));
+  document.getElementById('pathBModeSeries').addEventListener('click', () => setPathBMode('series'));
 
   // Vol 번호 중복 검증 + 제목 미리보기 (debounce)
   const volInput = document.getElementById('pathBVolNumber');
   const seriesInput = document.getElementById('pathBSeriesName');
-  const previewEl = document.getElementById('pathBTitlePreview');
 
-  const updatePreview = () => {
-    const series = sanitizeSeriesName(seriesInput.value);
-    const vol = parseInt(volInput.value, 10) || 1;
-    if (!series) {
-      previewEl.innerHTML = '';
-    } else {
-      // YouTube max 100자 — [시리즈명] (본문) [Vol.N] 형식에서 본문 가능 길이 표시
-      const fixedLen = series.length + 4 + 7 + String(vol).length; // "[" + "] " + " [Vol." + N + "]"
-      const bodyMax = Math.max(0, 100 - fixedLen);
-      const colorBody = bodyMax >= 30 ? '#4c4' : bodyMax >= 15 ? '#d4af37' : '#f55';
-      previewEl.innerHTML = `예상: <span style="color:var(--jazz-gold);">[${escapeHtml(series)}] (Gemini 본문) [Vol.${vol}]</span><br>` +
-        `본문 가능 길이: <span style="color:${colorBody};">${bodyMax}자</span> (총 100자 한도)`;
-    }
-  };
+  const onChange = () => { updatePathBPreview(); checkVol(); };
+  volInput.addEventListener('input', onChange);
+  seriesInput.addEventListener('input', onChange);
 
-  const checkVol = () => {
+  // picker 필터 wiring
+  document.getElementById('pathBFilterMonth').addEventListener('change', renderPathBTitleList);
+  document.getElementById('pathBFilterLane').addEventListener('change', renderPathBTitleList);
+  document.getElementById('pathBFilterSearch').addEventListener('input', renderPathBTitleList);
+  // 리스트 클릭 (event delegation — data-m / data-n 으로 캐시 조회)
+  document.getElementById('pathBTitleList').addEventListener('click', (e) => {
+    const row = e.target.closest('[data-m]');
+    if (!row) return;
+    const m = pathBLibraryCache?.months.find((x) => x.month === row.dataset.m);
+    const t = m?.titles.find((x) => String(x.n) === row.dataset.n);
+    if (t) selectPathBTitle(t.title);
+  });
+
+  function checkVol() {
     const series = sanitizeSeriesName(seriesInput.value);
     const vol = parseInt(volInput.value, 10);
     if (!series || !Number.isFinite(vol) || vol < 1) {
@@ -948,11 +975,138 @@ function showPathBInputForm() {
     }
     clearTimeout(pathBVolCheckTimer);
     pathBVolCheckTimer = setTimeout(() => checkPathBVolDuplicate(vol, series), 300);
-  };
+  }
 
-  const onChange = () => { updatePreview(); checkVol(); };
-  volInput.addEventListener('input', onChange);
-  seriesInput.addEventListener('input', onChange);
+  setPathBMode(pathBMode);      // 초기 모드 적용 (기본 picker)
+  loadPathBLibrary();           // 360 라이브러리 로드 (async)
+}
+
+// 모드 전환 — picker 블록 표시/숨김 + 버튼 하이라이트 + hint + mood 필수표시 + preview 갱신
+function setPathBMode(mode) {
+  pathBMode = mode === 'series' ? 'series' : 'picker';
+  const pickerBtn = document.getElementById('pathBModePicker');
+  const seriesBtn = document.getElementById('pathBModeSeries');
+  const pickerBlock = document.getElementById('pathBPickerBlock');
+  const hint = document.getElementById('pathBModeHint');
+  const moodReq = document.getElementById('pathBMoodReq');
+  if (!pickerBtn || !seriesBtn || !pickerBlock) return;
+
+  const on = (btn, active) => {
+    btn.classList.toggle('gold', active);
+    btn.style.opacity = active ? '1' : '0.55';
+  };
+  on(pickerBtn, pathBMode === 'picker');
+  on(seriesBtn, pathBMode === 'series');
+
+  if (pathBMode === 'picker') {
+    pickerBlock.style.display = '';
+    if (moodReq) moodReq.style.display = 'none';
+    if (hint) hint.innerHTML = '360개 제목 중 하나를 base 영어 제목으로 선택 → Gemini 가 각 언어로 <b>자연 번역</b> + description/해시태그 생성.<br>최종: <span style="color:var(--jazz-gold);">[시리즈] (고른 제목) [Vol.N]</span>. 응답 ~10–60초.';
+  } else {
+    pickerBlock.style.display = 'none';
+    if (moodReq) moodReq.style.display = 'none';
+    if (hint) hint.innerHTML = 'Gemini 가 시리즈명+분위기로 영어 제목 본문을 <b>창작</b> → 16개 언어 번역.<br>최종: <span style="color:var(--jazz-gold);">[시리즈] (Gemini 본문) [Vol.N]</span>. 응답 ~10–60초.';
+  }
+  updatePathBPreview();
+}
+
+// 제목 미리보기 — picker 모드: [시리즈] (고른 제목) [Vol.N] / series 모드: 본문 가능 길이
+function updatePathBPreview() {
+  const previewEl = document.getElementById('pathBTitlePreview');
+  const seriesInput = document.getElementById('pathBSeriesName');
+  const volInput = document.getElementById('pathBVolNumber');
+  if (!previewEl || !seriesInput || !volInput) return;
+  const series = sanitizeSeriesName(seriesInput.value);
+  const vol = parseInt(volInput.value, 10) || 1;
+  if (!series) { previewEl.innerHTML = ''; return; }
+
+  if (pathBMode === 'picker') {
+    if (!pathBSelectedTitle) {
+      previewEl.innerHTML = `예상: <span style="color:var(--jazz-gold);">[${escapeHtml(series)}] (제목 선택 필요) [Vol.${vol}]</span>`;
+      return;
+    }
+    const full = `[${series}] ${pathBSelectedTitle} [Vol.${vol}]`;
+    // 이모지 대략 2칸 가정해 길이 추정 (YouTube 100자 한도)
+    const approx = full.length + (full.match(/\p{Extended_Pictographic}/gu) || []).length;
+    const color = approx <= 100 ? '#4c4' : '#f55';
+    previewEl.innerHTML = `예상: <span style="color:var(--jazz-gold);">${escapeHtml(full)}</span><br>` +
+      `길이: <span style="color:${color};">~${approx}자</span> (100자 한도)`;
+  } else {
+    const fixedLen = series.length + 4 + 7 + String(vol).length;
+    const bodyMax = Math.max(0, 100 - fixedLen);
+    const colorBody = bodyMax >= 30 ? '#4c4' : bodyMax >= 15 ? '#d4af37' : '#f55';
+    previewEl.innerHTML = `예상: <span style="color:var(--jazz-gold);">[${escapeHtml(series)}] (Gemini 본문) [Vol.${vol}]</span><br>` +
+      `본문 가능 길이: <span style="color:${colorBody};">${bodyMax}자</span> (총 100자 한도)`;
+  }
+}
+
+// 360 라이브러리 fetch + 월/lane 필터 채우기 + 리스트 렌더
+async function loadPathBLibrary() {
+  const listEl = document.getElementById('pathBTitleList');
+  try {
+    if (!pathBLibraryCache) {
+      const r = await fetch('/api/titles/library');
+      const data = await r.json();
+      if (!data.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      pathBLibraryCache = { months: data.months || [], lanes: data.lanes || [] };
+    }
+    const monthSel = document.getElementById('pathBFilterMonth');
+    const laneSel = document.getElementById('pathBFilterLane');
+    if (monthSel && monthSel.options.length <= 1) {
+      for (const m of pathBLibraryCache.months) {
+        const o = document.createElement('option');
+        o.value = m.month; o.textContent = m.month;
+        monthSel.appendChild(o);
+      }
+    }
+    if (laneSel && laneSel.options.length <= 1) {
+      for (const lane of pathBLibraryCache.lanes) {
+        const o = document.createElement('option');
+        o.value = lane; o.textContent = lane;
+        laneSel.appendChild(o);
+      }
+    }
+    renderPathBTitleList();
+  } catch (e) {
+    if (listEl) listEl.innerHTML = `<div style="padding:14px;text-align:center;color:#f55;">제목 로드 실패: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+// 필터 적용해서 리스트 렌더 (선택된 행 하이라이트)
+function renderPathBTitleList() {
+  const listEl = document.getElementById('pathBTitleList');
+  if (!listEl || !pathBLibraryCache) return;
+  const fMonth = document.getElementById('pathBFilterMonth')?.value || '';
+  const fLane = document.getElementById('pathBFilterLane')?.value || '';
+  const fSearch = (document.getElementById('pathBFilterSearch')?.value || '').trim().toLowerCase();
+
+  const rows = [];
+  for (const m of pathBLibraryCache.months) {
+    if (fMonth && m.month !== fMonth) continue;
+    for (const t of m.titles) {
+      if (fLane && t.lane !== fLane) continue;
+      if (fSearch && !t.title.toLowerCase().includes(fSearch)) continue;
+      const sel = t.title === pathBSelectedTitle;
+      rows.push(
+        `<div data-m="${escapeHtml(m.month)}" data-n="${t.n}" style="padding:7px 9px;border-bottom:1px solid #1c1c1c;cursor:pointer;${sel ? 'background:#2a2410;border-left:3px solid var(--jazz-gold);' : ''}">` +
+        `<div style="color:${sel ? 'var(--jazz-gold)' : 'var(--text)'};">${escapeHtml(t.title)}</div>` +
+        `<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${escapeHtml(m.month)} · ${escapeHtml(t.lane || '')}</div>` +
+        `</div>`
+      );
+    }
+  }
+  listEl.innerHTML = rows.length
+    ? rows.join('')
+    : '<div style="padding:14px;text-align:center;color:var(--text-muted);">조건에 맞는 제목 없음</div>';
+}
+
+// 제목 선택 → 상태 갱신 + 표시 + preview + 리스트 하이라이트
+function selectPathBTitle(title) {
+  pathBSelectedTitle = title;
+  const disp = document.getElementById('pathBSelectedDisplay');
+  if (disp) disp.innerHTML = `✓ 선택됨: <span style="color:var(--jazz-gold);">${escapeHtml(title)}</span>`;
+  renderPathBTitleList();
+  updatePathBPreview();
 }
 
 // 시리즈명 cleanse — 대괄호 제거 + 공백 collapse + trim
@@ -1010,6 +1164,12 @@ async function generatePathBMeta() {
     alert('유효한 Vol 번호 필요 (≥1)');
     return;
   }
+  // picker 모드면 360 라이브러리에서 고른 base 영어 제목 필요
+  const baseTitle = (pathBMode === 'picker') ? pathBSelectedTitle : '';
+  if (pathBMode === 'picker' && !baseTitle) {
+    alert('360 제목 중 하나를 선택하거나, "✏️ 시리즈명 직접 입력" 모드로 전환하세요.');
+    return;
+  }
   // cleanse 한 결과를 input 에 반영 (사용자에게 보이게)
   document.getElementById('pathBSeriesName').value = seriesName;
 
@@ -1038,7 +1198,7 @@ async function generatePathBMeta() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        seriesName, volNumber, mood, scenarios, era, notes,
+        seriesName, volNumber, mood, scenarios, era, notes, baseTitle,
         newTracks: window.uploaderState.tracks,
       }),
     });
@@ -1049,7 +1209,7 @@ async function generatePathBMeta() {
     window.uploaderState.reuseSourceVideo = null;
     window.uploaderState.generatedMeta = data.generated;
     window.uploaderState.missingLanguages = data.generated.missingLanguages || [];
-    window.uploaderState.pathBInputs = { seriesName, volNumber, mood, scenarios, era, notes };
+    window.uploaderState.pathBInputs = { seriesName, volNumber, mood, scenarios, era, notes, baseTitle };
 
     console.log(`[Path B] generatedMeta (${data.geminiElapsed}s):`, data.generated);
     showPathBPreview(data.generated);
@@ -1162,6 +1322,14 @@ function showPathBPreview(generated) {
       document.getElementById('pathBScenarios').value = inputs.scenarios || '';
       document.getElementById('pathBEra').value = inputs.era || '';
       document.getElementById('pathBNotes').value = inputs.notes || '';
+      // 모드 + 선택 제목 복원 (picker 모드 재생성 대비 — showPathBInputForm 이 selectedTitle 초기화함)
+      if (inputs.baseTitle) {
+        setPathBMode('picker');
+        pathBSelectedTitle = inputs.baseTitle;
+        selectPathBTitle(inputs.baseTitle);
+      } else {
+        setPathBMode('series');
+      }
       generatePathBMeta();
     }, 50);
   });
