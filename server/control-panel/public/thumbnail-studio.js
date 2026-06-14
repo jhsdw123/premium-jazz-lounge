@@ -194,7 +194,7 @@
         <div style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:14px;background:#0a0a0a;border:1px solid var(--border);border-radius:8px;overflow:hidden;">
           <div style="width:100%;display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
             <h3 style="margin:0;color:var(--jazz-gold);font-size:14px;font-weight:700;letter-spacing:1px;">PREVIEW (1920×1080)</h3>
-            <div id="thBgUploadHint" style="font-size:11px;color:var(--text-muted);">배경 이미지 없음 — 우측 패널 또는 여기로 drop</div>
+            <div id="thBgUploadHint" style="font-size:11px;color:var(--text-muted);">배경 없음 — 이미지/동영상을 우측 패널 또는 여기로 drop</div>
           </div>
           <div id="thDropZone" style="flex:1;width:100%;display:flex;align-items:center;justify-content:center;border:2px dashed transparent;border-radius:6px;transition:border-color 0.15s, background 0.15s;">
             <canvas id="thumbPreviewCanvas" style="max-width:100%;max-height:100%;border:1px solid #444;box-shadow:0 0 30px rgba(0,0,0,0.6);background:#000;"></canvas>
@@ -211,10 +211,10 @@
 
             <!-- Background image upload -->
             <div class="th-section">
-              <label class="th-label">📷 BACKGROUND IMAGE</label>
+              <label class="th-label">📷 BACKGROUND IMAGE / VIDEO</label>
               <label class="th-file-btn">
-                이미지 업로드 / 변경
-                <input type="file" id="thBgImageInput" accept="image/*" style="display:none">
+                이미지 / 동영상 업로드 (동영상은 첫 프레임 사용)
+                <input type="file" id="thBgImageInput" accept="image/*,video/*" style="display:none">
               </label>
               <div id="thBgFilename" class="th-help">(없음)</div>
             </div>
@@ -789,25 +789,75 @@
     drawThumbnail();
   }
 
-  // ─── Image upload (file or drop) ─────────────────────────────────
+  // ─── Set background from an HTMLImageElement ─────────────────────
+  function setBgImage(img, label) {
+    thumbState.bgImage = img;
+    document.getElementById('thBgFilename').textContent = label;
+    document.getElementById('thBgUploadHint').textContent = `배경: ${label}`;
+    drawThumbnail();
+  }
+
+  // ─── Image / video upload (file or drop) ─────────────────────────
   function loadImageFromFile(file) {
     if (!file) return;
+    if (/^video\//.test(file.type)) {
+      loadVideoFirstFrame(file);
+      return;
+    }
     if (!/^image\//.test(file.type)) {
-      alert('이미지 파일만 가능합니다.');
+      alert('이미지 또는 동영상 파일만 가능합니다.');
       return;
     }
     const reader = new FileReader();
     reader.onload = (ev) => {
       const img = new Image();
-      img.onload = () => {
-        thumbState.bgImage = img;
-        document.getElementById('thBgFilename').textContent = `${file.name} (${img.width}×${img.height})`;
-        document.getElementById('thBgUploadHint').textContent = `배경: ${file.name}`;
-        drawThumbnail();
-      };
+      img.onload = () => setBgImage(img, `${file.name} (${img.width}×${img.height})`);
       img.src = ev.target.result;
     };
     reader.readAsDataURL(file);
+  }
+
+  // ─── Extract first frame of a video → background image ───────────
+  function loadVideoFirstFrame(file) {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = 'auto';
+    video.src = url;
+
+    let captured = false;
+    let timer = null;
+    const cleanup = () => { if (timer) clearTimeout(timer); URL.revokeObjectURL(url); };
+
+    const capture = () => {
+      if (captured) return;
+      if (!video.videoWidth || !video.videoHeight) return; // frame not ready yet
+      captured = true;
+      const tmp = document.createElement('canvas');
+      tmp.width = video.videoWidth;
+      tmp.height = video.videoHeight;
+      tmp.getContext('2d').drawImage(video, 0, 0, tmp.width, tmp.height);
+      const img = new Image();
+      img.onload = () => setBgImage(img, `${file.name} (${img.width}×${img.height}) · 동영상 첫 프레임`);
+      img.src = tmp.toDataURL('image/png');
+      cleanup();
+    };
+
+    // loadeddata 시점에 보통 첫 프레임 디코딩 완료 → 바로 캡처.
+    // 일부 브라우저는 seek 후에야 그려지므로 currentTime=0 + seeked 도 함께 트리거.
+    video.addEventListener('loadeddata', () => {
+      try { video.currentTime = 0; } catch (_) {}
+      capture();
+    });
+    video.addEventListener('seeked', capture);
+    video.addEventListener('error', () => {
+      cleanup();
+      alert('동영상을 읽을 수 없습니다: ' + (video.error?.message || '알 수 없는 오류'));
+    });
+    // 안전망: 이벤트가 안 와도 일정 시간 후 한 번 시도
+    timer = setTimeout(capture, 1500);
+    video.load();
   }
 
   // ─── Init ────────────────────────────────────────────────────────
