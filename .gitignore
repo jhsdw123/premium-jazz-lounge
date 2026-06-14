@@ -37,6 +37,9 @@ data/output/
 data/temp/
 data/cache/
 
+# 3D intro assets (대용량 — git 부적합, 로컬/USB 로만 관리)
+intro_3d_assets/
+
 # OS files
 .DS_Store
 Thumbs.db
