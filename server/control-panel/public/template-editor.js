@@ -13,6 +13,7 @@ import { drawClock } from './clock-renderer.js';
 import {
   getAmplitudes,
   drawCustomVisualizer,
+  isCustomStyle,
 } from './visualizer-styles.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -605,9 +606,7 @@ function attachVisualizerInstance(c) {
 function applyVisualizerStyleVisibility(c) {
   const am = c._audioMotion;
   const customCv = document.querySelector(`canvas[data-vis-custom-id="${c.id}"]`);
-  const useCustom = c.visualizerStyle === 'wave-time'
-    || c.visualizerStyle === 'mirror'
-    || c.visualizerStyle === 'mirror-fill';
+  const useCustom = isCustomStyle(c.visualizerStyle);
 
   if (am?.canvas) {
     am.canvas.style.display = useCustom ? 'none' : '';
@@ -629,22 +628,28 @@ function applyVisualizerStyleVisibility(c) {
 // custom RAF — 매 frame am.getBars() 읽어 sibling canvas 에 그림.
 function startCustomVisualizerLoop(c) {
   if (c._customLoopRaf) return;
+  const id = c.id;
   const tick = () => {
-    if (!c._customLoopRaf) return;
-    const am = c._audioMotion;
-    const cv = document.querySelector(`canvas[data-vis-custom-id="${c.id}"]`);
+    // updateComponent 가 컴포넌트를 새 객체로 교체(immutable patch)하므로,
+    // 클로저로 캡처한 옛 c 를 그대로 쓰면 color / lineWidth / fillOpacity /
+    // smoothness 등 custom 스타일 속성 변경이 "스타일 재전환" 전까지 반영 안 됨.
+    // → 매 frame te.components 에서 최신 객체를 id 로 다시 조회해서 그린다.
+    const cur = te.components.find((x) => x.id === id);
+    if (!cur || !cur._customLoopRaf) return;
+    const am = cur._audioMotion;
+    const cv = document.querySelector(`canvas[data-vis-custom-id="${id}"]`);
     if (!am || !cv) {
-      c._customLoopRaf = requestAnimationFrame(tick);
+      cur._customLoopRaf = requestAnimationFrame(tick);
       return;
     }
     // 픽셀 해상도 follow (한쪽 width 만 바뀌어도 sync)
-    if (cv.width !== Math.round(c.width)) cv.width = Math.round(c.width);
-    if (cv.height !== Math.round(c.height)) cv.height = Math.round(c.height);
+    if (cv.width !== Math.round(cur.width)) cv.width = Math.round(cur.width);
+    if (cv.height !== Math.round(cur.height)) cv.height = Math.round(cur.height);
     const ctx = cv.getContext('2d');
     ctx.clearRect(0, 0, cv.width, cv.height);
     const amps = getAmplitudes(am);
-    drawCustomVisualizer(ctx, c, amps, 0, 0, cv.width, cv.height);
-    c._customLoopRaf = requestAnimationFrame(tick);
+    drawCustomVisualizer(ctx, cur, amps, 0, 0, cv.width, cv.height);
+    cur._customLoopRaf = requestAnimationFrame(tick);
   };
   c._customLoopRaf = requestAnimationFrame(tick);
 }
@@ -1323,9 +1328,14 @@ function renderProps() {
       : [{ position: 0, color: '#FFFFFF' }, { position: 100, color: '#D4AF37' }];
     // visualizerStyle 변수 (colorBlock 이 사용)
     const vstyle = c.visualizerStyle || 'bars';
-    const isCustom = vstyle === 'wave-time' || vstyle === 'mirror' || vstyle === 'mirror-fill';
+    const isCustom = isCustomStyle(vstyle);
     const isLine = vstyle === 'line';
     const isBars = vstyle === 'bars';
+    // 곡선 계열(선 두께·부드러움 옵션) / 채움 계열 / 연기 계열 세분화
+    const isCurve = vstyle === 'wave-time' || vstyle === 'mirror' || vstyle === 'mirror-fill' || vstyle === 'aurora-hills';
+    const isSmoke = vstyle === 'smoke';
+    const showFill = isLine || vstyle === 'mirror-fill' || vstyle === 'aurora-hills' || vstyle === 'reflection-bars' || isSmoke;
+    const hasStyleOpts = isCurve || showFill || isSmoke;
     // Phase 4-D-3-D-1 polish — 3 modes:
     //   solid    → c.color (단색, AM 에는 1색 dynamic gradient 등록)
     //   gradient → c.gradientStops (3-stop, AM 에는 multi-stop dynamic gradient 등록)
@@ -1354,6 +1364,7 @@ function renderProps() {
           </div>
         ` : ''}
         ${cmEffective === 'gradient' ? `
+          ${isSmoke ? `<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">💡 연기: <b>0% = 중심</b>, <b>100% = 바깥</b> 색. 색 2~3개로 투톤/쓰리톤 연무</div>` : ''}
           <div class="te-gradient-preview" style="background:${gradientCss(stops)};"></div>
           <div id="teGradientStops">
             ${stops.map((s, i) => `
@@ -1412,16 +1423,22 @@ function renderProps() {
           <option value="wave-time" ${vstyle === 'wave-time' ? 'selected' : ''}>Wave Time (시간축 부드러운 곡선)</option>
           <option value="mirror" ${vstyle === 'mirror' ? 'selected' : ''}>Mirror (좌우 대칭)</option>
           <option value="mirror-fill" ${vstyle === 'mirror-fill' ? 'selected' : ''}>Mirror Fill (좌우 대칭 + 채움)</option>
+          <option value="aurora-hills" ${vstyle === 'aurora-hills' ? 'selected' : ''}>Aurora Hills (하단 능선 + 채움)</option>
+          <option value="capsule-bars" ${vstyle === 'capsule-bars' ? 'selected' : ''}>Capsule Bars (둥근 막대)</option>
+          <option value="reflection-bars" ${vstyle === 'reflection-bars' ? 'selected' : ''}>Reflection Bars (반사 막대)</option>
+          <option value="peak-dots" ${vstyle === 'peak-dots' ? 'selected' : ''}>Peak Dots (피크 점)</option>
+          <option value="smoke" ${vstyle === 'smoke' ? 'selected' : ''}>Smoke (연기처럼 퍼짐)</option>
         </select>
       </div>
 
-      ${isCustom || isLine ? `
+      ${hasStyleOpts ? `
         <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
-          <label style="color:var(--jazz-gold)">— Wave / Line 옵션 —</label>
+          <label style="color:var(--jazz-gold)">— 스타일 옵션 —</label>
         </div>
-        ${slider('lineWidth', 'Line Width', 1, 10, 0.5, c.lineWidth ?? 3, 'px')}
-        ${isCustom ? slider('smoothness', 'Smoothness', 0, 1, 0.05, c.smoothness ?? 0.5, '') : ''}
-        ${(isLine || vstyle === 'mirror-fill') ? slider('fillOpacity', 'Fill Opacity', 0, 1, 0.05, c.fillOpacity ?? 0.3, '') : ''}
+        ${(isCurve || isLine) ? slider('lineWidth', 'Line Width', 1, 10, 0.5, c.lineWidth ?? 3, 'px') : ''}
+        ${isCurve ? slider('smoothness', 'Smoothness', 0, 1, 0.05, c.smoothness ?? 0.5, '') : ''}
+        ${showFill ? slider('fillOpacity', isSmoke ? 'Smoke Opacity' : 'Fill Opacity', 0, 1, 0.05, c.fillOpacity ?? (isSmoke ? 0.5 : 0.3), '') : ''}
+        ${isSmoke ? slider('smokeDensity', 'Smoke Density', 0.2, 3, 0.1, c.smokeDensity ?? 1, '') : ''}
       ` : ''}
 
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
