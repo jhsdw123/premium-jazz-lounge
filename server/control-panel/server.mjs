@@ -12,9 +12,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 config({ path: resolve(__dirname, '../../.env.local') });
 
-import { supabase, SUPABASE_BUCKET, SUPABASE_URL } from '../../lib/supabase.mjs';
+import { supabase, SUPABASE_URL } from '../../lib/supabase.mjs';
+import { S3_BUCKET, S3_ENDPOINT } from '../../lib/s3.mjs';
 import { controlPanelPublic } from '../../lib/paths.mjs';
-import { uploadTrack, deleteTrack, deleteTracks, getSignedUrl } from '../../lib/storage.mjs';
+import {
+  uploadTrack, uploadObject, downloadTrack, deleteTrack, deleteTracks,
+  getSignedUrl, storageHealth,
+} from '../../lib/storage.mjs';
 import { computeFileHash, parsePrefixOrder } from '../../lib/track-utils.mjs';
 import { analyzeTrack } from '../../lib/track-meta.mjs';
 import { generateTitleCandidates } from '../../lib/llm.mjs';
@@ -80,14 +84,8 @@ app.get('/api/health', async (_req, res) => {
     result.db = { ok: false, error: e.message };
   }
 
-  // Storage bucket existence check
-  try {
-    const { data, error } = await supabase.storage.getBucket(SUPABASE_BUCKET);
-    if (error) throw error;
-    result.storage = { ok: true, bucket: data.name, public: data.public };
-  } catch (e) {
-    result.storage = { ok: false, bucket: SUPABASE_BUCKET, error: e.message };
-  }
+  // Storage bucket existence check (R2 / S3 호환)
+  result.storage = await storageHealth();
 
   result.ok = result.db?.ok === true && result.storage?.ok === true;
   res.status(result.ok ? 200 : 503).json(result);
@@ -161,6 +159,20 @@ function parseIntOrNull(v) {
   return Number.isNaN(n) ? null : n;
 }
 
+// multer(busboy) 는 multipart 파일명 헤더를 latin1 로 디코드한다.
+// 브라우저는 한글/특수문자 파일명을 UTF-8 바이트로 전송하므로, 그대로 두면
+// `ê°€...` 같은 mojibake 가 된다. latin1→utf8 재해석으로 원본 복원.
+//   - 순수 ASCII: 변화 없음 (latin1/utf8 동일).
+//   - 이미 올바른 유니코드(codepoint>255): busboy 가 만들 수 없는 값이므로 그대로.
+//   - 재해석 시 U+FFFD(깨진 바이트) 발생: 원래 진짜 latin1 텍스트였던 것 → 원본 유지.
+function decodeOriginalName(name) {
+  if (!name) return name;
+  if (/[^\x00-\xff]/.test(name)) return name;
+  const reinterpreted = Buffer.from(name, 'latin1').toString('utf8');
+  if (reinterpreted.includes('�')) return name;
+  return reinterpreted;
+}
+
 // multer 자체 에러를 JSON 으로 변환하는 wrapper
 function uploadMiddleware(req, res, next) {
   upload.array('files', 5)(req, res, (err) => {
@@ -211,7 +223,7 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
     let uploaded = 0, duplicates = 0, errors = 0;
 
     for (const file of files) {
-      const filename = file.originalname;
+      const filename = decodeOriginalName(file.originalname);
       try {
         if (!isAllowedAudio(file)) {
           results.push({ filename, status: 'error', error: `지원하지 않는 형식: ${file.mimetype}` });
@@ -410,6 +422,10 @@ app.get('/api/tracks', async (req, res) => {
         break;
       case 'last_used_asc':
         q = q.order('last_used_at', { ascending: true, nullsFirst: true });
+        break;
+      case 'last_used_desc':
+        // 마지막 사용 최신 순 — 한 번도 안 쓴 곡(null)은 맨 아래.
+        q = q.order('last_used_at', { ascending: false, nullsFirst: false });
         break;
       case 'alpha':
         // 파일명 알파벳 순 (title_en 은 join 컬럼이라 PostgREST .order 처리 까다로움 — 안정적 키 선택).
@@ -842,12 +858,7 @@ app.post('/api/tracks/backfill', async (req, res) => {
       // 1) Storage 다운로드
       let buf;
       try {
-        const { data: blob, error: dlErr } = await supabase.storage
-          .from(SUPABASE_BUCKET)
-          .download(t.storage_path);
-        if (dlErr) throw dlErr;
-        if (!blob) throw new Error('빈 응답');
-        buf = Buffer.from(await blob.arrayBuffer());
+        buf = await downloadTrack(t.storage_path);
       } catch (e) {
         results.push({
           id: t.id,
@@ -1371,6 +1382,33 @@ app.post('/api/titles/bulk-generate', async (req, res) => {
 
 // ─── Templates: CRUD + duplicate (Phase 4-A) ─────────────────────────────
 
+// 템플릿 배경 저장 정책:
+//   DB(background_image_url) 에는 R2 객체 Key(template-bg/..) 만 저장한다.
+//   signed URL 을 그대로 저장하면 R2 SigV4 7일 상한에 걸려 만료되므로 금지.
+//   - 저장 시(POST/PUT): 들어온 값(서명URL/풀URL/경로 무엇이든)에서 Key 만 추출해 보관.
+//   - 응답 시(GET): Key 를 그때그때 fresh signed URL 로 변환해 내려준다.
+function bgPathFromAny(value) {
+  if (!value) return null;
+  const s = String(value);
+  const m = s.match(/template-bg\/[^?"'\s]+/);
+  if (m) return m[0];
+  return s.startsWith('http') ? null : (s || null); // 알 수 없는 풀URL 은 버림
+}
+
+async function signTemplateBg(tpl) {
+  if (!tpl) return tpl;
+  const v = tpl.background_image_url;
+  if (typeof v === 'string' && v.startsWith('template-bg/')) {
+    try {
+      const signed = await getSignedUrl(v, 3600);
+      return { ...tpl, background_image_url: signed, background_image_path: v };
+    } catch {
+      return { ...tpl, background_image_path: v };
+    }
+  }
+  return tpl; // null 또는 (마이그레이션 전) 레거시 풀URL → 그대로
+}
+
 app.get('/api/templates', async (_req, res) => {
   try {
     const { data, error } = await supabase
@@ -1380,7 +1418,8 @@ app.get('/api/templates', async (_req, res) => {
       .order('use_count', { ascending: false })
       .order('updated_at', { ascending: false });
     if (error) throw error;
-    res.json({ ok: true, templates: data || [] });
+    const templates = await Promise.all((data || []).map(signTemplateBg));
+    res.json({ ok: true, templates });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -1397,7 +1436,7 @@ app.get('/api/templates/:id', async (req, res) => {
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ ok: false, error: 'template not found' });
-    res.json({ ok: true, template: data });
+    res.json({ ok: true, template: await signTemplateBg(data) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -1434,13 +1473,13 @@ app.post('/api/templates', async (req, res) => {
         config_json,
         is_default: !!is_default,
         is_favorite: !!is_favorite,
-        background_image_url,
+        background_image_url: bgPathFromAny(background_image_url),
         thumbnail_url,
       })
       .select('*')
       .single();
     if (error) throw error;
-    res.json({ ok: true, template: data });
+    res.json({ ok: true, template: await signTemplateBg(data) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -1465,7 +1504,7 @@ app.put('/api/templates/:id', async (req, res) => {
       patch.config_json = config_json;
     }
     if (thumbnail_url !== undefined) patch.thumbnail_url = thumbnail_url;
-    if (background_image_url !== undefined) patch.background_image_url = background_image_url;
+    if (background_image_url !== undefined) patch.background_image_url = bgPathFromAny(background_image_url);
     if (is_default !== undefined) patch.is_default = !!is_default;
     if (is_favorite !== undefined) patch.is_favorite = !!is_favorite;
 
@@ -1490,7 +1529,7 @@ app.put('/api/templates/:id', async (req, res) => {
       .maybeSingle();
     if (error) throw error;
     if (!data) return res.status(404).json({ ok: false, error: 'template not found' });
-    res.json({ ok: true, template: data });
+    res.json({ ok: true, template: await signTemplateBg(data) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
@@ -1632,24 +1671,17 @@ app.post('/api/templates/upload-background',
 
       // 2) Storage 업로드 — 경로: template-bg/{uuid}.{ext}
       const path = `template-bg/${randomUUID()}.${processed.ext}`;
-      const { error: upErr } = await supabase.storage
-        .from(SUPABASE_BUCKET)
-        .upload(path, processed.buffer, {
-          contentType: processed.mime,
-          cacheControl: '86400',
-          upsert: false,
-        });
-      if (upErr) throw new Error(`Storage upload 실패: ${upErr.message}`);
+      await uploadObject(path, processed.buffer, {
+        contentType: processed.mime,
+        cacheControl: '86400',
+      });
 
       // 3) signed URL — 1년 유효 (편집 세션 동안 유지). 진짜 영구 보관 필요 시 public bucket 또는 별도 보관 정책.
-      const { data: sd, error: sErr } = await supabase.storage
-        .from(SUPABASE_BUCKET)
-        .createSignedUrl(path, 60 * 60 * 24 * 365);
-      if (sErr) throw new Error(`signed URL 발급 실패: ${sErr.message}`);
+      const signedUrl = await getSignedUrl(path, 60 * 60 * 24 * 365);
 
       res.json({
         ok: true,
-        url: sd.signedUrl,
+        url: signedUrl,
         path,
         mime: processed.mime,
         ext: processed.ext,
@@ -3482,8 +3514,8 @@ app.listen(PORT, () => {
   const projectRef = SUPABASE_URL?.replace(/^https?:\/\//, '').split('.')[0] ?? '(unset)';
   console.log('');
   console.log(`🎷 Premium Jazz Lounge — http://localhost:${PORT}`);
-  console.log(`   Supabase: ${projectRef}`);
-  console.log(`   Bucket:   ${SUPABASE_BUCKET}`);
+  console.log(`   Supabase: ${projectRef} (DB)`);
+  console.log(`   Storage:  R2 ${S3_BUCKET} (${S3_ENDPOINT})`);
   console.log(`   Health:   http://localhost:${PORT}/api/health`);
   console.log('');
 });
