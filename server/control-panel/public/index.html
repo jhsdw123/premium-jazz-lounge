@@ -367,6 +367,129 @@
       color: var(--text-muted); font-size: 13px;
     }
 
+    /* ─── Pool workspace: Track List(좌) + 순서 패널(우) ─── */
+    .pool-workspace {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 16px;
+      align-items: start;
+    }
+    .pool-main { min-width: 0; }
+    @media (max-width: 1080px) {
+      .pool-workspace { grid-template-columns: 1fr; }
+    }
+
+    .pool-order-panel {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      position: sticky;
+      top: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .order-panel-header {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    }
+    .order-panel-header h3 {
+      margin: 0; font-size: 12px; font-weight: 600;
+      color: var(--jazz-gold); letter-spacing: 0.02em;
+    }
+    .order-panel-header h3 .dim { color: var(--text-muted); font-weight: 400; }
+    .order-hint { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+
+    .order-list {
+      display: flex; flex-direction: column; gap: 4px;
+      max-height: calc(100vh - 260px);
+      overflow-y: auto;
+    }
+    .order-empty {
+      text-align: center; color: var(--text-dim); font-size: 12px;
+      line-height: 1.7; padding: 28px 10px;
+      border: 1px dashed var(--border-strong); border-radius: 6px;
+    }
+    .order-empty .dim { color: var(--text-muted); font-size: 11px; }
+
+    /* 순서 패널 곡 행 */
+    .otrack {
+      display: grid;
+      /* drag / pos / play / title+prompt+dur / remove */
+      grid-template-columns: 18px 20px 26px 1fr 20px;
+      align-items: center;
+      gap: 7px;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 6px 8px;
+      font-size: 12px;
+    }
+    .otrack.dragging { opacity: 0.4; }
+    .otrack.drop-target { border-color: var(--jazz-gold); background: rgba(212,175,55,0.07); }
+    .otrack .odrag {
+      color: var(--text-muted); cursor: grab; text-align: center;
+      user-select: none; font-size: 13px; line-height: 1;
+    }
+    .otrack .odrag:hover { color: var(--text-dim); }
+    .otrack .opos {
+      color: var(--jazz-gold); font-variant-numeric: tabular-nums;
+      font-weight: 700; font-size: 12px; text-align: center;
+    }
+    .otrack .oplay {
+      background: none; border: 1px solid transparent; cursor: pointer;
+      color: var(--text-muted); font-size: 12px; padding: 2px 5px;
+      border-radius: 4px; line-height: 1;
+    }
+    .otrack .oplay:hover { color: var(--jazz-gold); border-color: var(--border-strong); }
+    .otrack .oplay.playing { color: var(--jazz-gold); animation: bplay-pulse 1.2s ease-in-out infinite; }
+    .otrack .ocell { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+    .otrack .otitle {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      color: var(--text);
+    }
+    .otrack .ometa { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .otrack .otag {
+      display: inline-block; padding: 0 6px; border-radius: 9px;
+      font-size: 9px; font-weight: 600; line-height: 1.6; white-space: nowrap;
+      color: #fff; flex-shrink: 0; max-width: 120px;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    .otrack .odur {
+      color: var(--text-dim); font-variant-numeric: tabular-nums; font-size: 11px;
+      flex-shrink: 0;
+    }
+    .otrack .oremove {
+      background: none; border: none; color: var(--text-muted); cursor: pointer;
+      font-size: 14px; padding: 0; line-height: 1;
+    }
+    .otrack .oremove:hover { color: var(--red); }
+
+    .order-summary {
+      display: flex; gap: 12px; flex-wrap: wrap; align-items: baseline;
+      font-size: 12px; color: var(--text-dim);
+      padding: 8px 0; border-top: 1px solid var(--border);
+    }
+    .order-summary .label { color: var(--text-muted); }
+    .order-summary .val { color: var(--jazz-gold); font-weight: 600; font-variant-numeric: tabular-nums; }
+    .order-summary .order-natural { font-size: 11px; color: var(--text-dim); }
+
+    .order-actions { display: flex; flex-direction: column; gap: 6px; }
+    .order-send-btn {
+      background: var(--jazz-gold-dim); color: #000; border: 1px solid var(--jazz-gold);
+      font-weight: 600; padding: 9px 14px; border-radius: 5px; cursor: pointer;
+      font-family: inherit; font-size: 13px;
+    }
+    .order-send-btn:hover:not(:disabled) { background: var(--jazz-gold); }
+    .order-send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .order-clear-btn {
+      background: var(--bg-input); color: var(--text-dim); border: 1px solid var(--border);
+      padding: 6px 14px; border-radius: 5px; cursor: pointer;
+      font-family: inherit; font-size: 12px;
+    }
+    .order-clear-btn:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
+    .order-clear-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
     /* Placeholder tabs */
     .placeholder {
       background: var(--bg-card);
@@ -548,6 +671,53 @@
       font-size: 13px;
     }
     .builder-empty strong { color: var(--jazz-gold); display: block; margin-bottom: 6px; font-size: 16px; }
+
+    /* Task 2-b: 최근 영상 불러오기 모달 */
+    .recent-modal {
+      position: fixed; inset: 0; z-index: 1000;
+      background: rgba(0,0,0,0.72);
+      display: flex; align-items: center; justify-content: center; padding: 24px;
+    }
+    .recent-modal[hidden] { display: none; }
+    .recent-dialog {
+      background: var(--bg-card); border: 1px solid var(--border-strong);
+      border-radius: 10px; width: min(920px, 100%); max-height: 86vh;
+      display: flex; flex-direction: column; overflow: hidden;
+    }
+    .recent-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+    .recent-head strong { color: var(--jazz-gold); font-size: 15px; }
+    .recent-hint { padding: 10px 16px 0; font-size: 12px; color: var(--text-dim); }
+    .recent-list {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+      gap: 12px; padding: 12px 16px 18px; overflow-y: auto;
+    }
+    .recent-card {
+      border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+      cursor: pointer; background: var(--bg-input); transition: border-color .15s, transform .1s;
+    }
+    .recent-card:hover { border-color: var(--jazz-gold); transform: translateY(-2px); }
+    .recent-thumb {
+      position: relative; aspect-ratio: 16 / 9; background: #0c0c0c;
+      background-size: cover; background-position: center;
+      display: flex; align-items: flex-end;
+    }
+    .recent-thumb .recent-song {
+      width: 100%; padding: 8px 10px; font-size: 13px; font-weight: 600; color: #fff;
+      background: linear-gradient(to top, rgba(0,0,0,0.82), rgba(0,0,0,0));
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .recent-thumb .recent-badge {
+      position: absolute; top: 8px; left: 8px; font-size: 10px; padding: 2px 6px;
+      border-radius: 3px; background: rgba(0,0,0,0.65); color: var(--jazz-gold); border: 1px solid var(--border);
+      max-width: 60%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .recent-thumb .recent-status { position: absolute; top: 8px; right: 8px; font-size: 10px; padding: 2px 6px; border-radius: 3px; }
+    .recent-status.done { background: rgba(76,175,80,0.2); color: #7bd88f; border: 1px solid #3a6b45; }
+    .recent-status.draft { background: rgba(255,255,255,0.08); color: var(--text-dim); border: 1px solid var(--border); }
+    .recent-meta { padding: 8px 10px; }
+    .recent-meta .rtitle { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .recent-meta .rsub { font-size: 11px; color: var(--text-muted); margin-top: 3px; }
+    .recent-empty { padding: 30px; text-align: center; color: var(--text-dim); grid-column: 1 / -1; }
 
     /* Builder track row */
     .builder-tracks { display: flex; flex-direction: column; gap: 4px; }
@@ -870,6 +1040,36 @@
       padding: 0;
     }
     .te-comp.selected .te-del { opacity: 1; }
+    .te-comp .te-dup {
+      position: absolute;
+      top: -10px; left: -10px;
+      width: 20px; height: 20px;
+      background: rgba(0,0,0,0.85);
+      border: 1px solid var(--jazz-gold);
+      color: var(--jazz-gold);
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 12px; line-height: 18px; text-align: center;
+      opacity: 0; transition: opacity 0.15s;
+      font-family: inherit;
+      padding: 0;
+    }
+    .te-comp.selected .te-dup { opacity: 1; }
+    /* Task 3: 회전 핸들 (좌측하단) */
+    .te-comp .te-rotate {
+      position: absolute;
+      bottom: -10px; left: -10px;
+      width: 20px; height: 20px;
+      background: rgba(0,0,0,0.85);
+      border: 1px solid var(--jazz-gold);
+      color: var(--jazz-gold);
+      border-radius: 50%;
+      font-size: 12px; line-height: 18px; text-align: center;
+      cursor: grab; opacity: 0; transition: opacity 0.15s;
+      user-select: none;
+    }
+    .te-comp.selected .te-rotate { opacity: 1; }
+    .te-comp .te-rotate:active { cursor: grabbing; }
     .te-comp .te-opacity {
       position: absolute;
       bottom: -22px; left: 0;
@@ -1348,6 +1548,7 @@
               <option value="usage_asc">사용 횟수 적은 순</option>
               <option value="usage_desc">사용 횟수 많은 순</option>
               <option value="last_used_asc">마지막 사용 오래된 순</option>
+              <option value="last_used_desc">마지막 사용 최신 순</option>
               <option value="alpha">알파벳 순</option>
               <option value="newest">최신 추가 순</option>
               <option value="oldest">오래된 추가 순</option>
@@ -1371,6 +1572,7 @@
         <button class="bulk-btn" id="clearSelBtn" type="button">☐ 해제</button>
         <span class="bulk-divider"></span>
         <button class="bulk-btn warn" id="bulkRetitleBtn" type="button" disabled>♻ 일괄 retitle</button>
+        <button class="bulk-btn" id="retitleUntitledBtn" type="button" title="현재 목록에서 제목 없는 곡만 자동 선택해 제목 생성">✨ 제목없는곡 생성</button>
         <button class="bulk-btn" id="bulkBackfillBtn" type="button" disabled>🔍 일괄 backfill</button>
         <button class="bulk-btn" id="bulkExtractBtn" type="button" disabled>🎷 악기 추출</button>
         <button class="bulk-btn" id="bulkResetUsageBtn" type="button" disabled>🔄 사용 이력 리셋</button>
@@ -1385,30 +1587,57 @@
         <div class="progress-text"></div>
       </div>
 
-      <div class="track-list-header">
-        <h3>Track List <span id="trackCount" class="dim"></span></h3>
-        <button class="refresh-btn" id="refreshTracksBtn">↻ 새로고침</button>
-      </div>
-      <div class="track-list">
-        <table>
-          <thead>
-            <tr>
-              <th class="col-check"></th>
-              <th class="col-id">#</th>
-              <th>Title / Filename</th>
-              <th class="col-duration">Length</th>
-              <th class="col-prompt">Prompt</th>
-              <th class="col-usage" title="사용 횟수">Used</th>
-              <th class="col-last-used" title="마지막 사용">Last Used</th>
-              <th class="col-action">Title</th>
-              <th class="col-action" title="사용 이력 리셋">Reset</th>
-              <th class="col-action">Del</th>
-            </tr>
-          </thead>
-          <tbody id="trackBody">
-            <tr><td colspan="10" class="empty">로딩 중…</td></tr>
-          </tbody>
-        </table>
+      <div class="pool-workspace">
+        <!-- 좌: Track List -->
+        <div class="pool-main">
+          <div class="track-list-header">
+            <h3>Track List <span id="trackCount" class="dim"></span></h3>
+            <button class="refresh-btn" id="refreshTracksBtn">↻ 새로고침</button>
+          </div>
+          <div class="track-list">
+            <table>
+              <thead>
+                <tr>
+                  <th class="col-check"></th>
+                  <th class="col-id">#</th>
+                  <th>Title / Filename</th>
+                  <th class="col-duration">Length</th>
+                  <th class="col-prompt">Prompt</th>
+                  <th class="col-usage" title="사용 횟수">Used</th>
+                  <th class="col-last-used" title="마지막 사용">Last Used</th>
+                  <th class="col-action">Title</th>
+                  <th class="col-action" title="사용 이력 리셋">Reset</th>
+                  <th class="col-action">Del</th>
+                </tr>
+              </thead>
+              <tbody id="trackBody">
+                <tr><td colspan="10" class="empty">로딩 중…</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 우: 선택한 곡 순서 (드래그로 재배치 → 이 순서대로 Builder 전송) -->
+        <aside class="pool-order-panel" id="poolOrderPanel">
+          <div class="order-panel-header">
+            <h3>🎬 보낼 곡 순서 <span id="orderCount" class="dim"></span></h3>
+            <span class="order-hint">드래그로 순서 변경</span>
+          </div>
+          <div class="order-list" id="orderList"></div>
+          <div class="order-empty" id="orderEmpty">
+            왼쪽 Track List에서 곡을 선택하면<br>여기에 순서대로 쌓입니다.<br>
+            <span class="dim">드래그로 순서를 정해 Builder로 보내세요.</span>
+          </div>
+          <div class="order-summary" id="orderSummary" hidden>
+            <span><span class="label">곡</span> <span class="val" id="orderSumCount">0</span></span>
+            <span><span class="label">총 길이</span> <span class="val" id="orderSumDur">0:00</span></span>
+            <span class="order-natural" id="orderSumNatural">—</span>
+          </div>
+          <div class="order-actions">
+            <button class="order-send-btn" id="orderSendBtn" type="button" disabled>이 순서로 Builder 보내기 →</button>
+            <button class="order-clear-btn" id="orderClearBtn" type="button" disabled>전체 해제</button>
+          </div>
+        </aside>
       </div>
     </section>
 
@@ -1418,6 +1647,9 @@
       <div id="builderEmpty" class="builder-empty">
         <strong>🎬 Builder</strong>
         Pool 탭에서 곡을 선택한 뒤 <span style="color:var(--jazz-gold)">🎬 Builder 로 보내기</span> 버튼을 눌러주세요.
+        <div style="margin-top:16px;">
+          <button class="bulk-btn" id="bRecentBtn" type="button" style="font-size:13px;padding:8px 16px;">📂 최근 영상 불러오기</button>
+        </div>
       </div>
 
       <!-- 곡 선택 후 노출 -->
@@ -1484,6 +1716,18 @@
               영상 프로젝트 생성 후 Studio 탭에서 미리보기 + mp4 export.
             </div>
           </div>
+        </div>
+      </div>
+      <!-- Task 2-b: 최근 영상 불러오기 모달 -->
+      <div id="recentModal" class="recent-modal" hidden>
+        <div class="recent-dialog">
+          <div class="recent-head">
+            <strong>📂 최근 영상 불러오기</strong>
+            <span style="flex:1"></span>
+            <button class="bulk-btn" id="recentCloseBtn" type="button">✕ 닫기</button>
+          </div>
+          <div class="recent-hint">카드를 누르면 그때 썼던 곡·순서가 그대로 Builder 에 복원됩니다. (템플릿만 다시 고르면 됨)</div>
+          <div id="recentList" class="recent-list"></div>
         </div>
       </div>
     </section>

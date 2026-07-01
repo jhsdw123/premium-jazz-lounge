@@ -1896,6 +1896,73 @@ app.get('/api/videos', async (_req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────
+//   GET /api/videos/recent?limit=5
+//   최근 영상 프로젝트(최신순) + 곡 순서/제목 + 템플릿(config_json + 서명된 배경).
+//   Builder '최근 영상 불러오기' 용 — 곡·순서 복원 + 즉석 썸네일 렌더 데이터.
+//   ⚠ '/:id' 라우트보다 먼저 정의해야 함 (안 그러면 id='recent' 로 매칭됨).
+// ─────────────────────────────────────────────────────────────
+app.get('/api/videos/recent', async (req, res) => {
+  try {
+    const limit = Math.min(Math.max(parseIntOrNull(req.query.limit) || 5, 1), 20);
+    const { data: vids, error } = await supabase
+      .from('pjl_video_projects')
+      .select('id, build_id, title, status, total_duration_sec, track_ids, template_id, created_at')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) throw error;
+    const videos = vids || [];
+
+    // 곡 제목 일괄 조회 (N+1 방지)
+    const allTrackIds = [...new Set(videos.flatMap((v) => v.track_ids || []))];
+    const trackMap = new Map();
+    if (allTrackIds.length) {
+      const { data: tracks, error: terr } = await supabase
+        .from('pjl_tracks')
+        .select('id, original_filename, title:pjl_titles(title_en)')
+        .in('id', allTrackIds);
+      if (terr) throw terr;
+      for (const t of (tracks || [])) {
+        trackMap.set(t.id, {
+          id: t.id,
+          title_en: t.title?.title_en || null,
+          original_filename: t.original_filename || null,
+        });
+      }
+    }
+
+    // 템플릿 일괄 조회 + 배경 서명 (즉석 썸네일 렌더용)
+    const allTplIds = [...new Set(videos.map((v) => v.template_id).filter((x) => x != null))];
+    const tplMap = new Map();
+    if (allTplIds.length) {
+      const { data: tpls, error: perr } = await supabase
+        .from('pjl_templates')
+        .select('id, name, config_json, background_image_url')
+        .in('id', allTplIds);
+      if (perr) throw perr;
+      for (const tpl of (tpls || [])) {
+        tplMap.set(tpl.id, await signTemplateBg(tpl));
+      }
+    }
+
+    const result = videos.map((v) => ({
+      id: v.id,
+      build_id: v.build_id,
+      title: v.title,
+      status: v.status,
+      total_duration_sec: v.total_duration_sec,
+      track_ids: v.track_ids || [],
+      created_at: v.created_at,
+      tracks: (v.track_ids || []).map((id) => trackMap.get(id)).filter(Boolean),
+      template: v.template_id != null ? (tplMap.get(v.template_id) || null) : null,
+    }));
+
+    res.json({ ok: true, videos: result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/api/videos/:id', async (req, res) => {
   try {
     const id = req.params.id;
@@ -1916,6 +1983,34 @@ app.get('/api/videos/:id', async (req, res) => {
     if (vtErr) throw vtErr;
 
     res.json({ ok: true, video: data, tracks: vt || [] });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────
+//   POST /api/videos/:id/status  { status }
+//   영상 프로젝트 상태 전환. mp4 export 성공 시 Studio 가 'done' 으로 호출 →
+//   draft 로만 남는 유령 프로젝트와 실제로 영상이 나온 것을 구분.
+//   status 는 스키마 CHECK 허용값만 (draft/rendering/done/uploaded/failed).
+// ─────────────────────────────────────────────────────────────
+const VIDEO_STATUSES = ['draft', 'rendering', 'done', 'uploaded', 'failed'];
+app.post('/api/videos/:id/status', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const status = String(req.body?.status || '').trim();
+    if (!VIDEO_STATUSES.includes(status)) {
+      return res.status(400).json({ ok: false, error: `status 는 ${VIDEO_STATUSES.join('/')} 중 하나여야 합니다` });
+    }
+    const { data, error } = await supabase
+      .from('pjl_video_projects')
+      .update({ status })
+      .eq('id', id)
+      .select('id, status')
+      .maybeSingle();
+    if (error) throw error;
+    if (!data) return res.status(404).json({ ok: false, error: 'video not found' });
+    res.json({ ok: true, id: data.id, status: data.status });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

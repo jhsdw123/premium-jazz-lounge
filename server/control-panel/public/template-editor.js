@@ -909,6 +909,8 @@ function applyComponentTransform(el, c) {
   el.style.width = `${c.width * s}px`;
   el.style.height = `${c.height * s}px`;
   el.style.opacity = String(c.opacity ?? 1);
+  // Task 3: 회전 — 중심 기준(CSS transform-origin 기본 50% 50%). studio export 도 중심 기준이라 일치.
+  el.style.transform = c.rotation ? `rotate(${c.rotation}deg)` : '';
   el.dataset.x = String(c.x);
   el.dataset.y = String(c.y);
   el.dataset.w = String(c.width);
@@ -936,8 +938,10 @@ function renderCanvas() {
     if (c.id === te.selectedId) el.classList.add('selected');
     el.innerHTML = `
       ${renderComponentInner(c)}
+      <button class="te-dup" type="button" title="복제">⧉</button>
       <button class="te-del" type="button" title="삭제">✕</button>
       <div class="te-handle"></div>
+      <div class="te-rotate" title="드래그해서 회전 (Shift=15° 스냅)">⟳</div>
       <div class="te-opacity">
         <input type="range" min="0" max="100" value="${Math.round((c.opacity ?? 1) * 100)}" />
       </div>
@@ -985,6 +989,7 @@ function bindComponentInteractions(el, c) {
   // 클릭 시 선택
   el.addEventListener('mousedown', (ev) => {
     if (ev.target.classList.contains('te-del')) return;
+    if (ev.target.classList.contains('te-dup')) return;
     if (ev.target.closest('.te-opacity')) return;
     selectComponent(c.id);
   });
@@ -993,6 +998,12 @@ function bindComponentInteractions(el, c) {
   el.querySelector('.te-del').addEventListener('click', (ev) => {
     ev.stopPropagation();
     removeComponent(c.id);
+  });
+
+  // 복제 버튼 (좌측상단) — 동일 컴포넌트 복제
+  el.querySelector('.te-dup').addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    duplicateComponent(c.id);
   });
 
   // 투명도 슬라이더
@@ -1005,6 +1016,41 @@ function bindComponentInteractions(el, c) {
     if (te.selectedId === c.id) renderProps();
   });
   opIn.addEventListener('mousedown', (ev) => ev.stopPropagation());
+
+  // Task 3: 회전 핸들 (좌측하단) — 중심 기준 드래그 회전. Shift = 15° 스냅.
+  const rotEl = el.querySelector('.te-rotate');
+  if (rotEl) {
+    rotEl.addEventListener('mousedown', (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+      selectComponent(c.id);
+      const rect = el.getBoundingClientRect();
+      // 회전은 중심 기준이라 중심 좌표는 회전 중에도 고정 → 시작 시 1회 계산.
+      const cx = rect.left + rect.width / 2;
+      const cy = rect.top + rect.height / 2;
+      const start = te.components.find((x) => x.id === c.id);
+      const startAngle = (Math.atan2(ev.clientY - cy, ev.clientX - cx) * 180) / Math.PI;
+      const startRot = start?.rotation || 0;
+      const onMove = (e) => {
+        const a = (Math.atan2(e.clientY - cy, e.clientX - cx) * 180) / Math.PI;
+        let rot = startRot + (a - startAngle);
+        if (e.shiftKey) rot = Math.round(rot / 15) * 15;   // Shift = 15° 스냅
+        rot = ((rot % 360) + 360) % 360;                    // 0~360 정규화
+        const comp = te.components.find((x) => x.id === c.id);
+        if (!comp) return;
+        comp.rotation = Math.round(rot * 10) / 10;           // 0.1° 단위
+        el.style.transform = `rotate(${comp.rotation}deg)`;
+        const rotInput = document.querySelector('#teProps [data-prop="rotation"]');
+        if (rotInput) rotInput.value = comp.rotation;        // 속성패널 숫자 동기화 (full re-render X)
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    });
+  }
 
   if (typeof window.interact !== 'function') return;
 
@@ -1026,7 +1072,7 @@ function bindComponentInteractions(el, c) {
       },
     },
     allowFrom: '.te-comp',
-    ignoreFrom: '.te-handle, .te-del, .te-opacity',
+    ignoreFrom: '.te-handle, .te-del, .te-dup, .te-opacity, .te-rotate',
   });
 
   // 리사이즈 (우하단 핸들)
@@ -1070,7 +1116,7 @@ function bindComponentInteractions(el, c) {
           newInner.style.width = '100%'; newInner.style.height = '100%';
           newInner.innerHTML = renderComponentInner(cur);
           [...el.children].forEach((ch) => {
-            if (!ch.classList.contains('te-del') && !ch.classList.contains('te-handle') && !ch.classList.contains('te-opacity')) {
+            if (!ch.classList.contains('te-del') && !ch.classList.contains('te-dup') && !ch.classList.contains('te-handle') && !ch.classList.contains('te-opacity') && !ch.classList.contains('te-rotate')) {
               ch.remove();
             }
           });
@@ -1134,7 +1180,7 @@ function updateComponent(id, patch) {
 
   // 비-visualizer — inner 다시 그리기 (control 들 보존)
   [...el.children].forEach((ch) => {
-    if (!ch.classList.contains('te-del') && !ch.classList.contains('te-handle') && !ch.classList.contains('te-opacity')) {
+    if (!ch.classList.contains('te-del') && !ch.classList.contains('te-dup') && !ch.classList.contains('te-handle') && !ch.classList.contains('te-opacity') && !ch.classList.contains('te-rotate')) {
       ch.remove();
     }
   });
@@ -1155,6 +1201,32 @@ function removeComponent(id) {
   te.components = te.components.filter((c) => c.id !== id);
   if (te.selectedId === id) te.selectedId = null;
   renderCanvas();
+}
+
+// 컴포넌트 복제 — 동일 설정으로 새 인스턴스 생성, 약간 어긋나게 배치 후 선택.
+function duplicateComponent(id) {
+  const src = te.components.find((x) => x.id === id);
+  if (!src) return;
+  // "한 영상에 1개만" 인 컴포넌트는 복제 금지 (addComponent 가드와 동일 정책).
+  if ((src.type === 'nowplaying' && hasNowPlaying()) ||
+      (src.type === 'playlist' && hasPlaylist()) ||
+      (src.type === 'clock' && hasClock())) {
+    toast(`${src.type} 컴포넌트는 한 영상에 1개만 둘 수 있어 복제할 수 없습니다`, 'info');
+    return;
+  }
+  // 런타임 필드(_audioMotion 등 '_' prefix) 제외하고 깊은 복사.
+  const plain = {};
+  for (const k of Object.keys(src)) {
+    if (!k.startsWith('_')) plain[k] = src[k];
+  }
+  const clone = structuredClone(plain);
+  clone.id = nextId();
+  clone.x = Math.round((src.x ?? 0) + 30);
+  clone.y = Math.round((src.y ?? 0) + 30);
+  te.components.push(clone);
+  te.selectedId = clone.id;
+  renderCanvas();   // visualizer 면 attach 단계에서 새 AudioMotion 인스턴스 생성됨
+  toast('컴포넌트 복제됨', 'success');
 }
 
 function addComponent(type) {
@@ -1798,6 +1870,7 @@ function renderProps() {
       <div class="te-prop"><label>Width</label><input type="number" data-prop="width" value="${Math.round(c.width)}" /></div>
       <div class="te-prop"><label>Height</label><input type="number" data-prop="height" value="${Math.round(c.height)}" /></div>
       <div class="te-prop"><label>Opacity</label><input type="number" step="0.05" data-prop="opacity" value="${(c.opacity ?? 1).toFixed(2)}" min="0" max="1" /></div>
+      <div class="te-prop"><label>Rotation°</label><input type="number" step="0.5" data-prop="rotation" value="${c.rotation || 0}" /></div>
       ${typeFields}
     </div>
   `;

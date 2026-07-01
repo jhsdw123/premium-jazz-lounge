@@ -9,9 +9,37 @@ const state = {
   tracks: [],
   tracksTotal: null,        // Phase 4-D-5-A: pjl_tracks 활성 트랙 총 개수 (서버에서 받음)
   selected: new Set(),
+  // 우측 "보낼 곡 순서" 패널의 명시적 순서. selected 와 동일한 id 집합을
+  // 사용자가 드래그로 정한 순서대로 보관 (selected 는 순서 없는 Set 이라 별도 유지).
+  order: [],
+  // 필터로 화면에서 사라진 선택 곡도 패널에 표시하려면 트랙 객체가 필요 →
+  // 한 번이라도 로드된 트랙은 여기 캐시해 둔다.
+  trackCache: new Map(),
   bulkInProgress: false,
   playingTrackId: null,
 };
+
+// ─── 선택 순서(order) 동기화 헬퍼 ────────────────────────────────────
+// 사용자가 우측 패널에서 직접 순서를 드래그했는지 여부. true 면 그 순서를 그대로
+// Builder 로 보내고, false(그냥 선택만) 면 기존 prefix_order 기반 정렬을 적용.
+let orderTouched = false;
+
+// order 는 항상 selected 와 같은 id 집합을 유지해야 한다.
+function addToOrder(id) {
+  if (!state.order.includes(id)) state.order.push(id);
+}
+function removeFromOrder(id) {
+  const i = state.order.indexOf(id);
+  if (i >= 0) state.order.splice(i, 1);
+}
+function clearOrder() {
+  state.order = [];
+  orderTouched = false;
+}
+// order 에서 selected 에 없는 id 제거 (방어적 정리).
+function pruneOrder() {
+  state.order = state.order.filter((id) => state.selected.has(id));
+}
 
 // ─── Toast notifications ─────────────────────────────────────────────
 function toast(msg, type = 'info', durationMs = 4000) {
@@ -331,6 +359,7 @@ $('#applyFilterBtn').addEventListener('click', () => applyFilters());
 $('#resetFilterBtn').addEventListener('click', async () => {
   clearFilters();
   state.selected.clear();
+  clearOrder();
   updateBulkBar();
   await applyFilters();
 });
@@ -370,7 +399,10 @@ async function refreshTracks() {
     const j = await apiGet(`/api/tracks?${p}`);
     state.tracks = j.tracks || [];
     state.tracksTotal = (typeof j.total === 'number') ? j.total : null;
+    // 순서 패널이 필터 후에도 선택 곡을 그릴 수 있게 캐시.
+    for (const t of state.tracks) state.trackCache.set(t.id, t);
     renderTracks();
+    renderOrderPanel();
   } catch (e) {
     toast(`tracks 로드 실패: ${e.message}`, 'error');
     state.tracks = [];
@@ -475,10 +507,11 @@ function renderTracks() {
   $$('.col-check input[type="checkbox"]').forEach((cb) => {
     cb.addEventListener('change', () => {
       const id = parseInt(cb.dataset.id, 10);
-      if (cb.checked) state.selected.add(id);
-      else state.selected.delete(id);
+      if (cb.checked) { state.selected.add(id); addToOrder(id); }
+      else { state.selected.delete(id); removeFromOrder(id); }
       cb.closest('tr').classList.toggle('selected', cb.checked);
       updateBulkBar();
+      renderOrderPanel();
     });
   });
   $$('.reroll-btn').forEach((btn) =>
@@ -520,6 +553,8 @@ async function deleteTrack(id) {
     await apiPost('/api/tracks/delete', { ids: [id] });
     toast(`삭제됨: id=${id}`, 'success');
     state.selected.delete(id);
+    removeFromOrder(id);
+    state.trackCache.delete(id);
     await Promise.all([refreshTracks(), refreshStats()]);
   } catch (e) {
     toast(`삭제 실패: ${e.message}`, 'error');
@@ -602,18 +637,28 @@ function updateBulkBar() {
   $('#bulkResetUsageBtn').disabled = !enabled;
   $('#bulkDeleteBtn').disabled = !enabled;
   $('#sendToBuilderBtn').disabled = !enabled;
+  // 제목없는곡 생성: 선택과 무관(스스로 선택)하므로 bulk 진행 중에만 비활성.
+  const ru = $('#retitleUntitledBtn');
+  if (ru) ru.disabled = state.bulkInProgress;
+  // 우측 순서 패널 전송 버튼: 선택 곡(order)이 있고 bulk 중이 아닐 때만.
+  const sendBtn = $('#orderSendBtn');
+  if (sendBtn) sendBtn.disabled = state.order.length === 0 || state.bulkInProgress;
 }
 
 $('#selectAllBtn').addEventListener('click', () => {
-  for (const t of state.tracks) state.selected.add(t.id);
+  for (const t of state.tracks) { state.selected.add(t.id); addToOrder(t.id); }
   renderTracks();  // checkbox 상태 + selected row 클래스 갱신
+  renderOrderPanel();
 });
 $('#clearSelBtn').addEventListener('click', () => {
   state.selected.clear();
+  clearOrder();
   renderTracks();
+  renderOrderPanel();
 });
 
 $('#bulkRetitleBtn').addEventListener('click', () => bulkRetitle());
+$('#retitleUntitledBtn')?.addEventListener('click', () => retitleUntitled());
 $('#bulkBackfillBtn').addEventListener('click', () => bulkBackfill());
 $('#bulkExtractBtn').addEventListener('click', () => bulkExtractInstruments());
 $('#bulkResetUsageBtn').addEventListener('click', () => bulkResetUsage());
@@ -643,7 +688,32 @@ async function bulkRetitle() {
   const ids = Array.from(state.selected);
   if (!ids.length) return;
   if (!confirm(`${ids.length}개 트랙의 제목을 일괄 재생성합니다.\n(이미 제목 있으면 reject 후 새로 생성)\n약 ${Math.ceil(ids.length * 4.5)}초 소요. 계속?`)) return;
+  await runRetitle(ids);
+}
 
+// 현재 트랙 목록에서 제목 없는(title_id 없는) 곡만 자동 선택하여 일괄 제목 생성.
+async function retitleUntitled() {
+  if (state.bulkInProgress) return;
+  const untitled = state.tracks.filter((t) => !t.title_id);
+  if (!untitled.length) {
+    toast('제목 없는 곡이 없습니다. (현재 목록은 전부 제목 있음)', 'info');
+    return;
+  }
+  if (!confirm(`제목 없는 곡 ${untitled.length}개를 자동 선택하여 제목을 생성합니다.\n약 ${Math.ceil(untitled.length * 4.5)}초 소요. 계속?`)) return;
+
+  // 시각적 피드백: 해당 곡들만 선택 표시
+  state.selected.clear();
+  clearOrder();
+  for (const t of untitled) { state.selected.add(t.id); addToOrder(t.id); }
+  renderTracks();
+  renderOrderPanel();
+
+  await runRetitle(untitled.map((t) => t.id));
+}
+
+// 공유 코어: 주어진 id 들의 제목을 순차 생성/리롤 (Gemini RPM throttle 포함).
+async function runRetitle(ids) {
+  if (!ids.length) return;
   state.bulkInProgress = true;
   updateBulkBar();
   showBulkProgress(`0/${ids.length} 제목 작업 중…`);
@@ -782,7 +852,9 @@ async function bulkDelete() {
     const j = await apiPost('/api/tracks/delete', { ids });
     setBulkProgress(100, `삭제됨: ${j.deleted} (Storage: ${j.removedFromStorage})`);
     toast(`${j.deleted}개 삭제 완료`, 'success');
+    for (const id of ids) state.trackCache.delete(id);
     state.selected.clear();
+    clearOrder();
   } catch (e) {
     toast(`일괄 삭제 실패: ${e.message}`, 'error');
   }
@@ -990,10 +1062,10 @@ async function playTrack(trackId) {
   audioPlayer.hidden = false;
 
   state.playingTrackId = trackId;
-  // playing 표시
-  const btn = document.querySelector(`.play-btn[data-track-id="${trackId}"]`);
-  if (btn) btn.classList.add('playing');
-  const row = btn?.closest('tr');
+  // playing 표시 — 테이블 + 순서 패널 양쪽 버튼 모두.
+  const btns = $$(`.play-btn[data-track-id="${trackId}"]`);
+  btns.forEach((b) => b.classList.add('playing'));
+  const row = btns[0]?.closest('tr');
   if (row) row.classList.add('now-playing');
 
   try {
@@ -1021,8 +1093,7 @@ audioEl.addEventListener('ended', () => {
 audioEl.addEventListener('play', () => {
   // 재개 시 ▶ 다시 활성화 표시
   if (state.playingTrackId != null) {
-    const btn = document.querySelector(`.play-btn[data-track-id="${state.playingTrackId}"]`);
-    if (btn) btn.classList.add('playing');
+    $$(`.play-btn[data-track-id="${state.playingTrackId}"]`).forEach((b) => b.classList.add('playing'));
   }
 });
 
@@ -1033,26 +1104,182 @@ audioEl.addEventListener('pause', () => {
   }
 });
 
+// ─── 선택한 곡 순서 패널 (우측) ─────────────────────────────────────
+// id → 트랙 객체. 현재 화면(state.tracks)에 없으면 캐시에서. 둘 다 없으면 null.
+function resolveTrack(id) {
+  return state.tracks.find((t) => t.id === id) || state.trackCache.get(id) || null;
+}
+
+function trackDuration(t) {
+  return Number(t?.duration_actual_sec) || Number(t?.duration_raw_sec) || 0;
+}
+
+function renderOrderPanel() {
+  pruneOrder();
+  const listEl = $('#orderList');
+  const emptyEl = $('#orderEmpty');
+  const summaryEl = $('#orderSummary');
+  if (!listEl) return;
+
+  const ids = state.order;
+  const n = ids.length;
+  $('#orderCount').textContent = n ? `(${n})` : '';
+  $('#orderSendBtn').disabled = n === 0 || state.bulkInProgress;
+  $('#orderClearBtn').disabled = n === 0;
+
+  if (!n) {
+    listEl.innerHTML = '';
+    emptyEl.hidden = false;
+    summaryEl.hidden = true;
+    return;
+  }
+  emptyEl.hidden = true;
+  summaryEl.hidden = false;
+
+  listEl.innerHTML = '';
+  let totalDur = 0;
+  ids.forEach((id, idx) => {
+    const t = resolveTrack(id);
+    const pos = idx + 1;
+    const title = t?.title?.title_en || t?.original_filename || `Track ${id}`;
+    const dur = trackDuration(t);
+    totalDur += dur;
+    const keyword = t ? extractPromptKeyword(t) : '?';
+    const color = getPromptColor(keyword);
+    const promptFull = t?.prompt?.prompt_text
+      ? (t.prompt.nickname ? `[${t.prompt.nickname}] ${t.prompt.prompt_text}` : t.prompt.prompt_text)
+      : '';
+    const isPlaying = state.playingTrackId === id;
+
+    const row = document.createElement('div');
+    row.className = 'otrack';
+    row.dataset.id = id;
+    row.draggable = true;
+    row.innerHTML = `
+      <span class="odrag" title="드래그해서 순서 변경">⋮⋮</span>
+      <span class="opos">${pos}</span>
+      <button class="oplay play-btn ${isPlaying ? 'playing' : ''}" data-track-id="${id}" title="재생/일시정지">▶</button>
+      <span class="ocell">
+        <span class="otitle" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+        <span class="ometa">
+          <span class="otag" style="background:${color};" title="${escapeHtml(promptFull)}">${escapeHtml(keyword)}</span>
+          <span class="odur">${fmtMinSec(dur)}</span>
+        </span>
+      </span>
+      <button class="oremove" data-id="${id}" title="선택 해제">×</button>
+    `;
+    listEl.appendChild(row);
+  });
+
+  $('#orderSumCount').textContent = n;
+  $('#orderSumDur').textContent = fmtMinSec(totalDur);
+  $('#orderSumNatural').textContent = fmtNatural(totalDur);
+
+  // 핸들러
+  listEl.querySelectorAll('.oremove').forEach((b) =>
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      deselectFromPanel(parseInt(b.dataset.id, 10));
+    })
+  );
+  listEl.querySelectorAll('.oplay').forEach((b) =>
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      playTrack(parseInt(b.dataset.trackId, 10));
+    })
+  );
+  setupOrderDragDrop(listEl);
+}
+
+// 패널 ×: 선택 해제 → 테이블 체크박스/행 상태도 동기화.
+function deselectFromPanel(id) {
+  state.selected.delete(id);
+  removeFromOrder(id);
+  const cb = document.querySelector(`.col-check input[data-id="${id}"]`);
+  if (cb) {
+    cb.checked = false;
+    cb.closest('tr')?.classList.remove('selected');
+  }
+  updateBulkBar();
+  renderOrderPanel();
+}
+
+function setupOrderDragDrop(container) {
+  let dragId = null;
+  container.querySelectorAll('.otrack').forEach((row) => {
+    row.addEventListener('dragstart', (ev) => {
+      dragId = parseInt(row.dataset.id, 10);
+      row.classList.add('dragging');
+      ev.dataTransfer.effectAllowed = 'move';
+      ev.dataTransfer.setData('text/plain', String(dragId));
+    });
+    row.addEventListener('dragend', () => {
+      row.classList.remove('dragging');
+      container.querySelectorAll('.drop-target').forEach((r) => r.classList.remove('drop-target'));
+      dragId = null;
+    });
+    row.addEventListener('dragover', (ev) => {
+      if (dragId == null) return;
+      const targetId = parseInt(row.dataset.id, 10);
+      if (targetId === dragId) return;
+      ev.preventDefault();
+      ev.dataTransfer.dropEffect = 'move';
+      container.querySelectorAll('.drop-target').forEach((r) => r.classList.remove('drop-target'));
+      row.classList.add('drop-target');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drop-target'));
+    row.addEventListener('drop', (ev) => {
+      ev.preventDefault();
+      const targetId = parseInt(row.dataset.id, 10);
+      if (dragId == null || targetId === dragId) return;
+      reorderPanel(dragId, targetId);
+    });
+  });
+}
+
+function reorderPanel(srcId, targetId) {
+  const srcIdx = state.order.indexOf(srcId);
+  const tgtIdx = state.order.indexOf(targetId);
+  if (srcIdx < 0 || tgtIdx < 0 || srcIdx === tgtIdx) return;
+  const [src] = state.order.splice(srcIdx, 1);
+  const adj = srcIdx < tgtIdx ? tgtIdx - 1 : tgtIdx;
+  state.order.splice(adj, 0, src);
+  orderTouched = true;   // 직접 순서를 건드림 → 전송 시 이 순서 그대로 신뢰.
+  renderOrderPanel();
+}
+
 // ─── Send to Builder ────────────────────────────────────────────────
 const BUILDER_SS_KEY = 'pjl.builder.trackIds';
 
-$('#sendToBuilderBtn').addEventListener('click', () => {
-  const ids = Array.from(state.selected);
+function sendToBuilder() {
+  pruneOrder();
+  const ids = [...state.order];
   if (!ids.length) return;
-  // Phase 4-D fix: prefix_order 자동 정렬은 Pool→Builder 전송 시점 1회만 적용.
-  // 그 결과를 sessionStorage 에 저장 → builderOnEnter 가 그대로 신뢰 (재정렬 X).
-  // → 탭 이동만으로 순서가 재정렬되는 버그 해결.
-  const tracksFromSel = ids
-    .map((id) => state.tracks.find((t) => t.id === id))
-    .filter(Boolean);
-  const arranged = arrangeTracksWithPins(tracksFromSel);
-  const arrangedIds = arranged.map((t) => t.id);
-  // state.tracks 에 없던 id 들 (필터로 가려진 곡 등) 은 끝에 그대로 부착.
-  const missing = ids.filter((id) => !arrangedIds.includes(id));
-  const finalIds = [...arrangedIds, ...missing];
+
+  let finalIds;
+  if (orderTouched) {
+    // 사용자가 패널에서 직접 정한 순서 그대로 전송.
+    finalIds = ids;
+  } else {
+    // 순서를 따로 건드리지 않음 → 기존 동작: prefix_order(파일명) 기반 정렬.
+    const tracks = ids.map(resolveTrack).filter(Boolean);
+    const arranged = arrangeTracksWithPins(tracks).map((t) => t.id);
+    const missing = ids.filter((id) => !arranged.includes(id));
+    finalIds = [...arranged, ...missing];
+  }
   sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(finalIds));
-  toast(`${ids.length}곡을 Builder 로 전송`, 'success');
+  toast(`${finalIds.length}곡을 Builder 로 전송${orderTouched ? ' (지정한 순서 적용)' : ''}`, 'success');
   switchTab('builder');
+}
+
+$('#sendToBuilderBtn').addEventListener('click', sendToBuilder);
+$('#orderSendBtn').addEventListener('click', sendToBuilder);
+$('#orderClearBtn').addEventListener('click', () => {
+  state.selected.clear();
+  clearOrder();
+  orderTouched = false;
+  renderTracks();
+  renderOrderPanel();
 });
 
 // ─── Builder tab ────────────────────────────────────────────────────
@@ -1751,7 +1978,9 @@ $('#bStudioBtn')?.addEventListener('click', async () => {
     };
 
     sessionStorage.setItem('pjl.studio.session', JSON.stringify(session));
-    sessionStorage.removeItem(BUILDER_SS_KEY);
+    // Task 2-a: Builder 곡 목록(BUILDER_SS_KEY)을 지우지 않는다 → Studio 로 보낸 뒤에도
+    //   Builder 탭으로 돌아오면 곡·순서가 그대로 복원됨(새로고침/브라우저 종료 전까지).
+    //   (Studio 확인 → Template Editor 수정 → Builder 재진입 시 Pool 에서 다시 안 가져와도 됨)
 
     toast(`Studio 진입 (${studioTracks.length}곡 / ${fmtMinSec(cursor)})`, 'success', 3000);
 
@@ -1786,6 +2015,73 @@ $('#bResetBtn').addEventListener('click', () => {
   $('#builderEmpty').hidden = false;
   $('#builderMain').hidden = true;
 });
+
+// ─── Task 2-b: 최근 영상 불러오기 ───────────────────────────────────
+function fmtRecentDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function openRecentModal() {
+  const modal = $('#recentModal');
+  const list = $('#recentList');
+  if (!modal || !list) return;
+  list.innerHTML = '<div class="recent-empty">불러오는 중…</div>';
+  modal.hidden = false;
+  try {
+    const j = await apiGet('/api/videos/recent?limit=5');
+    const videos = j.videos || [];
+    if (!videos.length) {
+      list.innerHTML = '<div class="recent-empty">최근 영상이 없습니다.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    for (const v of videos) {
+      const ids = Array.isArray(v.track_ids) ? v.track_ids : [];
+      const firstSong = v.tracks && v.tracks[0];
+      const songLabel = (firstSong && (firstSong.title_en
+        || (firstSong.original_filename || '').replace(/\.[^/.]+$/, ''))) || `${ids.length}곡`;
+      const bg = (v.template && v.template.background_image_url) || '';
+      const tplName = (v.template && v.template.name) || '(기본)';
+      const statusCls = v.status === 'done' ? 'done' : 'draft';
+      const statusTxt = v.status === 'done' ? '완료' : '초안';
+      const durMin = Math.round((v.total_duration_sec || 0) / 60);
+
+      const card = document.createElement('div');
+      card.className = 'recent-card';
+      card.innerHTML = `
+        <div class="recent-thumb">
+          <span class="recent-badge">${escapeHtml(tplName)}</span>
+          <span class="recent-status ${statusCls}">${statusTxt}</span>
+          <span class="recent-song">${escapeHtml(songLabel)}</span>
+        </div>
+        <div class="recent-meta">
+          <div class="rtitle">${escapeHtml(v.title || '(제목 없음)')}</div>
+          <div class="rsub">${fmtRecentDate(v.created_at)} · ${ids.length}곡 · ${durMin}분</div>
+        </div>`;
+      if (bg) card.querySelector('.recent-thumb').style.backgroundImage = `url("${bg}")`;
+      card.addEventListener('click', () => loadRecentVideo(v));
+      list.appendChild(card);
+    }
+  } catch (e) {
+    list.innerHTML = `<div class="recent-empty">불러오기 실패: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadRecentVideo(v) {
+  const ids = Array.isArray(v.track_ids) ? v.track_ids : [];
+  if (!ids.length) { toast('이 영상에 곡 정보가 없습니다', 'error'); return; }
+  sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(ids));
+  $('#recentModal').hidden = true;
+  await window.builderOnEnter();  // BUILDER_SS_KEY 에서 곡·순서 복원 + 렌더
+  toast(`${ids.length}곡 불러옴 — 템플릿 고르고 Studio 로 보내세요`, 'success', 4000);
+}
+
+$('#bRecentBtn')?.addEventListener('click', openRecentModal);
+$('#recentCloseBtn')?.addEventListener('click', () => { const m = $('#recentModal'); if (m) m.hidden = true; });
+$('#recentModal')?.addEventListener('click', (e) => { if (e.target.id === 'recentModal') e.target.hidden = true; });
 
 // ─── Builder onEnter (탭 전환 시) ────────────────────────────────────
 window.builderOnEnter = async function builderOnEnter() {

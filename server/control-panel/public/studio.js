@@ -77,6 +77,12 @@ const studio = {
   recCancelled: false,
   wakeLock: null,            // navigator.wakeLock.request('screen') 결과 (녹화 중 화면 sleep 방지)
   visibilityListenerBound: false,
+
+  // Phase 4-D-6: File System Access 스트리밍 저장 (RAM 에 1.8GB blob 안 쌓음 → 비주얼라이저 다수도 안정)
+  _saveHandle: null,         // 녹화 시작 시 showSaveFilePicker() 로 확보한 파일 핸들
+  _writable: null,           // FileSystemWritableFileStream (녹화 내내 열려 있음)
+  _writeChain: null,         // onData write 직렬화용 promise 체인
+  _writeError: null,         // 스트리밍 write 중 발생한 첫 에러
 };
 
 // ─── 색상 유틸 (template-editor.js 와 동일 로직) ────────────────────
@@ -272,6 +278,18 @@ function drawVisualizerComponent(ctx, c) {
 }
 
 // ─── 한 frame 그리기 ──────────────────────────────────────────────
+// Task 3: 컴포넌트 회전 — 중심점 기준으로 캔버스 좌표계를 회전시킨다.
+//   각 draw 를 ctx.save()/applyCompRotation()/...draw.../ctx.restore() 로 감싸 사용.
+//   rotation(deg) 이 없으면(0/undefined) no-op → 기존 렌더와 동일.
+function applyCompRotation(ctx, c) {
+  if (!c || !c.rotation) return;
+  const cx = c.x + (c.width || 0) / 2;
+  const cy = c.y + (c.height || 0) / 2;
+  ctx.translate(cx, cy);
+  ctx.rotate((c.rotation * Math.PI) / 180);
+  ctx.translate(-cx, -cy);
+}
+
 function renderFrame() {
   const cv = $('#studioCanvas');
   if (!cv) return;
@@ -310,17 +328,23 @@ function renderFrame() {
 
   // 3) 컴포넌트
   for (const c of studio.components) {
+    ctx.save();
+    applyCompRotation(ctx, c);
     if (c.type === 'text') drawTextComponent(ctx, c, varsCtx);
     else if (c.type === 'image') drawImageComponent(ctx, c);
     else if (c.type === 'progress') drawProgressComponent(ctx, c, varsCtx);
     else if (c.type === 'visualizer') drawVisualizerComponent(ctx, c);
+    ctx.restore();
     // NowPlaying 은 항상 마지막 (overlay) — 별도 처리 (DOM + canvas 동기화)
     // Playlist 도 별도 (canvas-only, 곡 idx 가 state)
   }
 
   // 3-b) Playlist — canvas-only. 미리보기/녹화 동일 (DOM overlay 없음).
   if (studio.plComp && studio.plTracks.length > 0) {
+    ctx.save();
+    applyCompRotation(ctx, studio.plComp);
     drawPlaylist(ctx, studio.plComp, studio.plTracks, studio.plCurrentIdx);
+    ctx.restore();
   }
 
   // 3-c) Clock — canvas-only. 곡당 elapsed = audio.currentTime.
@@ -328,7 +352,10 @@ function renderFrame() {
   //              녹화 시에도 captureTrackFramesLive 가 실시간 재생하므로 동일하게 정확.
   if (studio.clockComp) {
     const elapsed = studio.audioElement?.currentTime || 0;
+    ctx.save();
+    applyCompRotation(ctx, studio.clockComp);
     drawClock(ctx, studio.clockComp, elapsed);
+    ctx.restore();
   }
 
   // 4) NowPlaying — 모드별 분기.
@@ -338,7 +365,10 @@ function renderFrame() {
     const state = studio.npCtrl.stateAt();
     if (studio.recording) {
       if (studio.npElement) studio.npElement.style.visibility = 'hidden';
+      ctx.save();
+      applyCompRotation(ctx, studio.npComp);
       drawNPState(ctx, state, studio.npComp);
+      ctx.restore();
     } else {
       if (studio.npElement) {
         studio.npElement.style.visibility = '';
@@ -639,6 +669,12 @@ function loadTrack(idx) {
 }
 
 function onTrackEnded() {
+  // 녹화 중엔 startRecording 의 트랙 루프가 곡 진행·finalize 를 전담한다.
+  //   audio 'ended' 는 마지막 곡에서 프레임 루프보다 먼저 튈 수 있어(비주얼라이저 부하로 드리프트),
+  //   여기서 finishRecording 을 부르면 프레임이 아직 인코딩 중인데 muxer 를 finalize/close 해버려
+  //   → 이중 finalize/close, 잘린/깨진 mp4, 저장 실패. 그래서 녹화 중엔 무시.
+  if (studio.recording) return;
+
   const tracks = studio.session?.tracks || [];
   const next = studio.currentTrackIdx + 1;
   if (next >= tracks.length) {
@@ -646,9 +682,6 @@ function onTrackEnded() {
     setStatus('전체 곡 재생 완료');
     // 마지막 곡 — NowPlaying 페이드아웃
     if (studio.npCtrl) studio.npCtrl.startOut();
-    if (studio.recording) {
-      finishRecording().catch((e) => console.error('녹화 완료 실패:', e));
-    }
     return;
   }
   if (loadTrack(next) && studio.playing) {
@@ -849,8 +882,40 @@ async function loadSession() {
   }
 }
 
+// 세션에 구워진 signed URL 재발급 — 배경 이미지 + 각 곡 오디오.
+//   서버 만료가 둘 다 1시간이라, Builder→Studio 후 1시간 지나 부팅한 세션은
+//   URL 이 죽어있음(배경 안 뜸 / 소리 깨짐). 부팅 시점에 새로 받아 교체.
+async function refreshSessionUrls(session) {
+  // 1) 템플릿 배경 — id 로 재조회하면 서버(signTemplateBg)가 새로 서명해 준다.
+  const tplId = session.template?.id;
+  if (tplId != null) {
+    try {
+      const r = await fetch(`/api/templates/${tplId}`);
+      const j = await r.json();
+      if (r.ok && j.template) session.template = j.template;
+    } catch (e) {
+      console.warn('[studio] 템플릿 배경 URL 재발급 실패 — 캐시 사용:', e?.message || e);
+    }
+  }
+  // 2) 각 곡 오디오 URL 재발급 (미리보기 재생 + 녹화 시작 시점 대비).
+  await Promise.all((session.tracks || []).map(async (t) => {
+    if (t?.id == null) return;
+    try {
+      const r = await fetch(`/api/tracks/${t.id}/audio-url`);
+      const j = await r.json();
+      if (r.ok && j.ok && j.url) t.audioUrl = j.url;
+    } catch (e) {
+      console.warn(`[studio] 오디오 URL 재발급 실패 (track ${t.id}) — 캐시 사용:`, e?.message || e);
+    }
+  }));
+}
+
 async function bootSession(session) {
   studio.session = session;
+
+  // Phase 4-D-6: 오래된 세션의 만료 URL 을 부팅 시 새로 발급받아 교체.
+  await refreshSessionUrls(session);
+
   const tpl = session.template || {};
   studio.components = adaptTemplate(tpl.config_json || {});
   studio.bgImg = await loadImage(tpl.background_image_url);
@@ -982,6 +1047,43 @@ async function startRecording() {
     return;
   }
 
+  // Phase 4-D-6: 저장 위치를 '지금'(사용자 클릭 제스처가 살아있는 이 순간) 확보.
+  //   → 30분 뒤 자리를 비워도/탭이 백그라운드여도 자동 다운로드 차단 없이 디스크로 직접 저장.
+  //   → mp4 조각을 스트리밍으로 바로 파일에 흘려보내 RAM 에 1.8GB blob 을 안 쌓음
+  //     (비주얼라이저 6개+ 처럼 무거운 구성에서 메모리 초과 크래시 방지 — 이게 진짜 병목이었음).
+  //   showSaveFilePicker 는 secure context 필요(localhost 는 OK), Chrome/Edge 지원.
+  // 재진입 차단(더블클릭 레이스): showSaveFilePicker/createWritable await 동안 두 번째 클릭이
+  //   또 다른 녹화 파이프라인을 띄우면 studio._writable/_enc 등을 덮어써 스트림 충돌 → mp4 깨짐.
+  //   맨 위 guard `if (studio.recording) return` 이 막도록 await 전에 동기적으로 잠근다.
+  studio.recording = true;
+  studio._saveHandle = null;
+  studio._writable = null;
+  studio._writeChain = Promise.resolve();
+  studio._writeError = null;
+  if (typeof window.showSaveFilePicker === 'function') {
+    const stamp0 = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const safeTitle0 = (studio.session?.title || 'pjl').replace(/[^a-zA-Z0-9가-힣\s_\-]/g, '_').slice(0, 60);
+    try {
+      studio._saveHandle = await window.showSaveFilePicker({
+        suggestedName: `${safeTitle0}_${stamp0}.mp4`,
+        startIn: 'downloads',
+        types: [{ description: 'MP4 Video', accept: { 'video/mp4': ['.mp4'] } }],
+      });
+      // createWritable 은 swap 파일에 쓰고 close() 시점에 원본을 교체 → 크래시 나도 기존 파일 보존.
+      studio._writable = await studio._saveHandle.createWritable();
+    } catch (e) {
+      if (e && e.name === 'AbortError') {
+        studio.recording = false; // 잠금 해제 — 다시 시작 가능
+        setRecStatus('저장 위치 선택 취소 — 녹화 시작 안 함');
+        return;
+      }
+      // 미지원/기타 오류 → in-memory blob 자동 다운로드 폴백으로 진행.
+      console.warn('[REC] File System Access 실패 — 자동 다운로드 폴백:', e?.message || e);
+      studio._saveHandle = null;
+      studio._writable = null;
+    }
+  }
+
   studio.recording = true;
   studio.recCancelled = false;
   // Phase 4-D-4 polish: fps 스냅샷 — 이 녹화 한 건 동안 고정. UI 가 바뀌어도 영향 없음.
@@ -1010,7 +1112,16 @@ async function startRecording() {
       // muxer 가 buffer 재사용 가능 → 즉시 복사
       const copy = new Uint8Array(data.byteLength);
       copy.set(data);
-      muxerChunks.push({ data: copy, position });
+      if (studio._writable) {
+        // 스트리밍 저장: 조각이 나오는 즉시 디스크로 write (RAM 누적 X).
+        //   write 는 async 이므로 순서 보장을 위해 promise 체인으로 직렬화.
+        studio._writeChain = studio._writeChain
+          .then(() => studio._writable.write({ type: 'write', position, data: copy }))
+          .catch((e) => { if (!studio._writeError) studio._writeError = e; });
+      } else {
+        // 폴백: 메모리에 쌓아 finalize 때 Blob 다운로드.
+        muxerChunks.push({ data: copy, position });
+      }
       const end = position + data.byteLength;
       if (end > muxerMaxEnd) muxerMaxEnd = end;
     },
@@ -1064,6 +1175,14 @@ async function startRecording() {
     setRecStatus(`🎬 [${i + 1}/${tracks.length}] ${t.title} 준비…`);
     try {
       // 1) 오디오 다운로드 + 디코드
+      //    녹화 직전 오디오 URL 을 새로 발급 — 긴 녹화 도중 1시간 만료로 뒷곡이 죽는 것 방지.
+      try {
+        const ur = await fetch(`/api/tracks/${t.id}/audio-url`);
+        const uj = await ur.json();
+        if (ur.ok && uj.ok && uj.url) t.audioUrl = uj.url;
+      } catch (e) {
+        console.warn(`[REC] 오디오 URL 재발급 실패 (track ${t.id}) — 기존 URL 사용:`, e?.message || e);
+      }
       const ab = await fetch(t.audioUrl).then((r) => r.arrayBuffer());
       const audioBuffer = await studio.audioCtx.decodeAudioData(ab);
       const trackDur = Math.min(audioBuffer.duration, t.durationSec);
@@ -1104,6 +1223,8 @@ async function captureTrackFramesLive(vEnc, canvas, trackIdx, trackDur, globalTi
 
   for (let f = 0; f < totalFrames; f++) {
     if (studio.recCancelled) break;
+    // 디스크 write 실패(디스크 참/USB 분리/read-only) 감지 시 즉시 중단 — 30분 다 돌고 실패 방지.
+    if (studio._writeError) { studio.recCancelled = true; break; }
 
     // 페이싱 — 다음 frame 의 wall-clock 까지 대기
     const targetWall = startWall + f * frameInterval;
@@ -1208,67 +1329,124 @@ async function recordTrackUsage(tracks) {
   console.log(`[REC] 사용 이력 ${j.recorded || records.length} 곡 기록 (videoId=${videoId})`);
 }
 
+// File System Access 폴백 — 강화된 자동 다운로드.
+//   앵커를 DOM 에 append 후 click + revoke 를 넉넉히 지연 → 대용량 blob 저장 안정화
+//   (기존엔 append 없이 5초 후 revoke → 대용량/백그라운드에서 간헐 실패).
+function downloadBlobFallback(blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const safeTitle = (studio.session?.title || 'pjl').replace(/[^a-zA-Z0-9가-힣\s_\-]/g, '_').slice(0, 60);
+  a.href = url;
+  a.download = `${safeTitle}_${stamp}.mp4`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
+}
+
+// mp4 저장 성공 직후 — DB 프로젝트 상태를 'done'(export 완료)으로 전환.
+//   draft 로만 남던 유령 프로젝트와 실제로 영상이 나온 것을 구분하기 위함.
+async function markVideoDone(videoId) {
+  if (!videoId) return;
+  try {
+    await fetch(`/api/videos/${videoId}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: 'done' }),
+    });
+  } catch (e) {
+    console.warn('[REC] 영상 상태(done) 갱신 실패:', e?.message || e);
+  }
+}
+
 async function finishRecording() {
   const enc = studio._enc;
   if (!enc) return;
+  if (studio._finishing) return;  // 이중 호출 방지 (동시 진입 차단)
+  studio._finishing = true;
   setRecStatus('💾 finalizing…');
   try {
     await enc.vEnc.flush();
     await enc.aEnc.flush();
     enc.muxer.finalize();
 
-    // Phase 4-D-4 fix: StreamTarget 청크 → Blob (메모리 효율 — 단일 ArrayBuffer 합치지 않음).
-    // fastStart:false 이므로 sequential append-only 가 보장되지만, 안전을 위해 정렬 + 검증.
-    const writes = enc.muxerChunks;
-    writes.sort((a, b) => a.position - b.position);
-
-    let sequential = true;
-    let expectedPos = 0;
-    for (const w of writes) {
-      if (w.position !== expectedPos) { sequential = false; break; }
-      expectedPos += w.data.byteLength;
-    }
-
-    let blob;
-    if (sequential) {
-      // 정상 경로 — Blob 이 Uint8Array 배열을 받아 내부적으로 효율 처리 (디스크 백업 가능).
-      blob = new Blob(writes.map((w) => w.data), { type: 'video/mp4' });
+    if (studio._writable) {
+      // ── 스트리밍 저장 경로 (File System Access) ──────────────────────────
+      // onData 가 녹화 내내 디스크로 직접 write 함. 남은 write 완료 대기 후 close.
+      // 1.8GB blob 을 RAM 에 만들지 않으므로 비주얼라이저 다수(6개+)에도 메모리 안정.
+      await studio._writeChain;
+      if (studio._writeError) throw studio._writeError;
+      // 한 프레임도 안 써졌으면(시작 직후 정지) 빈 파일 → 폐기(0바이트 방지).
+      if (enc.getMuxerMaxEnd() === 0) {
+        try { await studio._writable.abort(); } catch {}
+        setRecStatus('저장할 내용이 없어 취소됨');
+        return;
+      }
+      // 정지(recCancelled)여도 지금까지 인코딩+finalize 된 부분은 유효한 mp4 → 저장한다.
+      await studio._writable.close();
+      const mb = (enc.getMuxerMaxEnd() / 1048576).toFixed(1);
+      const fname = studio._saveHandle?.name || 'video.mp4';
+      const partial = studio.recCancelled ? ' (정지 — 부분 저장)' : '';
+      setRecStatus(`✅ 저장 완료${partial} — ${fname} (${mb} MB)`);
     } else {
-      // 비정상 (이론상 fastStart:false 에선 발생 X) — sparse 버퍼 fallback.
-      console.warn('[muxer] non-sequential writes 감지 — sparse buffer fallback');
-      const total = enc.getMuxerMaxEnd();
-      const buf = new Uint8Array(total);
-      for (const w of writes) buf.set(w.data, w.position);
-      blob = new Blob([buf], { type: 'video/mp4' });
+      // ── 폴백: in-memory Blob + 자동 다운로드 (File System Access 미지원/취소 시) ──
+      // Phase 4-D-4 fix: StreamTarget 청크 → Blob (단일 ArrayBuffer 합치지 않음).
+      // fastStart:false 이므로 sequential append-only 가 보장되지만, 안전을 위해 정렬 + 검증.
+      const writes = enc.muxerChunks;
+      writes.sort((a, b) => a.position - b.position);
+
+      let sequential = true;
+      let expectedPos = 0;
+      for (const w of writes) {
+        if (w.position !== expectedPos) { sequential = false; break; }
+        expectedPos += w.data.byteLength;
+      }
+
+      let blob;
+      if (sequential) {
+        blob = new Blob(writes.map((w) => w.data), { type: 'video/mp4' });
+      } else {
+        console.warn('[muxer] non-sequential writes 감지 — sparse buffer fallback');
+        const total = enc.getMuxerMaxEnd();
+        const buf = new Uint8Array(total);
+        for (const w of writes) buf.set(w.data, w.position);
+        blob = new Blob([buf], { type: 'video/mp4' });
+      }
+
+      if (!blob || blob.size === 0) {
+        setRecStatus('저장할 내용이 없어 취소됨');
+        return;
+      }
+      // 정지여도 지금까지 걸 다운로드 (부분 저장).
+      downloadBlobFallback(blob);
+      const partial = studio.recCancelled ? ' (정지 — 부분 저장)' : '';
+      setRecStatus(`✅ 저장 완료${partial} (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
     }
 
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const safeTitle = (studio.session?.title || 'pjl').replace(/[^a-zA-Z0-9가-힣\s_\-]/g, '_').slice(0, 60);
-    a.href = url;
-    a.download = `${safeTitle}_${stamp}.mp4`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 5000);
-
-    setRecStatus(`✅ 저장 완료 (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
-
-    // Phase 4-D-5-A: 사용 이력 기록 — mp4 가 실제 다운로드된 시점에만.
-    // 취소/예외 시점엔 catch 로 빠지므로 여기 도달 X.
+    // Phase 4-D-5-A: 사용 이력 기록 — 저장 성공 시점에만.
+    // 취소/예외 시점엔 위에서 return 되거나 catch 로 빠지므로 여기 도달 X.
     try {
       await recordTrackUsage(studio.session?.tracks || []);
     } catch (e) {
-      // 영상은 이미 만들어졌으니 사용 이력 실패는 silently 로그만.
       console.warn('[REC] 사용 이력 기록 실패:', e?.message || e);
     }
+    // 저장 성공 → DB 상태 draft → done 으로 전환 (유령 draft 와 구분).
+    await markVideoDone(studio.session?.videoId);
   } catch (e) {
     console.error('finalize 실패:', e);
     setRecStatus(`⚠ 저장 실패: ${e.message}`);
+    try { await studio._writable?.abort(); } catch {}
   } finally {
     studio.recording = false;
     studio.recCancelled = false;
     studio.recordingFps = null;
     studio._enc = null;
+    studio._writable = null;
+    studio._writeChain = null;
+    studio._writeError = null;
+    studio._saveHandle = null;
+    studio._finishing = false;
     releaseWakeLock();
     hideVisibilityWarning();
     $('#studioRecordBtn').hidden = false;
