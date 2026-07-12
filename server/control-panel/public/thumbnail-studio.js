@@ -372,7 +372,7 @@
           <div id="thDropZone" style="flex:1;width:100%;display:flex;align-items:center;justify-content:center;border:2px dashed transparent;border-radius:6px;transition:border-color 0.15s, background 0.15s;">
             <canvas id="thumbPreviewCanvas" style="max-width:100%;max-height:100%;border:1px solid #444;box-shadow:0 0 30px rgba(0,0,0,0.6);background:#000;"></canvas>
           </div>
-          <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">* 화면에 보이는 그대로 저장됨 (선택 박스는 export 시 제외).</div>
+          <div style="margin-top:8px;font-size:10px;color:var(--text-muted);">* 텍스트는 캔버스에서 클릭 → 드래그로 이동 가능. 화면에 보이는 그대로 저장됨 (선택 박스는 export 시 제외).</div>
         </div>
 
         <!-- RIGHT: sidebar -->
@@ -992,6 +992,70 @@
     drawThumbnail();
   }
 
+  // ─── Canvas drag: 텍스트 레이어 직접 이동 ─────────────────────────
+  function canvasPos(e) {
+    const rect = thumbState.canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (thumbState.canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (thumbState.canvas.height / rect.height),
+    };
+  }
+
+  // 캔버스 좌표(px,py)에 있는 최상위 텍스트 레이어 반환 (그리기 역순 = 위에 있는 것 우선)
+  function textLayerAt(px, py) {
+    const ctx = thumbState.ctx;
+    const w = 1920, h = 1080;
+    for (let i = thumbState.extraTextLayers.length - 1; i >= 0; i--) {
+      const l = thumbState.extraTextLayers[i];
+      ctx.save();
+      let fs = '';
+      if (l.bold) fs += 'bold ';
+      if (l.italic) fs += 'italic ';
+      ctx.font = `${fs}${l.size}px ${l.font}`;
+      if (ctx.letterSpacing !== undefined) ctx.letterSpacing = l.spacing + 'px';
+      const lw = ctx.measureText(l.text).width;
+      ctx.restore();
+      const x = w * l.x, y = h * l.y;
+      const lx = l.align === 'center' ? x - lw / 2 : l.align === 'right' ? x - lw : x;
+      if (px >= lx - 10 && px <= lx + lw + 10 && py >= y - l.size / 2 - 5 && py <= y + l.size / 2 + 5) return l;
+    }
+    return null;
+  }
+
+  function setupCanvasDrag() {
+    const canvas = thumbState.canvas;
+    let drag = null; // { id, dx, dy } — 잡은 지점과 앵커의 오프셋 유지
+
+    canvas.addEventListener('mousedown', (e) => {
+      const p = canvasPos(e);
+      const l = textLayerAt(p.x, p.y);
+      if (!l) return;
+      e.preventDefault();
+      drag = { id: l.id, dx: p.x - 1920 * l.x, dy: p.y - 1080 * l.y };
+      if (thumbState.selectedExtraId !== l.id) editCustomText(l.id);
+      drawThumbnail();
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (drag) {
+        const l = thumbState.extraTextLayers.find((x) => x.id === drag.id);
+        if (!l) { drag = null; return; }
+        const p = canvasPos(e);
+        l.x = Math.max(0, Math.min(1, (p.x - drag.dx) / 1920));
+        l.y = Math.max(0, Math.min(1, (p.y - drag.dy) / 1080));
+        // 에디터 패널 슬라이더 동기화
+        document.getElementById('thEditX').value = l.x * 100;
+        document.getElementById('thEditY').value = l.y * 100;
+        drawThumbnail();
+      } else if (e.target === canvas) {
+        const p = canvasPos(e);
+        canvas.style.cursor = textLayerAt(p.x, p.y) ? 'move' : 'default';
+      }
+    });
+
+    window.addEventListener('mouseup', () => { drag = null; });
+  }
+
   // ─── Quick start: 프로젝트에서 배경+제목 불러오기 ─────────────────
   async function loadRecentProjects() {
     const sel = document.getElementById('thProjectSelect');
@@ -1147,6 +1211,7 @@
     canvas.height = 1080;
     thumbState.canvas = canvas;
     thumbState.ctx = canvas.getContext('2d');
+    setupCanvasDrag();
 
     // Font selects
     document.getElementById('selThSideFont').innerHTML = FONT_OPTGROUPS_HTML;
