@@ -180,6 +180,55 @@
     ctx: null,
   };
 
+  // ─── Color harmony (HSL 색상환 기반 추천) ─────────────────────────
+  function hexToHsl(hex) {
+    const n = hex.replace('#', '');
+    const r = parseInt(n.slice(0, 2), 16) / 255;
+    const g = parseInt(n.slice(2, 4), 16) / 255;
+    const b = parseInt(n.slice(4, 6), 16) / 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    let h = 0, s = 0;
+    const l = (max + min) / 2;
+    if (max !== min) {
+      const d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+      else if (max === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60;
+    }
+    return [h, s * 100, l * 100];
+  }
+
+  function hslToHex(h, s, l) {
+    s /= 100; l /= 100;
+    const k = (n) => (n + h / 30) % 12;
+    const a = s * Math.min(l, 1 - l);
+    const f = (n) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+    const to = (x) => Math.round(255 * x).toString(16).padStart(2, '0');
+    return `#${to(f(0))}${to(f(8))}${to(f(4))}`;
+  }
+
+  function suggestColors(hex) {
+    let h, s, l;
+    try { [h, s, l] = hexToHsl(hex); } catch (_) { return []; }
+    if (!isFinite(h)) return [];
+    const clamp = (v) => Math.max(0, Math.min(100, v));
+    if (s < 10) {
+      // 무채색(흰/검/회색)은 색상환 회전이 의미 없음 → 채널 무드에 맞는 포인트색 추천
+      return [
+        { label: '골드', hex: '#d4af37' },
+        { label: '아이보리', hex: '#f5e9d0' },
+        { label: '딥네이비', hex: '#16213e' },
+      ];
+    }
+    return [
+      { label: '보색', hex: hslToHex((h + 180) % 360, clamp(s), clamp(l)) },
+      { label: '유사색', hex: hslToHex((h + 30) % 360, clamp(s), clamp(l)) },
+      { label: '삼각배색', hex: hslToHex((h + 120) % 360, clamp(s), clamp(l)) },
+    ];
+  }
+
   function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -324,6 +373,8 @@
                   <input type="range" id="thEditShadowY" min="-50" max="50" value="0" style="flex:1;">
                 </div>
                 <div class="th-row"><label>Text Color</label><input type="color" id="thEditColor" value="#ffffff"></div>
+                <div class="th-row" style="margin-top:8px;"><label>🎨 어울리는 색 (클릭 = 테두리색 적용)</label></div>
+                <div id="thColorSuggest" style="display:flex;gap:6px;margin-top:4px;"></div>
                 <div style="display:flex;gap:5px;margin-top:10px;justify-content:space-between;border-top:1px solid var(--border);padding-top:10px;">
                   <button id="thBtnDelText" class="th-mini-btn" style="background:#522;color:#fff;">DELETE LAYER</button>
                   <button id="thBtnCloseEdit" class="th-mini-btn">CLOSE</button>
@@ -523,7 +574,12 @@
 
       const x = w * l.x, y = h * l.y;
       if (l.strokeW > 0) {
-        ctx.lineWidth = l.strokeW;
+        // miter join 이 뾰족한 글자 모서리에서 스파이크를 만들어서 round 로 고정.
+        // fill 이 위에 덮이는 경우엔 2배 두께로 그어서 바깥쪽으로만 strokeW 만큼 확장.
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.miterLimit = 2;
+        ctx.lineWidth = l.hollow ? l.strokeW : l.strokeW * 2;
         ctx.strokeStyle = l.strokeCol;
         ctx.strokeText(l.text, x, y);
       }
@@ -664,6 +720,32 @@
     });
   }
 
+  function renderColorSuggest() {
+    const wrap = document.getElementById('thColorSuggest');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    const base = document.getElementById('thEditColor').value;
+    suggestColors(base).forEach(({ label, hex }) => {
+      const item = document.createElement('div');
+      item.style.cssText = 'flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.title = `${label} ${hex} — 클릭하면 테두리색에 적용`;
+      btn.style.cssText = `width:100%;height:24px;border-radius:4px;border:1px solid var(--border);cursor:pointer;background:${hex};`;
+      btn.onclick = () => {
+        document.getElementById('thEditStrokeCol').value = hex;
+        const l = thumbState.extraTextLayers.find((x) => x.id === thumbState.selectedExtraId);
+        if (l) { l.strokeCol = hex; drawThumbnail(); }
+      };
+      const cap = document.createElement('div');
+      cap.textContent = label;
+      cap.style.cssText = 'font-size:8px;color:var(--text-muted);';
+      item.appendChild(btn);
+      item.appendChild(cap);
+      wrap.appendChild(item);
+    });
+  }
+
   function editCustomText(id) {
     thumbState.selectedExtraId = id;
     renderCustomTextList();
@@ -691,6 +773,7 @@
     setToggle('thBtnItalic', 'italic');
     setToggle('thBtnUnderline', 'underline');
     setToggle('thBtnHollow', 'hollow');
+    renderColorSuggest();
   }
 
   // ─── Preset save/load ────────────────────────────────────────────
@@ -958,6 +1041,7 @@
         else if (type === 'pct') l[prop] = parseFloat(e.target.value) / 100;
         else l[prop] = e.target.value;
         if (id === 'thEditContent') renderCustomTextList();
+        if (id === 'thEditColor') renderColorSuggest();
         drawThumbnail();
       });
     };
