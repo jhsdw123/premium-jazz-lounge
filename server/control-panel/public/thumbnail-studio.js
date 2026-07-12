@@ -178,14 +178,13 @@
     selectedFilterKey: 'normal',
     canvas: null,
     ctx: null,
+    recentProjects: [],             // /api/videos/recent 결과 캐시
+    bgPalette: null,                // extractPalette 결과 { top:[{h,s,l,n}], avgLum }
   };
 
   // ─── Color harmony (HSL 색상환 기반 추천) ─────────────────────────
-  function hexToHsl(hex) {
-    const n = hex.replace('#', '');
-    const r = parseInt(n.slice(0, 2), 16) / 255;
-    const g = parseInt(n.slice(2, 4), 16) / 255;
-    const b = parseInt(n.slice(4, 6), 16) / 255;
+  function rgbToHsl(r255, g255, b255) {
+    const r = r255 / 255, g = g255 / 255, b = b255 / 255;
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
     let h = 0, s = 0;
     const l = (max + min) / 2;
@@ -198,6 +197,11 @@
       h *= 60;
     }
     return [h, s * 100, l * 100];
+  }
+
+  function hexToHsl(hex) {
+    const n = hex.replace('#', '');
+    return rgbToHsl(parseInt(n.slice(0, 2), 16), parseInt(n.slice(2, 4), 16), parseInt(n.slice(4, 6), 16));
   }
 
   function hslToHex(h, s, l) {
@@ -229,6 +233,126 @@
     ];
   }
 
+  // ─── 배경 이미지 팔레트 추출 (이미지 기반 색 추천용) ──────────────
+  // 이미지를 80×45 로 축소 → 픽셀을 512개 버킷(채널당 8단계)으로 양자화 →
+  // 상위 버킷들의 평균색 + 전체 평균 밝기를 뽑는다.
+  function extractPalette(img) {
+    try {
+      const W = 80, H = 45;
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(img, 0, 0, W, H);
+      const data = g.getImageData(0, 0, W, H).data;
+      const buckets = new Map();
+      let lumSum = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i], gr = data[i + 1], b = data[i + 2];
+        lumSum += 0.2126 * r + 0.7152 * gr + 0.0722 * b;
+        const key = ((r >> 5) << 6) | ((gr >> 5) << 3) | (b >> 5);
+        const e = buckets.get(key) || { r: 0, g: 0, b: 0, n: 0 };
+        e.r += r; e.g += gr; e.b += b; e.n++;
+        buckets.set(key, e);
+      }
+      const avgLum = lumSum / (data.length / 4) / 255;
+      const top = [...buckets.values()]
+        .sort((a, b) => b.n - a.n)
+        .slice(0, 8)
+        .map((e) => {
+          const r = Math.round(e.r / e.n), gr = Math.round(e.g / e.n), b = Math.round(e.b / e.n);
+          const [h, s, l] = rgbToHsl(r, gr, b);
+          return { h, s, l, n: e.n };
+        });
+      return { top, avgLum };
+    } catch (_) {
+      return null; // CORS taint 등으로 픽셀 접근 불가 → 색상환 fallback
+    }
+  }
+
+  // 용도별 이미지 기반 추천. 팔레트 없으면 null → 호출부에서 색상환 fallback.
+  function paletteSuggestions(kind) {
+    const p = thumbState.bgPalette;
+    if (!p || !p.top.length) return null;
+    const clamp = (v) => Math.max(0, Math.min(100, v));
+    const dominant = p.top[0];
+    // 포인트색: 너무 어둡거나 밝은 버킷은 감점하고 채도 높은 것 선택
+    const vivid = [...p.top].sort((a, b) =>
+      b.s * (b.l > 15 && b.l < 85 ? 1 : 0.3) - a.s * (a.l > 15 && a.l < 85 ? 1 : 0.3)
+    )[0];
+    const compHex = hslToHex((dominant.h + 180) % 360, clamp(Math.max(dominant.s, 40)), 50);
+    if (kind === 'text') {
+      // 이미지가 어두우면 밝은 톤, 밝으면 어두운 톤 (가독성 대비)
+      const contrast = p.avgLum < 0.5
+        ? hslToHex(dominant.h, clamp(Math.min(dominant.s, 30)), 92)
+        : hslToHex(dominant.h, clamp(Math.min(dominant.s, 40)), 12);
+      return [
+        { label: '대비색', hex: contrast },
+        { label: '포인트', hex: hslToHex(vivid.h, clamp(Math.max(vivid.s, 55)), 55) },
+        { label: '보색', hex: compHex },
+      ];
+    }
+    if (kind === 'border') {
+      return [
+        { label: '주조색', hex: hslToHex(dominant.h, clamp(dominant.s), clamp(Math.min(Math.max(dominant.l, 25), 60))) },
+        { label: '포인트', hex: hslToHex(vivid.h, clamp(Math.max(vivid.s, 50)), 50) },
+        { label: '보색', hex: compHex },
+      ];
+    }
+    if (kind === 'shadow') {
+      // 그림자/그라데이션은 이미지 색조를 머금은 어두운 톤이 자연스러움
+      return [
+        { label: '딥 주조색', hex: hslToHex(dominant.h, clamp(dominant.s + 10), 10) },
+        { label: '딥 포인트', hex: hslToHex(vivid.h, clamp(vivid.s), 12) },
+        { label: '블랙', hex: '#000000' },
+      ];
+    }
+    return null;
+  }
+
+  // 공용 스와치 렌더러: items = [{label, hex}], onPick(hex)
+  function renderSuggestRow(containerId, items, onPick) {
+    const wrap = document.getElementById(containerId);
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    (items || []).forEach(({ label, hex }) => {
+      const item = document.createElement('div');
+      item.style.cssText = 'flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.title = `${label} ${hex}`;
+      btn.style.cssText = `width:100%;height:24px;border-radius:4px;border:1px solid var(--border);cursor:pointer;background:${hex};`;
+      btn.onclick = () => onPick(hex);
+      const cap = document.createElement('div');
+      cap.textContent = label;
+      cap.style.cssText = 'font-size:8px;color:var(--text-muted);';
+      item.appendChild(btn);
+      item.appendChild(cap);
+      wrap.appendChild(item);
+    });
+  }
+
+  function renderBorderSuggest() {
+    const items = paletteSuggestions('border') || suggestColors(document.getElementById('colThBorder').value);
+    renderSuggestRow('thBorderSuggest', items, (hex) => {
+      document.getElementById('colThBorder').value = hex;
+      drawThumbnail();
+    });
+  }
+
+  function renderShadowSuggest() {
+    const items = paletteSuggestions('shadow') || suggestColors(document.getElementById('colThGrad').value);
+    renderSuggestRow('thGradSuggest', items, (hex) => {
+      document.getElementById('colThGrad').value = hex;
+      drawThumbnail();
+    });
+  }
+
+  function refreshAllSuggests() {
+    renderBorderSuggest();
+    renderShadowSuggest();
+    if (document.getElementById('thumbTextEditPanel')?.style.display === 'block') renderColorSuggest();
+  }
+
   function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>"']/g, (c) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -257,6 +381,16 @@
             <h2 style="margin:0;font-size:14px;color:var(--text);font-weight:800;letter-spacing:0.5px;">🖼️ THUMBNAIL STUDIO</h2>
           </div>
           <div style="flex:1;overflow-y:auto;padding:14px 16px;">
+
+            <!-- Quick start: load from video project -->
+            <div class="th-section" style="border:1px solid var(--jazz-gold);">
+              <label class="th-label">🎬 QUICK START — 프로젝트에서 불러오기</label>
+              <div style="display:flex;gap:6px;">
+                <select id="thProjectSelect" style="flex:1;"><option value="">— 최근 영상 프로젝트 선택 —</option></select>
+                <button id="btnThProjectReload" class="th-mini-btn" title="목록 새로고침">↻</button>
+              </div>
+              <div id="thProjectStatus" class="th-help">선택하면 템플릿 배경 + 제목이 자동 세팅됨</div>
+            </div>
 
             <!-- Background image upload -->
             <div class="th-section">
@@ -303,6 +437,7 @@
                   </div>
                 </div>
                 <div class="th-row" style="margin-top:6px;"><label>Shadow Color</label><input type="color" id="colThGrad" value="#000000"></div>
+                <div id="thGradSuggest" style="display:flex;gap:6px;margin-top:4px;"></div>
               </div>
             </div>
 
@@ -315,6 +450,7 @@
                 <option value="premium">Premium Side Label</option>
               </select>
               <div class="th-row"><label>Color</label><input type="color" id="colThBorder" value="#d4af37"></div>
+              <div id="thBorderSuggest" style="display:flex;gap:6px;margin:4px 0 2px;"></div>
               <div class="th-row"><label>Thickness / Size</label><span id="valThThick" class="th-val">20px</span></div>
               <input type="range" id="rngThThick" min="0" max="100" value="20">
               <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border);">
@@ -721,28 +857,12 @@
   }
 
   function renderColorSuggest() {
-    const wrap = document.getElementById('thColorSuggest');
-    if (!wrap) return;
-    wrap.innerHTML = '';
-    const base = document.getElementById('thEditColor').value;
-    suggestColors(base).forEach(({ label, hex }) => {
-      const item = document.createElement('div');
-      item.style.cssText = 'flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;';
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.title = `${label} ${hex} — 클릭하면 테두리색에 적용`;
-      btn.style.cssText = `width:100%;height:24px;border-radius:4px;border:1px solid var(--border);cursor:pointer;background:${hex};`;
-      btn.onclick = () => {
-        document.getElementById('thEditStrokeCol').value = hex;
-        const l = thumbState.extraTextLayers.find((x) => x.id === thumbState.selectedExtraId);
-        if (l) { l.strokeCol = hex; drawThumbnail(); }
-      };
-      const cap = document.createElement('div');
-      cap.textContent = label;
-      cap.style.cssText = 'font-size:8px;color:var(--text-muted);';
-      item.appendChild(btn);
-      item.appendChild(cap);
-      wrap.appendChild(item);
+    // 이미지 팔레트 우선, 없으면 텍스트 색 기준 색상환 fallback
+    const items = paletteSuggestions('text') || suggestColors(document.getElementById('thEditColor').value);
+    renderSuggestRow('thColorSuggest', items, (hex) => {
+      document.getElementById('thEditStrokeCol').value = hex;
+      const l = thumbState.extraTextLayers.find((x) => x.id === thumbState.selectedExtraId);
+      if (l) { l.strokeCol = hex; drawThumbnail(); }
     });
   }
 
@@ -872,11 +992,78 @@
     drawThumbnail();
   }
 
+  // ─── Quick start: 프로젝트에서 배경+제목 불러오기 ─────────────────
+  async function loadRecentProjects() {
+    const sel = document.getElementById('thProjectSelect');
+    const status = document.getElementById('thProjectStatus');
+    status.textContent = '프로젝트 목록 불러오는 중...';
+    try {
+      const r = await fetch('/api/videos/recent?limit=20');
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || 'API 오류');
+      thumbState.recentProjects = j.videos || [];
+      sel.innerHTML = '<option value="">— 최근 영상 프로젝트 선택 —</option>' +
+        thumbState.recentProjects.map((v, i) => {
+          const name = v.title || v.build_id || v.id;
+          const noBg = v.template?.background_image_url ? '' : ' (배경없음)';
+          return `<option value="${i}">${escapeHtml(name)}${noBg}</option>`;
+        }).join('');
+      status.textContent = `${thumbState.recentProjects.length}개 프로젝트 — 선택하면 배경+제목 자동 세팅`;
+    } catch (e) {
+      status.textContent = '목록 로드 실패: ' + e.message;
+    }
+  }
+
+  function applyProject(v) {
+    const status = document.getElementById('thProjectStatus');
+
+    // 1) 템플릿 배경 (서버가 signed URL 로 내려줌, canvas export 위해 crossOrigin 필수)
+    const bgUrl = v.template?.background_image_url;
+    if (bgUrl && /^https?:/.test(bgUrl)) {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => setBgImage(img, `${v.template.name || '템플릿 배경'} (${img.width}×${img.height})`);
+      img.onerror = () => { status.textContent = '⚠ 배경 이미지 로드 실패 (URL 만료 시 ↻ 새로고침)'; };
+      img.src = bgUrl;
+    } else {
+      status.textContent = '이 프로젝트에는 템플릿 배경이 없음 — 배경만 따로 업로드하면 됨';
+    }
+
+    // 2) 제목 텍스트 — 기존 레이어가 있으면 첫 레이어의 텍스트만 교체(스타일/위치 유지),
+    //    없으면 기본 스타일로 새 레이어 추가. "Untitled — ..." 자동 제목은 노이즈라 스킵.
+    const title = /^untitled/i.test(v.title || '') ? '' : (v.title || '');
+    if (title) {
+      if (thumbState.extraTextLayers.length > 0) {
+        const first = thumbState.extraTextLayers[0];
+        first.text = title;
+        if (first.id === thumbState.selectedExtraId) editCustomText(first.id);
+      } else {
+        thumbState.extraTextLayers.push({
+          id: Date.now() + Math.random(), text: title,
+          font: "'Playfair Display', serif", size: 110, color: '#ffffff',
+          alpha: 1.0, x: 0.5, y: 0.5, align: 'center',
+          bold: true, italic: false, underline: false, hollow: false,
+          spacing: 0, strokeW: 0, strokeCol: '#000000',
+          glow: 0, shadowX: 4, shadowY: 4,
+        });
+      }
+      renderCustomTextList();
+    }
+
+    // 3) 저장 파일명 자동 세팅
+    const safeName = (title || v.build_id || 'Thumbnail').replace(/[\\/:*?"<>|]/g, '').trim();
+    if (safeName) document.getElementById('txtThFilename').value = safeName;
+
+    drawThumbnail();
+  }
+
   // ─── Set background from an HTMLImageElement ─────────────────────
   function setBgImage(img, label) {
     thumbState.bgImage = img;
+    thumbState.bgPalette = extractPalette(img);
     document.getElementById('thBgFilename').textContent = label;
     document.getElementById('thBgUploadHint').textContent = `배경: ${label}`;
+    refreshAllSuggests();
     drawThumbnail();
   }
 
@@ -968,6 +1155,15 @@
     // Filter grid
     buildFilterGrid();
 
+    // Quick start: project loader
+    document.getElementById('thProjectSelect').addEventListener('change', (e) => {
+      const idx = parseInt(e.target.value, 10);
+      const v = thumbState.recentProjects[idx];
+      if (v) applyProject(v);
+    });
+    document.getElementById('btnThProjectReload').addEventListener('click', () => loadRecentProjects());
+    loadRecentProjects();
+
     // Background image input
     document.getElementById('thBgImageInput').addEventListener('change', (e) => {
       const file = e.target.files?.[0];
@@ -1001,6 +1197,8 @@
         if (id === 'rngThDim') document.getElementById('valThDim').textContent = e.target.value;
         if (id === 'rngThSat') document.getElementById('valThSat').textContent = e.target.value + '%';
         if (id === 'rngThThick') document.getElementById('valThThick').textContent = e.target.value + 'px';
+        if (id === 'colThBorder') renderBorderSuggest();
+        if (id === 'colThGrad') renderShadowSuggest();
         drawThumbnail();
       });
     });
@@ -1179,6 +1377,7 @@
     };
 
     // Initial draw
+    refreshAllSuggests();
     drawThumbnail();
     thumbState.initialized = true;
   }
