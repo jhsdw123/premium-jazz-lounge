@@ -113,7 +113,7 @@
     <a href="/">← 컨트롤 패널</a>
   </header>
   <div class="sub">
-    Demucs 가 보컬 의심으로 플래그한 곡 목록. <b>보컬 스템</b>(보컬만 분리된 소리)을 들어보고 판정 —
+    Demucs 가 보컬 의심으로 플래그한 곡 목록. 노란 <b>구간 버튼</b>을 누르면 원곡이 그 지점부터 바로 재생됨 —
     진짜 보컬이면 <span style="color:var(--neon)">🎤 보컬 있음</span>, 색소폰 숨소리 같은 오탐이면 <b>오탐</b>.
     판정 즉시 DB 에 라벨링되고 Pool 탭에 반영됨.
   </div>
@@ -201,9 +201,7 @@ function render() {
     const segs = (r.segments || []).map((s) =>
       `<span class="seg" data-id="${r.id}" data-start="${s.start}" title="이 지점부터 재생">${fmtT(s.start)}~${fmtT(s.end)}</span>`
     ).join('');
-    const player = r.has_audio
-      ? `<span class="plabel">보컬만:</span><audio controls preload="none" data-id="${r.id}" src="/api/vocal-check/audio/${r.id}"></audio>`
-      : (r.verdict === 'flagged' ? '<span class="plabel">보컬 mp3 없음 (구버전 스캔)</span>' : '');
+    const player = `<span class="plabel">원곡:</span><audio controls preload="none" data-id="${r.id}"></audio>`;
     const rowCls = r.label === 'vocal' ? 'row labeled-vocal' : r.label === 'clean' ? 'row labeled-clean' : 'row';
     return `
       <div class="${rowCls}" id="row-${r.id}">
@@ -217,8 +215,8 @@ function render() {
           ${segs ? `<div class="segs">${segs}</div>` : ''}
           <div class="meta">${r.verdict === 'flagged' ? `보컬 스템 피크 ${r.stem_max_db ?? '?'}dB · ` : ''}판정: ${r.verdict}${r.error ? ` · ⚠ ${esc(r.error)}` : ''}</div>
           <div class="players">
+            <button class="orig-btn" data-id="${r.id}">▶ 원곡 재생</button>
             ${player}
-            <button class="orig-btn" data-id="${r.id}">원곡 듣기</button>
           </div>
         </div>
         <div class="actions">
@@ -232,32 +230,31 @@ function render() {
   list.querySelectorAll('.actions button').forEach((btn) => {
     btn.addEventListener('click', () => label(parseInt(btn.dataset.id, 10), btn.dataset.vocal === 'true'));
   });
-  // 타임스탬프 chip → 보컬 스템 해당 지점 재생
+  // 타임스탬프 chip → 원곡을 해당 지점(1.5초 전부터)에서 바로 재생
   list.querySelectorAll('.seg').forEach((chip) => {
-    chip.addEventListener('click', () => {
+    chip.addEventListener('click', async () => {
       const audio = list.querySelector(`audio[data-id="${chip.dataset.id}"]`);
       if (!audio) return;
+      try {
+        await ensureOrigSrc(audio);
+      } catch (e) {
+        toast(`원곡 로드 실패: ${e.message}`, true);
+        return;
+      }
       pauseOthers(audio);
-      audio.currentTime = Math.max(0, parseFloat(chip.dataset.start) - 1);
-      audio.play();
+      const seek = () => { audio.currentTime = Math.max(0, parseFloat(chip.dataset.start) - 1.5); audio.play(); };
+      if (audio.readyState >= 1) seek();
+      else audio.addEventListener('loadedmetadata', seek, { once: true });
     });
   });
-  // 원곡 듣기 (R2 signed URL)
+  // ▶ 원곡 재생 (처음부터)
   list.querySelectorAll('.orig-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
+      const audio = list.querySelector(`audio[data-id="${btn.dataset.id}"]`);
+      if (!audio) return;
       btn.disabled = true;
       try {
-        const j = await (await fetch(`/api/tracks/${btn.dataset.id}/audio-url`)).json();
-        if (!j.ok) throw new Error(j.error);
-        let audio = btn._audio;
-        if (!audio) {
-          audio = document.createElement('audio');
-          audio.controls = true;
-          audio.style.height = '32px';
-          btn.parentElement.appendChild(audio);
-          btn._audio = audio;
-        }
-        audio.src = j.url;
+        await ensureOrigSrc(audio);
         pauseOthers(audio);
         audio.play();
       } catch (e) {
@@ -275,6 +272,15 @@ function render() {
 
 function pauseOthers(current) {
   document.querySelectorAll('audio').forEach((a) => { if (a !== current) a.pause(); });
+}
+
+// 원곡 signed URL 을 audio 엘리먼트에 1회만 로드 (행당 캐시)
+async function ensureOrigSrc(audio) {
+  if (audio.dataset.loaded) return;
+  const j = await (await fetch(`/api/tracks/${audio.dataset.id}/audio-url`)).json();
+  if (!j.ok) throw new Error(j.error || 'audio-url 실패');
+  audio.src = j.url;
+  audio.dataset.loaded = '1';
 }
 
 async function label(trackId, hasVocals) {
