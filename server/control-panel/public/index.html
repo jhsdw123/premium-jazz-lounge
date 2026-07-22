@@ -1940,7 +1940,7 @@
                 <line x1="0"    y1="720"  x2="1920" y2="720"  />
               </svg>
               <div id="studioVisibilityWarning" hidden style="position:absolute;top:0;left:0;right:0;background:#a01818;color:#fff;font-weight:bold;font-size:14px;text-align:center;padding:10px 14px;z-index:10;box-shadow:0 2px 8px rgba(0,0,0,0.6);line-height:1.4;">
-                🚨 녹화 탭이 백그라운드 — 즉시 이 탭으로 돌아오세요! (화면 정지 위험)
+                ⚠️ 녹화 창이 가려짐/백그라운드 — 렌더는 계속 진행됩니다 (rAF 폴백). 단, 탭 음소거는 금지! (소리 줄이려면 Windows 볼륨 믹서 사용)
               </div>
             </div>
           </div>
@@ -2024,6 +2024,8 @@
   <div id="toaster"></div>
 
   <!-- interact.js — 드래그/리사이즈 라이브러리. Template Editor 전용. -->
+  <!-- rAF shim: 창 가림/백그라운드에서 비주얼라이저 정지 방지 — 반드시 module 스크립트들보다 먼저 -->
+  <script src="raf-shim.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/interactjs@1.10.27/dist/interact.min.js"></script>
   <!-- mp4-muxer (WebCodecs → mp4) — Studio export 용 -->
   <script src="https://cdn.jsdelivr.net/npm/mp4-muxer@5.2.2/build/mp4-muxer.min.js"></script>

@@ -78,6 +78,10 @@ const studio = {
   wakeLock: null,            // navigator.wakeLock.request('screen') 결과 (녹화 중 화면 sleep 방지)
   visibilityListenerBound: false,
 
+  // 녹화 창 최상위 고정 (Windows 전용 — 서버가 Win32 SetWindowPos 로 처리)
+  _topmostHwnd: null,        // 고정된 창 핸들 (해제 시 필요)
+  _prevTitle: null,          // 녹화 전 document.title (마커 제거용)
+
   // Phase 4-D-6: File System Access 스트리밍 저장 (RAM 에 1.8GB blob 안 쌓음 → 비주얼라이저 다수도 안정)
   _saveHandle: null,         // 녹화 시작 시 showSaveFilePicker() 로 확보한 파일 핸들
   _writable: null,           // FileSystemWritableFileStream (녹화 내내 열려 있음)
@@ -835,6 +839,54 @@ function releaseWakeLock() {
   studio.wakeLock = null;
 }
 
+// ─── 녹화 창 최상위 고정 (Windows) ────────────────────────────────
+// 브라우저는 스스로 always-on-top 이 될 수 없음 → 탭 타이틀에 '[PJL-REC]' 마커를
+// 넣고 로컬 서버에 요청하면, 서버가 Win32 SetWindowPos(HWND_TOPMOST) 로 그 창을
+// OS 레벨 최상위로 고정. 다른 창을 아무리 띄워도 녹화 창이 가려지지 않음.
+// 실패해도 녹화는 정상 진행 (rAF shim 이 1차 방어선) — 경고 로그만 남김.
+async function pinRecordingWindow() {
+  studio._prevTitle = document.title;
+  document.title = `[PJL-REC] ${document.title}`;
+  // OS 창 타이틀에 반영될 시간 확보 후 서버가 타이틀로 창을 찾음.
+  await new Promise((r) => setTimeout(r, 300));
+  try {
+    const r = await fetch('/api/window/topmost', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enable: true }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (r.ok && j.ok && j.hwnd) {
+      studio._topmostHwnd = j.hwnd;
+      console.log(`[REC] 📌 녹화 창 최상위 고정 (hwnd=${j.hwnd})`);
+    } else {
+      console.warn('[REC] 창 최상위 고정 실패 (녹화는 계속):', j.error || `HTTP ${r.status}`);
+    }
+  } catch (e) {
+    console.warn('[REC] 창 최상위 고정 실패 (녹화는 계속):', e?.message || e);
+  }
+}
+
+async function unpinRecordingWindow() {
+  if (studio._prevTitle != null) {
+    document.title = studio._prevTitle;
+    studio._prevTitle = null;
+  }
+  const hwnd = studio._topmostHwnd;
+  studio._topmostHwnd = null;
+  if (!hwnd) return;
+  try {
+    await fetch('/api/window/topmost', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enable: false, hwnd }),
+    });
+    console.log('[REC] 📌 창 최상위 고정 해제');
+  } catch (e) {
+    console.warn('[REC] 창 최상위 해제 실패:', e?.message || e);
+  }
+}
+
 function showVisibilityWarning() {
   const el = $('#studioVisibilityWarning');
   if (el) el.hidden = false;
@@ -850,7 +902,7 @@ function bindVisibilityWatcher() {
   document.addEventListener('visibilitychange', async () => {
     if (!studio.recording) return;
     if (document.hidden) {
-      console.warn('[REC] ⚠️ 녹화 탭 백그라운드 진입 — 화면 정지/throttle 위험!');
+      console.warn('[REC] ⚠️ 녹화 탭 백그라운드/가려짐 — rAF shim 폴백으로 계속 진행 (탭 음소거만 금지)');
       showVisibilityWarning();
     } else {
       console.log('[REC] 녹화 탭 활성화 복귀');
@@ -1097,6 +1149,8 @@ async function startRecording() {
 
   // Phase 4-D-4 fix v2: WakeLock 으로 화면 sleep 방지 + 현재 visibility 즉시 점검.
   await acquireWakeLock();
+  // 녹화 창을 OS 최상위로 고정 — 듀얼모니터에서 다른 창이 덮어도 안 가려짐.
+  await pinRecordingWindow();
   if (document.hidden) showVisibilityWarning();
 
   const cv = $('#studioCanvas');
@@ -1448,6 +1502,7 @@ async function finishRecording() {
     studio._saveHandle = null;
     studio._finishing = false;
     releaseWakeLock();
+    unpinRecordingWindow(); // fire-and-forget — 실패해도 저장엔 영향 없음
     hideVisibilityWarning();
     $('#studioRecordBtn').hidden = false;
     $('#studioStopRecBtn').hidden = true;

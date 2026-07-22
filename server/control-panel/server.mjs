@@ -30,6 +30,7 @@ import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { google } from 'googleapis';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -3655,6 +3656,102 @@ app.delete('/api/thumbnail/presets/:name', (req, res) => {
     if (!fs.existsSync(file)) return res.status(404).json({ ok: false, error: '프리셋 없음' });
     fs.unlinkSync(file);
     res.json({ ok: true, name });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── 녹화 창 최상위 고정 (Windows 전용) ─────────────────────────────────
+// 브라우저 페이지는 스스로 always-on-top 이 될 수 없어서, 로컬 서버가 Win32
+// SetWindowPos(HWND_TOPMOST) 를 대신 호출한다. studio.js 가 녹화 시작 시 탭
+// 타이틀에 '[PJL-REC]' 마커를 넣고 이 API 를 부르면, 그 타이틀을 포함한 창을
+// EnumWindows 로 찾아 최상위 고정. 해제는 { enable:false, hwnd } (녹화 끝나고
+// 타이틀이 원복된 뒤에도 핸들로 정확히 해제 가능).
+const REC_TITLE_MARKER = '[PJL-REC]';
+
+const TOPMOST_PS_TYPE = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class PjlTopmost {
+  public delegate bool EnumProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr lParam);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+  public static IntPtr Found = IntPtr.Zero;
+  public static string Marker = "";
+  public static bool Walk(IntPtr h, IntPtr l) {
+    if (!IsWindowVisible(h)) return true;
+    StringBuilder sb = new StringBuilder(512);
+    GetWindowText(h, sb, 512);
+    if (sb.ToString().IndexOf(Marker, StringComparison.Ordinal) >= 0) { Found = h; return false; }
+    return true;
+  }
+  public static long Find(string marker) {
+    Marker = marker; Found = IntPtr.Zero;
+    EnumWindows(Walk, IntPtr.Zero);
+    return Found.ToInt64();
+  }
+  public static bool Pin(long h, bool on) {
+    // SWP_NOSIZE | SWP_NOMOVE | SWP_NOACTIVATE — 위치/크기/포커스 안 건드리고 z-order 만.
+    return SetWindowPos(new IntPtr(h), new IntPtr(on ? -1 : -2), 0, 0, 0, 0, (uint)(0x0001 | 0x0002 | 0x0010));
+  }
+}
+'@
+`;
+
+function runPowerShell(script) {
+  return new Promise((resolveP, rejectP) => {
+    // -EncodedCommand (UTF-16LE base64) — 따옴표/개행 이스케이프 문제 원천 차단.
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    execFile(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+      { timeout: 15000, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) return rejectP(new Error((stderr || err.message || '').trim()));
+        resolveP((stdout || '').trim());
+      }
+    );
+  });
+}
+
+app.post('/api/window/topmost', async (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(501).json({ ok: false, error: '창 최상위 고정은 Windows 에서만 지원' });
+  }
+  const enable = !!req.body?.enable;
+  try {
+    if (enable) {
+      const out = await runPowerShell(
+        `${TOPMOST_PS_TYPE}\n` +
+        `$h = [PjlTopmost]::Find('${REC_TITLE_MARKER}')\n` +
+        `if ($h -eq 0) { Write-Output 'NOTFOUND'; exit 0 }\n` +
+        `[PjlTopmost]::Pin($h, $true) | Out-Null\n` +
+        `Write-Output $h`
+      );
+      if (!out || out.includes('NOTFOUND')) {
+        return res.status(404).json({ ok: false, error: `'${REC_TITLE_MARKER}' 타이틀 창을 찾지 못함` });
+      }
+      const hwnd = parseInt(out.split(/\s+/).pop(), 10);
+      if (!Number.isSafeInteger(hwnd) || hwnd <= 0) {
+        return res.status(500).json({ ok: false, error: `창 핸들 파싱 실패: ${out}` });
+      }
+      console.log(`[topmost] 📌 녹화 창 고정 hwnd=${hwnd}`);
+      return res.json({ ok: true, hwnd });
+    }
+    // 해제
+    const hwnd = Number(req.body?.hwnd);
+    if (!Number.isSafeInteger(hwnd) || hwnd <= 0) {
+      return res.status(400).json({ ok: false, error: '해제에는 hwnd 가 필요' });
+    }
+    await runPowerShell(
+      `${TOPMOST_PS_TYPE}\n[PjlTopmost]::Pin(${hwnd}, $false) | Out-Null\nWrite-Output OK`
+    );
+    console.log(`[topmost] 📌 고정 해제 hwnd=${hwnd}`);
+    return res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
