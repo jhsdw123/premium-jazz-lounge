@@ -341,6 +341,14 @@
     .vocal-icon { color: var(--jazz-gold); margin-left: 6px; font-size: 11px; opacity: 0.8; }
     .no-title { color: var(--text-muted); font-style: italic; }
 
+    /* 보컬 포함 곡 (has_vocals=true) — 제목 형광연두 하이라이트 */
+    .vocal-title {
+      background: #adff2f; color: #000;
+      padding: 0 5px; border-radius: 3px;
+      box-shadow: 0 0 8px rgba(173, 255, 47, 0.35);
+    }
+    .vocal-title .no-title { color: #333; }
+
     /* Instrument chips */
     .instrument-chips {
       margin-top: 4px;
@@ -1496,6 +1504,7 @@
     <button class="tab" data-tab="studio">🎬 Studio</button>
     <button class="tab" data-tab="thumbnail">🖼️ Thumbnail</button>
     <button class="tab" data-tab="uploader">Uploader</button>
+    <a class="tab tab-link" href="/vocal-review.html" style="text-decoration:none; margin-left:auto; align-self:center;">🎤 보컬 리뷰</a>
   </nav>
 
   <main>

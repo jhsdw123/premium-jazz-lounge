@@ -9,6 +9,7 @@ __pycache__/
 *$py.class
 venv/
 .venv/
+.venv-demucs/
 *.egg-info/
 
 # Environment
@@ -36,6 +37,8 @@ data/tracks/
 data/output/
 data/temp/
 data/cache/
+data/thumbnail-presets/
+data/vocal-check/
 
 # 3D intro assets (대용량 — git 부적합, 로컬/USB 로만 관리)
 intro_3d_assets/

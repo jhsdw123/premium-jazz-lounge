@@ -975,6 +975,107 @@ app.get('/api/tracks/:id/audio-url', async (req, res) => {
   }
 });
 
+// ─── Vocal Check: tools/check-vocals.mjs 결과 리뷰 + 수동 라벨링 ──────────
+//   스캐너(별도 프로세스)가 results.json 을 소유하므로 서버는 그 파일을 읽기만 하고,
+//   사람 판정은 labels.json 에 따로 기록 (동시 쓰기 충돌 방지).
+const VOCAL_CHECK_DIR = resolve(__dirname, '../../data/vocal-check');
+const VOCAL_RESULTS_FILE = path.join(VOCAL_CHECK_DIR, 'results.json');
+const VOCAL_LABELS_FILE = path.join(VOCAL_CHECK_DIR, 'labels.json');
+const VOCAL_FLAGGED_DIR = path.join(VOCAL_CHECK_DIR, 'flagged');
+
+async function readJsonSafe(file, fallback = {}) {
+  try {
+    return JSON.parse(await fs.promises.readFile(file, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+//   GET /api/vocal-check/results — 스캔 진행률 + 곡별 판정/타임스탬프/라벨 상태
+app.get('/api/vocal-check/results', async (_req, res) => {
+  try {
+    const [results, labels] = await Promise.all([
+      readJsonSafe(VOCAL_RESULTS_FILE),
+      readJsonSafe(VOCAL_LABELS_FILE),
+    ]);
+    const ids = Object.keys(results).map(Number).filter(Number.isFinite);
+
+    const { count: totalActive } = await supabase
+      .from('pjl_tracks')
+      .select('id', { count: 'exact', head: true })
+      .eq('is_active', true);
+
+    const trackMap = {};
+    if (ids.length) {
+      const { data, error } = await supabase
+        .from('pjl_tracks')
+        .select('id, original_filename, has_vocals, is_active, title:pjl_titles(title_en)')
+        .in('id', ids);
+      if (error) throw error;
+      for (const t of data || []) trackMap[t.id] = t;
+    }
+
+    const rows = ids.map((id) => {
+      const r = results[id];
+      const t = trackMap[id];
+      return {
+        id,
+        verdict: r.verdict,
+        segments: r.segments || [],
+        stem_max_db: r.stem_max_db ?? null,
+        checked_at: r.checked_at || null,
+        error: r.error || null,
+        filename: t?.original_filename || r.filename || null,
+        title_en: t?.title?.title_en || null,
+        has_vocals: t?.has_vocals ?? null,
+        is_active: t?.is_active ?? null,
+        label: labels[id]?.label || null,
+        has_audio: fs.existsSync(path.join(VOCAL_FLAGGED_DIR, `${id}_vocals.mp3`)),
+      };
+    });
+
+    res.json({ ok: true, totalActive: totalActive ?? null, scanned: rows.length, rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+//   GET /api/vocal-check/audio/:id — 분리된 보컬 스템 mp3 (flagged 곡만 존재)
+app.get('/api/vocal-check/audio/:id', (req, res) => {
+  const id = parseIntOrNull(req.params.id);
+  if (!id) return res.status(400).json({ ok: false, error: 'invalid id' });
+  const f = path.join(VOCAL_FLAGGED_DIR, `${id}_vocals.mp3`);
+  if (!fs.existsSync(f)) return res.status(404).json({ ok: false, error: '보컬 스템 mp3 없음' });
+  res.sendFile(f);
+});
+
+//   POST /api/vocal-check/label — 사람 판정 확정.
+//   body: { trackId, hasVocals }  → pjl_tracks.has_vocals 반영 + labels.json 기록
+app.post('/api/vocal-check/label', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.body?.trackId);
+    const hasVocals = req.body?.hasVocals;
+    if (!id || typeof hasVocals !== 'boolean') {
+      return res.status(400).json({ ok: false, error: 'trackId(number), hasVocals(boolean) 필요' });
+    }
+
+    const { error } = await supabase
+      .from('pjl_tracks')
+      .update({ has_vocals: hasVocals, updated_at: new Date().toISOString() })
+      .eq('id', id);
+    if (error) throw error;
+
+    const labels = await readJsonSafe(VOCAL_LABELS_FILE);
+    labels[id] = { label: hasVocals ? 'vocal' : 'clean', labeled_at: new Date().toISOString() };
+    await fs.promises.mkdir(VOCAL_CHECK_DIR, { recursive: true });
+    await fs.promises.writeFile(VOCAL_LABELS_FILE, JSON.stringify(labels, null, 2));
+
+    res.json({ ok: true, trackId: id, hasVocals });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── Tracks: extract-instruments (Phase 3-C-2-C) ──────────────────────────
 //   POST /api/tracks/extract-instruments
 //   body: { ids?: number[], overwrite?: boolean }

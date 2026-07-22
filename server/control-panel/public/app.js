@@ -191,6 +191,7 @@ function switchTab(tab) {
 }
 window.switchTab = switchTab;
 $$('.tab').forEach((btn) => {
+  if (!btn.dataset.tab) return;  // .tab-link (vocal-review 등 외부 링크) 제외
   btn.addEventListener('click', () => switchTab(btn.dataset.tab));
 });
 
@@ -541,9 +542,13 @@ function renderTracks() {
     tr.dataset.trackId = String(t.id);
     if (state.selected.has(t.id)) tr.classList.add('selected');
 
-    const titleHtml = t.title?.title_en
+    const titleCore = t.title?.title_en
       ? escapeHtml(t.title.title_en)
       : '<span class="no-title">(no title)</span>';
+    // 보컬 포함 곡은 제목을 형광연두로 하이라이트 — 큐레이션 때 즉시 식별
+    const titleHtml = t.has_vocals
+      ? `<span class="vocal-title" title="보컬 포함 곡">${titleCore}</span>`
+      : titleCore;
     const prefixBadge = t.prefix_order ? `<span class="prefix-badge">${t.prefix_order}</span>` : '';
     const vocalIcon = t.has_vocals ? '<span class="vocal-icon" title="보컬 포함">🎤</span>' : '';
 

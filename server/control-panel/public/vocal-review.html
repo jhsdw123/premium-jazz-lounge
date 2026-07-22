@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>🎤 보컬 검출 리뷰 — Premium Jazz Lounge</title>
+<style>
+  :root {
+    --bg: #121212;
+    --bg-card: #1c1c1e;
+    --bg-hover: #26262a;
+    --border: #2e2e33;
+    --jazz-gold: #d4af37;
+    --jazz-gold-dim: #8a7223;
+    --text: #e8e6e3;
+    --text-muted: #8b8b90;
+    --neon: #adff2f;
+    --red: #e05252;
+    --green: #58c470;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Segoe UI', 'Malgun Gothic', system-ui, sans-serif;
+    padding: 24px; max-width: 1100px; margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; flex-wrap: wrap; }
+  h1 { font-size: 22px; color: var(--jazz-gold); }
+  header a { color: var(--text-muted); font-size: 13px; text-decoration: none; }
+  header a:hover { color: var(--jazz-gold); }
+  .sub { color: var(--text-muted); font-size: 13px; margin-bottom: 18px; }
+
+  .stats { display: flex; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  .stat {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 18px; min-width: 110px;
+  }
+  .stat label { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+  .stat .v { font-size: 20px; font-weight: 700; }
+  .stat .v.gold { color: var(--jazz-gold); }
+  .stat .v.neon { color: var(--neon); }
+  .stat .v.red { color: var(--red); }
+
+  .toolbar { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+  .toolbar button {
+    background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer;
+  }
+  .toolbar button:hover { background: var(--bg-hover); }
+  .toolbar button.active { border-color: var(--jazz-gold); color: var(--jazz-gold); }
+  .toolbar .spacer { flex: 1; }
+  .autorefresh { font-size: 12px; color: var(--text-muted); }
+
+  .row {
+    background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 10px;
+    display: grid; grid-template-columns: 1fr auto; gap: 10px 16px; align-items: center;
+  }
+  .row.labeled-vocal { border-left: 4px solid var(--neon); }
+  .row.labeled-clean { border-left: 4px solid var(--text-muted); opacity: 0.75; }
+  .row .head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .row .tid { color: var(--text-muted); font-size: 12px; }
+  .row .title { font-size: 15px; font-weight: 600; }
+  .row .title.vocal-confirmed { background: var(--neon); color: #000; padding: 0 6px; border-radius: 4px; }
+  .row .fname { color: var(--text-muted); font-size: 12px; }
+  .badge {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 700;
+  }
+  .badge.vocal { background: var(--neon); color: #000; }
+  .badge.clean { background: #3a3a40; color: var(--text-muted); }
+  .badge.pending { background: var(--jazz-gold-dim); color: #000; }
+  .segs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .seg {
+    background: #2a2a10; border: 1px solid var(--jazz-gold-dim); color: var(--jazz-gold);
+    font-size: 12px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+  }
+  .seg:hover { background: var(--jazz-gold-dim); color: #000; }
+  .meta { color: var(--text-muted); font-size: 11px; margin-top: 4px; }
+  .players { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+  .players audio { height: 32px; max-width: 340px; }
+  .players .plabel { font-size: 11px; color: var(--text-muted); }
+  .orig-btn {
+    background: none; border: 1px solid var(--border); color: var(--text-muted);
+    border-radius: 6px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  .orig-btn:hover { color: var(--jazz-gold); border-color: var(--jazz-gold); }
+
+  .actions { display: flex; flex-direction: column; gap: 8px; min-width: 170px; }
+  .actions button {
+    border: none; border-radius: 8px; padding: 10px 14px; font-size: 13px;
+    font-weight: 700; cursor: pointer;
+  }
+  .btn-vocal { background: var(--neon); color: #000; }
+  .btn-vocal:hover { filter: brightness(1.1); }
+  .btn-clean { background: #3a3a40; color: var(--text); }
+  .btn-clean:hover { background: #4a4a52; }
+  .actions button:disabled { opacity: 0.4; cursor: default; }
+
+  .empty { color: var(--text-muted); text-align: center; padding: 60px 0; font-size: 14px; }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--bg-card); border: 1px solid var(--jazz-gold); color: var(--text);
+    padding: 10px 20px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .3s;
+    pointer-events: none; z-index: 99;
+  }
+  .toast.show { opacity: 1; }
+  .toast.err { border-color: var(--red); }
+</style>
+</head>
+<body>
+  <header>
+    <h1>🎤 보컬 검출 리뷰</h1>
+    <a href="/">← 컨트롤 패널</a>
+  </header>
+  <div class="sub">
+    Demucs 가 보컬 의심으로 플래그한 곡 목록. <b>보컬 스템</b>(보컬만 분리된 소리)을 들어보고 판정 —
+    진짜 보컬이면 <span style="color:var(--neon)">🎤 보컬 있음</span>, 색소폰 숨소리 같은 오탐이면 <b>오탐</b>.
+    판정 즉시 DB 에 라벨링되고 Pool 탭에 반영됨.
+  </div>
+
+  <div class="stats">
+    <div class="stat"><label>스캔 진행</label><div class="v gold" id="st-progress">—</div></div>
+    <div class="stat"><label>Flagged</label><div class="v neon" id="st-flagged">—</div></div>
+    <div class="stat"><label>미분류</label><div class="v red" id="st-pending">—</div></div>
+    <div class="stat"><label>분류 완료</label><div class="v" id="st-labeled">—</div></div>
+  </div>
+
+  <div class="toolbar">
+    <button data-filter="pending" class="active">미분류만</button>
+    <button data-filter="flagged">flagged 전체</button>
+    <button data-filter="all">clean 포함 전체</button>
+    <span class="spacer"></span>
+    <span class="autorefresh"><label><input type="checkbox" id="autoRefresh" checked /> 45초마다 자동 새로고침</label></span>
+    <button id="refreshBtn">↻ 새로고침</button>
+  </div>
+
+  <div id="list"></div>
+  <div class="toast" id="toast"></div>
+
+<script>
+let rows = [];
+let filter = 'pending';
+let totalActive = null;
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtT = (sec) => `${Math.floor(sec/60)}:${String(Math.floor(sec%60)).padStart(2,'0')}`;
+
+function toast(msg, isErr = false) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.toggle('err', isErr);
+  el.classList.add('show');
+  clearTimeout(el._t);
+  el._t = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+async function load() {
+  const res = await fetch('/api/vocal-check/results');
+  const j = await res.json();
+  if (!j.ok) { toast(`로드 실패: ${j.error}`, true); return; }
+  rows = j.rows;
+  totalActive = j.totalActive;
+  render();
+}
+
+function render() {
+  const flagged = rows.filter((r) => r.verdict === 'flagged');
+  const pending = flagged.filter((r) => !r.label);
+  $('#st-progress').textContent = totalActive != null ? `${rows.length} / ${totalActive}` : String(rows.length);
+  $('#st-flagged').textContent = String(flagged.length);
+  $('#st-pending').textContent = String(pending.length);
+  $('#st-labeled').textContent = String(flagged.length - pending.length);
+
+  let view;
+  if (filter === 'pending') view = pending;
+  else if (filter === 'flagged') view = flagged;
+  else view = rows;
+
+  // 보컬 스템 피크가 큰(=진짜 보컬일 확률 높은) 순으로 정렬. clean 은 뒤로.
+  view = [...view].sort((a, b) => {
+    if ((a.verdict === 'flagged') !== (b.verdict === 'flagged')) return a.verdict === 'flagged' ? -1 : 1;
+    return (b.stem_max_db ?? -99) - (a.stem_max_db ?? -99);
+  });
+
+  const list = $('#list');
+  if (!view.length) {
+    list.innerHTML = `<div class="empty">${
+      filter === 'pending'
+        ? (flagged.length ? '🎉 미분류 곡 없음 — 전부 판정 완료!' : '아직 플래그된 곡이 없음. 스캔 진행 중이면 잠시 후 새로고침.')
+        : '표시할 곡이 없음.'
+    }</div>`;
+    return;
+  }
+
+  list.innerHTML = view.map((r) => {
+    const labelBadge = r.label === 'vocal' ? '<span class="badge vocal">🎤 보컬 확정</span>'
+      : r.label === 'clean' ? '<span class="badge clean">오탐 확정</span>'
+      : (r.verdict === 'flagged' ? '<span class="badge pending">판정 대기</span>' : '');
+    const titleCls = r.label === 'vocal' ? 'title vocal-confirmed' : 'title';
+    const segs = (r.segments || []).map((s) =>
+      `<span class="seg" data-id="${r.id}" data-start="${s.start}" title="이 지점부터 재생">${fmtT(s.start)}~${fmtT(s.end)}</span>`
+    ).join('');
+    const player = r.has_audio
+      ? `<span class="plabel">보컬만:</span><audio controls preload="none" data-id="${r.id}" src="/api/vocal-check/audio/${r.id}"></audio>`
+      : (r.verdict === 'flagged' ? '<span class="plabel">보컬 mp3 없음 (구버전 스캔)</span>' : '');
+    const rowCls = r.label === 'vocal' ? 'row labeled-vocal' : r.label === 'clean' ? 'row labeled-clean' : 'row';
+    return `
+      <div class="${rowCls}" id="row-${r.id}">
+        <div>
+          <div class="head">
+            <span class="tid">#${r.id}</span>
+            <span class="${titleCls}">${esc(r.title_en || '(제목 없음)')}</span>
+            <span class="fname">${esc(r.filename || '')}</span>
+            ${labelBadge}
+          </div>
+          ${segs ? `<div class="segs">${segs}</div>` : ''}
+          <div class="meta">${r.verdict === 'flagged' ? `보컬 스템 피크 ${r.stem_max_db ?? '?'}dB · ` : ''}판정: ${r.verdict}${r.error ? ` · ⚠ ${esc(r.error)}` : ''}</div>
+          <div class="players">
+            ${player}
+            <button class="orig-btn" data-id="${r.id}">원곡 듣기</button>
+          </div>
+        </div>
+        <div class="actions">
+          <button class="btn-vocal" data-id="${r.id}" data-vocal="true">🎤 보컬 있음</button>
+          <button class="btn-clean" data-id="${r.id}" data-vocal="false">오탐 — 보컬 없음</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  // 판정 버튼
+  list.querySelectorAll('.actions button').forEach((btn) => {
+    btn.addEventListener('click', () => label(parseInt(btn.dataset.id, 10), btn.dataset.vocal === 'true'));
+  });
+  // 타임스탬프 chip → 보컬 스템 해당 지점 재생
+  list.querySelectorAll('.seg').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const audio = list.querySelector(`audio[data-id="${chip.dataset.id}"]`);
+      if (!audio) return;
+      pauseOthers(audio);
+      audio.currentTime = Math.max(0, parseFloat(chip.dataset.start) - 1);
+      audio.play();
+    });
+  });
+  // 원곡 듣기 (R2 signed URL)
+  list.querySelectorAll('.orig-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      try {
+        const j = await (await fetch(`/api/tracks/${btn.dataset.id}/audio-url`)).json();
+        if (!j.ok) throw new Error(j.error);
+        let audio = btn._audio;
+        if (!audio) {
+          audio = document.createElement('audio');
+          audio.controls = true;
+          audio.style.height = '32px';
+          btn.parentElement.appendChild(audio);
+          btn._audio = audio;
+        }
+        audio.src = j.url;
+        pauseOthers(audio);
+        audio.play();
+      } catch (e) {
+        toast(`원곡 로드 실패: ${e.message}`, true);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
+  // 한 번에 하나만 재생
+  list.querySelectorAll('audio').forEach((a) => {
+    a.addEventListener('play', () => pauseOthers(a));
+  });
+}
+
+function pauseOthers(current) {
+  document.querySelectorAll('audio').forEach((a) => { if (a !== current) a.pause(); });
+}
+
+async function label(trackId, hasVocals) {
+  try {
+    const res = await fetch('/api/vocal-check/label', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trackId, hasVocals }),
+    });
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.error);
+    const r = rows.find((x) => x.id === trackId);
+    if (r) { r.label = hasVocals ? 'vocal' : 'clean'; r.has_vocals = hasVocals; }
+    toast(hasVocals ? `#${trackId} → 🎤 보컬 있음으로 라벨링` : `#${trackId} → 오탐 처리 (보컬 없음)`);
+    render();
+  } catch (e) {
+    toast(`라벨링 실패: ${e.message}`, true);
+  }
+}
+
+document.querySelectorAll('.toolbar [data-filter]').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    filter = btn.dataset.filter;
+    document.querySelectorAll('.toolbar [data-filter]').forEach((b) => b.classList.toggle('active', b === btn));
+    render();
+  });
+});
+$('#refreshBtn').addEventListener('click', load);
+
+// 자동 새로고침 — 오디오 재생 중이면 스킵 (재생 끊김 방지)
+setInterval(() => {
+  if (!$('#autoRefresh').checked) return;
+  const playing = [...document.querySelectorAll('audio')].some((a) => !a.paused && !a.ended);
+  if (!playing) load();
+}, 45000);
+
+load();
+</script>
+</body>
+</html>
