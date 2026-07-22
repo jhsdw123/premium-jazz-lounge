@@ -520,7 +520,15 @@
 
             <!-- Preset -->
             <div class="th-section" style="border:1px solid var(--jazz-gold);">
-              <label class="th-label" style="color:var(--jazz-gold);">💾 PRESET</label>
+              <label class="th-label" style="color:var(--jazz-gold);">💾 STYLE PRESET</label>
+              <div style="display:flex;gap:6px;margin-bottom:6px;">
+                <select id="thPresetSlotSelect" style="flex:1;"><option value="">— 저장된 스타일 선택 —</option></select>
+                <button id="btnThPresetSlotDel" class="th-mini-btn" title="선택한 스타일 삭제" style="color:#f66;">🗑</button>
+              </div>
+              <div style="display:flex;gap:6px;margin-bottom:10px;">
+                <input type="text" id="thPresetSlotName" placeholder="스타일 이름 (예: 골드 클래식)" style="flex:1;">
+                <button id="btnThPresetSlotSave" class="th-mini-btn" style="color:var(--jazz-gold);border-color:var(--jazz-gold);">저장</button>
+              </div>
               <div style="display:flex;gap:6px;">
                 <button id="btnThPresetExport" class="th-mini-btn" style="flex:1;color:var(--jazz-gold);border-color:var(--jazz-gold);">EXPORT JSON</button>
                 <button id="btnThPresetImport" class="th-mini-btn" style="flex:1;color:#ffaa00;border-color:#ffaa00;">IMPORT JSON</button>
@@ -1121,6 +1129,74 @@
     drawThumbnail();
   }
 
+  // ─── Style preset slots (서버 저장, data/thumbnail-presets/) ──────
+  function presetStatus(msg) {
+    const status = document.getElementById('thPresetStatus');
+    status.textContent = msg;
+    setTimeout(() => { if (status.textContent === msg) status.textContent = ''; }, 3000);
+  }
+
+  async function loadPresetSlots(selectName) {
+    const sel = document.getElementById('thPresetSlotSelect');
+    try {
+      const r = await fetch('/api/thumbnail/presets');
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || 'API 오류');
+      sel.innerHTML = '<option value="">— 저장된 스타일 선택 —</option>' +
+        (j.presets || []).map((p) => `<option value="${escapeHtml(p.name)}">${escapeHtml(p.name)}</option>`).join('');
+      if (selectName) sel.value = selectName;
+    } catch (e) {
+      presetStatus('스타일 목록 로드 실패: ' + e.message);
+    }
+  }
+
+  async function applyPresetSlot(name) {
+    try {
+      const r = await fetch(`/api/thumbnail/presets/${encodeURIComponent(name)}`);
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || 'API 오류');
+      applyPresetData(j.data);
+      document.getElementById('thPresetSlotName').value = name;
+      presetStatus(`스타일 적용: ${name}`);
+    } catch (e) {
+      presetStatus('스타일 적용 실패: ' + e.message);
+    }
+  }
+
+  async function savePresetSlot() {
+    const name = document.getElementById('thPresetSlotName').value.trim()
+      || document.getElementById('thPresetSlotSelect').value;
+    if (!name) { presetStatus('스타일 이름을 입력해줘'); return; }
+    try {
+      const r = await fetch('/api/thumbnail/presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, data: collectPresetData() }),
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || 'API 오류');
+      await loadPresetSlots(j.name);
+      presetStatus(`스타일 저장: ${j.name}`);
+    } catch (e) {
+      presetStatus('스타일 저장 실패: ' + e.message);
+    }
+  }
+
+  async function deletePresetSlot() {
+    const name = document.getElementById('thPresetSlotSelect').value;
+    if (!name) { presetStatus('삭제할 스타일을 먼저 선택해줘'); return; }
+    if (!confirm(`스타일 "${name}" 을 삭제할까?`)) return;
+    try {
+      const r = await fetch(`/api/thumbnail/presets/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || 'API 오류');
+      await loadPresetSlots();
+      presetStatus(`삭제됨: ${name}`);
+    } catch (e) {
+      presetStatus('삭제 실패: ' + e.message);
+    }
+  }
+
   // ─── Set background from an HTMLImageElement ─────────────────────
   function setBgImage(img, label) {
     thumbState.bgImage = img;
@@ -1349,6 +1425,14 @@
       renderCustomTextList();
       drawThumbnail();
     };
+
+    // Style preset slots
+    document.getElementById('thPresetSlotSelect').addEventListener('change', (e) => {
+      if (e.target.value) applyPresetSlot(e.target.value);
+    });
+    document.getElementById('btnThPresetSlotSave').onclick = () => savePresetSlot();
+    document.getElementById('btnThPresetSlotDel').onclick = () => deletePresetSlot();
+    loadPresetSlots();
 
     // Preset
     document.getElementById('btnThPresetExport').onclick = () => {

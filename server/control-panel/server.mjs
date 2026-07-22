@@ -3595,6 +3595,71 @@ app.post('/api/uploader/restore', async (req, res) => {
   }
 });
 
+// ─── Thumbnail Studio 프리셋 슬롯 (서버 디스크 저장) ─────────────────────
+//   data/thumbnail-presets/{name}.json 에 저장. DB 마이그레이션 없이 이름 붙인
+//   스타일 슬롯을 제공 — 브라우저/localStorage 와 무관하게 유지된다.
+const THUMB_PRESET_DIR = resolve(__dirname, '../../data/thumbnail-presets');
+
+function safePresetName(name) {
+  const s = String(name || '').trim().replace(/[\\/:*?"<>|]/g, '').slice(0, 60);
+  return s || null;
+}
+
+app.get('/api/thumbnail/presets', (_req, res) => {
+  try {
+    if (!fs.existsSync(THUMB_PRESET_DIR)) return res.json({ ok: true, presets: [] });
+    const presets = fs.readdirSync(THUMB_PRESET_DIR)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => {
+        const st = fs.statSync(path.join(THUMB_PRESET_DIR, f));
+        return { name: f.replace(/\.json$/, ''), updated_at: st.mtime.toISOString() };
+      })
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    res.json({ ok: true, presets });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/thumbnail/presets/:name', (req, res) => {
+  try {
+    const name = safePresetName(req.params.name);
+    if (!name) return res.status(400).json({ ok: false, error: '잘못된 프리셋 이름' });
+    const file = path.join(THUMB_PRESET_DIR, `${name}.json`);
+    if (!fs.existsSync(file)) return res.status(404).json({ ok: false, error: '프리셋 없음' });
+    res.json({ ok: true, name, data: JSON.parse(fs.readFileSync(file, 'utf-8')) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/thumbnail/presets', (req, res) => {
+  try {
+    const name = safePresetName(req.body?.name);
+    const data = req.body?.data;
+    if (!name) return res.status(400).json({ ok: false, error: '프리셋 이름이 필요합니다' });
+    if (!data || typeof data !== 'object') return res.status(400).json({ ok: false, error: '프리셋 data 가 필요합니다' });
+    fs.mkdirSync(THUMB_PRESET_DIR, { recursive: true });
+    fs.writeFileSync(path.join(THUMB_PRESET_DIR, `${name}.json`), JSON.stringify(data, null, 2), 'utf-8');
+    res.json({ ok: true, name });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.delete('/api/thumbnail/presets/:name', (req, res) => {
+  try {
+    const name = safePresetName(req.params.name);
+    if (!name) return res.status(400).json({ ok: false, error: '잘못된 프리셋 이름' });
+    const file = path.join(THUMB_PRESET_DIR, `${name}.json`);
+    if (!fs.existsSync(file)) return res.status(404).json({ ok: false, error: '프리셋 없음' });
+    fs.unlinkSync(file);
+    res.json({ ok: true, name });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // Phase 4-D-5-C: 글로벌 에러 핸들러 — 라우트 안에서 throw 가 res 에 처리되지 않은 채
 //   bubble up 한 경우 마지막 안전망. 정상 라우트들은 try/catch 로 직접 500 응답.
 app.use((err, req, res, _next) => {
