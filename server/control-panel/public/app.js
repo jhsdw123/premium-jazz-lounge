@@ -282,6 +282,107 @@ $('#newPromptForm').addEventListener('submit', async (ev) => {
   }
 });
 
+// ─── Prompt 라이브러리 — 골라서 클립보드 복사 ─────────────────────
+// Suno 에 다시 쓸 프롬프트를 라이브러리에서 골라 복사. 즐겨찾기 우선,
+// 나머지는 서버 정렬(use_count desc) 유지. 검색은 닉네임 + 본문.
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // 비보안 컨텍스트/권한 거부 폴백
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.cssText = 'position:fixed;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
+    ta.remove();
+    return ok;
+  }
+}
+
+function renderPromptLib() {
+  const listEl = $('#promptLibList');
+  const q = $('#promptLibSearch').value.trim().toLowerCase();
+  const prompts = [...state.prompts].sort(
+    (a, b) => (b.is_favorite === true) - (a.is_favorite === true)
+  );
+  const filtered = q
+    ? prompts.filter((p) =>
+        (p.nickname || '').toLowerCase().includes(q)
+        || (p.prompt_text || '').toLowerCase().includes(q))
+    : prompts;
+
+  if (!filtered.length) {
+    listEl.innerHTML = `<div class="prompt-lib-empty">${
+      q ? '검색 결과 없음' : '저장된 프롬프트가 없습니다 — + 버튼으로 추가'
+    }</div>`;
+    return;
+  }
+
+  listEl.innerHTML = '';
+  for (const p of filtered) {
+    const name = p.nickname || p.prompt_text.slice(0, 40);
+    const card = document.createElement('div');
+    card.className = 'prompt-card';
+    card.innerHTML = `
+      <div class="prompt-card-top">
+        ${p.is_favorite ? '<span title="즐겨찾기">⭐</span>' : ''}
+        <span class="prompt-card-name" title="${escapeHtml(name)}">${escapeHtml(name)}</span>
+        <span class="prompt-card-count" title="이 프롬프트로 업로드된 곡 수">${p.use_count || 0}곡</span>
+        <button type="button" class="prompt-copy-btn">복사</button>
+      </div>
+      <div class="prompt-card-text">${escapeHtml(p.prompt_text)}</div>
+      <div class="prompt-card-more">▾ 전체 보기</div>
+    `;
+
+    const textEl = card.querySelector('.prompt-card-text');
+    const moreEl = card.querySelector('.prompt-card-more');
+    // 2줄 clamp 가 실제로 일어난 카드에만 '전체 보기' 노출 (렌더 후 측정)
+    requestAnimationFrame(() => {
+      if (textEl.scrollHeight <= textEl.clientHeight + 2) moreEl.remove();
+    });
+    const toggleExpand = () => {
+      const expanded = textEl.classList.toggle('expanded');
+      moreEl.textContent = expanded ? '▴ 접기' : '▾ 전체 보기';
+    };
+    textEl.addEventListener('click', toggleExpand);
+    moreEl.addEventListener('click', toggleExpand);
+
+    card.querySelector('.prompt-copy-btn').addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget; // await 이후엔 currentTarget 이 null — 먼저 캡처
+      const ok = await copyTextToClipboard(p.prompt_text);
+      if (ok) {
+        btn.textContent = '✓ 복사됨';
+        btn.classList.add('copied');
+        toast(`클립보드에 복사: ${name}`, 'success');
+        setTimeout(() => { btn.textContent = '복사'; btn.classList.remove('copied'); }, 1600);
+      } else {
+        toast('클립보드 복사 실패 — 브라우저 권한 확인', 'error');
+      }
+    });
+
+    listEl.appendChild(card);
+  }
+}
+
+$('#promptLibBtn').addEventListener('click', async () => {
+  $('#promptLibDialog').showModal();
+  $('#promptLibSearch').value = '';
+  renderPromptLib();       // 캐시로 즉시 표시
+  await refreshPrompts();  // 최신 목록으로 갱신 후 재렌더
+  renderPromptLib();
+  $('#promptLibSearch').focus();
+});
+$('#promptLibClose').addEventListener('click', () => $('#promptLibDialog').close());
+$('#promptLibSearch').addEventListener('input', renderPromptLib);
+// 바깥(backdrop) 클릭으로도 닫기
+$('#promptLibDialog').addEventListener('click', (ev) => {
+  if (ev.target === $('#promptLibDialog')) $('#promptLibDialog').close();
+});
+
 // ─── Filter form ↔ URL ────────────────────────────────────────────
 function readFiltersFromUrl() {
   const p = new URLSearchParams(location.search);
