@@ -981,6 +981,7 @@ app.get('/api/tracks/:id/audio-url', async (req, res) => {
 const VOCAL_CHECK_DIR = resolve(__dirname, '../../data/vocal-check');
 const VOCAL_RESULTS_FILE = path.join(VOCAL_CHECK_DIR, 'results.json');
 const VOCAL_LABELS_FILE = path.join(VOCAL_CHECK_DIR, 'labels.json');
+const VOCAL_VERDICTS_FILE = path.join(VOCAL_CHECK_DIR, 'ai-verdicts.json');
 const VOCAL_FLAGGED_DIR = path.join(VOCAL_CHECK_DIR, 'flagged');
 
 async function readJsonSafe(file, fallback = {}) {
@@ -994,9 +995,10 @@ async function readJsonSafe(file, fallback = {}) {
 //   GET /api/vocal-check/results — 스캔 진행률 + 곡별 판정/타임스탬프/라벨 상태
 app.get('/api/vocal-check/results', async (_req, res) => {
   try {
-    const [results, labels] = await Promise.all([
+    const [results, labels, aiVerdicts] = await Promise.all([
       readJsonSafe(VOCAL_RESULTS_FILE),
       readJsonSafe(VOCAL_LABELS_FILE),
+      readJsonSafe(VOCAL_VERDICTS_FILE),
     ]);
     const ids = Object.keys(results).map(Number).filter(Number.isFinite);
 
@@ -1030,6 +1032,9 @@ app.get('/api/vocal-check/results', async (_req, res) => {
         has_vocals: t?.has_vocals ?? null,
         is_active: t?.is_active ?? null,
         label: labels[id]?.label || null,
+        ai_verdict: aiVerdicts[id]?.verdict || null,
+        ai_confidence: aiVerdicts[id]?.confidence ?? null,
+        ai_heard: aiVerdicts[id]?.heard || null,
         has_audio: fs.existsSync(path.join(VOCAL_FLAGGED_DIR, `${id}_vocals.mp3`)),
       };
     });

@@ -67,6 +67,7 @@
     font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: 700;
   }
   .badge.vocal { background: var(--neon); color: #000; }
+  .badge.ai-vocal { background: transparent; border: 1px solid var(--neon); color: var(--neon); }
   .badge.clean { background: #3a3a40; color: var(--text-muted); }
   .badge.pending { background: var(--jazz-gold-dim); color: #000; }
   .segs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
@@ -121,12 +122,14 @@
   <div class="stats">
     <div class="stat"><label>스캔 진행</label><div class="v gold" id="st-progress">—</div></div>
     <div class="stat"><label>Flagged</label><div class="v neon" id="st-flagged">—</div></div>
-    <div class="stat"><label>미분류</label><div class="v red" id="st-pending">—</div></div>
-    <div class="stat"><label>분류 완료</label><div class="v" id="st-labeled">—</div></div>
+    <div class="stat"><label>🤖 AI 오탐 정정</label><div class="v" id="st-ai-clean">—</div></div>
+    <div class="stat"><label>리뷰 대기</label><div class="v red" id="st-pending">—</div></div>
+    <div class="stat"><label>사람 판정</label><div class="v" id="st-labeled">—</div></div>
   </div>
 
   <div class="toolbar">
-    <button data-filter="pending" class="active">미분류만</button>
+    <button data-filter="pending" class="active">리뷰 대기</button>
+    <button data-filter="ai-clean">🤖 AI 오탐 처리분</button>
     <button data-filter="flagged">flagged 전체</button>
     <button data-filter="all">clean 포함 전체</button>
     <span class="spacer"></span>
@@ -166,20 +169,27 @@ async function load() {
 
 function render() {
   const flagged = rows.filter((r) => r.verdict === 'flagged');
-  const pending = flagged.filter((r) => !r.label);
+  const labeled = flagged.filter((r) => r.label);
+  const aiClean = flagged.filter((r) => !r.label && r.ai_verdict === 'clean');
+  // 리뷰 대기 = 사람 판정 없음 + AI 가 오탐 처리하지도 않음 (AI 보컬 확인 or 미검증)
+  const pending = flagged.filter((r) => !r.label && r.ai_verdict !== 'clean');
   $('#st-progress').textContent = totalActive != null ? `${rows.length} / ${totalActive}` : String(rows.length);
   $('#st-flagged').textContent = String(flagged.length);
+  $('#st-ai-clean').textContent = String(aiClean.length);
   $('#st-pending').textContent = String(pending.length);
-  $('#st-labeled').textContent = String(flagged.length - pending.length);
+  $('#st-labeled').textContent = String(labeled.length);
 
   let view;
   if (filter === 'pending') view = pending;
+  else if (filter === 'ai-clean') view = aiClean;
   else if (filter === 'flagged') view = flagged;
   else view = rows;
 
-  // 보컬 스템 피크가 큰(=진짜 보컬일 확률 높은) 순으로 정렬. clean 은 뒤로.
+  // 정렬: AI 보컬 확인 > 미검증 > AI 오탐, 그 안에서 스템 피크 큰 순. clean 은 맨 뒤.
+  const aiRank = (r) => r.ai_verdict === 'vocal' ? 0 : r.ai_verdict === 'clean' ? 2 : 1;
   view = [...view].sort((a, b) => {
     if ((a.verdict === 'flagged') !== (b.verdict === 'flagged')) return a.verdict === 'flagged' ? -1 : 1;
+    if (aiRank(a) !== aiRank(b)) return aiRank(a) - aiRank(b);
     return (b.stem_max_db ?? -99) - (a.stem_max_db ?? -99);
   });
 
@@ -194,9 +204,16 @@ function render() {
   }
 
   list.innerHTML = view.map((r) => {
+    const aiBadge = r.ai_verdict === 'vocal'
+      ? `<span class="badge ai-vocal" title="${esc(r.ai_heard || '')}">🤖 AI: 보컬 확인${r.ai_confidence != null ? ` ${Math.round(r.ai_confidence * 100)}%` : ''}</span>`
+      : r.ai_verdict === 'clean'
+      ? `<span class="badge clean" title="${esc(r.ai_heard || '')}">🤖 AI: 오탐 정정</span>`
+      : r.ai_verdict === 'unsure'
+      ? `<span class="badge pending" title="${esc(r.ai_heard || '')}">🤖 AI: 불확실</span>`
+      : '';
     const labelBadge = r.label === 'vocal' ? '<span class="badge vocal">🎤 보컬 확정</span>'
       : r.label === 'clean' ? '<span class="badge clean">오탐 확정</span>'
-      : (r.verdict === 'flagged' ? '<span class="badge pending">판정 대기</span>' : '');
+      : (r.verdict === 'flagged' && !r.ai_verdict ? '<span class="badge pending">판정 대기</span>' : '');
     const titleCls = r.label === 'vocal' ? 'title vocal-confirmed' : 'title';
     const segs = (r.segments || []).map((s) =>
       `<span class="seg" data-id="${r.id}" data-start="${s.start}" title="이 지점부터 재생">${fmtT(s.start)}~${fmtT(s.end)}</span>`
@@ -210,10 +227,10 @@ function render() {
             <span class="tid">#${r.id}</span>
             <span class="${titleCls}">${esc(r.title_en || '(제목 없음)')}</span>
             <span class="fname">${esc(r.filename || '')}</span>
-            ${labelBadge}
+            ${labelBadge}${aiBadge}
           </div>
           ${segs ? `<div class="segs">${segs}</div>` : ''}
-          <div class="meta">${r.verdict === 'flagged' ? `보컬 스템 피크 ${r.stem_max_db ?? '?'}dB · ` : ''}판정: ${r.verdict}${r.error ? ` · ⚠ ${esc(r.error)}` : ''}</div>
+          <div class="meta">${r.verdict === 'flagged' ? `보컬 스템 피크 ${r.stem_max_db ?? '?'}dB · ` : ''}판정: ${r.verdict}${r.ai_heard ? ` · 🤖 "${esc(r.ai_heard)}"` : ''}${r.error ? ` · ⚠ ${esc(r.error)}` : ''}</div>
           <div class="players">
             <button class="orig-btn" data-id="${r.id}">▶ 원곡 재생</button>
             ${player}
