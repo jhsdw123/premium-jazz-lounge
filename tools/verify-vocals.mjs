@@ -36,7 +36,7 @@ const VERDICTS_FILE = join(WORK_DIR, 'ai-verdicts.json');
 
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const GEMINI_SLEEP_MS = 4500;
-const MAX_SEGMENTS = 6;        // 곡당 Gemini 에 보낼 최대 구간 수
+let MAX_SEGMENTS = 6;          // 곡당 Gemini 에 보낼 최대 구간 수 (--max-segments 로 override)
 const SEG_PAD_SEC = 1.0;       // 구간 앞뒤 여유
 const MAX_ERRORS = 3;          // 곡당 최대 재시도 횟수 (watch 루프 누적)
 const METHOD = 'stem+mix-v2';  // 판정 방식 버전 (ai-verdicts.json 에 기록)
@@ -285,6 +285,8 @@ async function main() {
   const trackIds = [];
   const tIdx = argv.indexOf('--track-id');
   if (tIdx >= 0) trackIds.push(...String(argv[tIdx + 1]).split(',').map((s) => parseInt(s.trim(), 10)));
+  const msIdx = argv.indexOf('--max-segments');
+  if (msIdx >= 0) MAX_SEGMENTS = Math.max(1, parseInt(argv[msIdx + 1], 10) || MAX_SEGMENTS);
 
   await fs.mkdir(TMP_DIR, { recursive: true });
 
