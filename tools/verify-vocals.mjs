@@ -39,6 +39,8 @@ const GEMINI_SLEEP_MS = 4500;
 const MAX_SEGMENTS = 6;        // 곡당 Gemini 에 보낼 최대 구간 수
 const SEG_PAD_SEC = 1.0;       // 구간 앞뒤 여유
 const MAX_ERRORS = 3;          // 곡당 최대 재시도 횟수 (watch 루프 누적)
+const METHOD = 'stem+mix-v2';  // 판정 방식 버전 (ai-verdicts.json 에 기록)
+const FLAGGED_DIR = join(WORK_DIR, 'flagged');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -64,11 +66,21 @@ async function readJson(file, fallback = {}) {
   try { return JSON.parse(await fs.readFile(file, 'utf8')); } catch { return fallback; }
 }
 
+/** 구간이 MAX_SEGMENTS 보다 많으면 앞쪽만 자르지 않고 전체에서 고르게 샘플링. */
+function sampleSegments(segments) {
+  if (segments.length <= MAX_SEGMENTS) return segments;
+  const picked = [];
+  for (let i = 0; i < MAX_SEGMENTS; i++) {
+    picked.push(segments[Math.floor((i * (segments.length - 1)) / (MAX_SEGMENTS - 1))]);
+  }
+  return picked;
+}
+
 /**
- * 원곡에서 플래그 구간들만 잘라 하나의 mono mp3 클립으로 concat.
+ * 소스 파일에서 플래그 구간들만 잘라 하나의 mono mp3 클립으로 concat.
  */
 async function extractSegmentsClip(srcFile, segments, outFile) {
-  const segs = segments.slice(0, MAX_SEGMENTS);
+  const segs = sampleSegments(segments);
   const inputs = [];
   const filters = [];
   segs.forEach((s, i) => {
@@ -88,29 +100,46 @@ async function extractSegmentsClip(srcFile, segments, outFile) {
 
 /**
  * Gemini 에 오디오 클립 + 판정 프롬프트 전송. (lib/llm.mjs 는 텍스트 전용이라 직접 호출)
+ *
+ * stemClipFile 이 있으면 [보컬 스템 클립 + 원곡 클립] 2개를 함께 보냄.
+ * 스템에서는 화음 코러스("ooh/aah" 패드)와 색소폰 bleed 가 확연히 구분되어
+ * 원곡만 들려줄 때보다 판별력이 훨씬 높음. (원곡만 보내면 믹스에 묻힌
+ * 백그라운드 코러스를 색소폰으로 오판하는 위음성 다수 발생 — v1 의 실패 원인)
  */
-async function askGemini(clipFile) {
+async function askGemini(mixClipFile, stemClipFile = null) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error('GEMINI_API_KEY 가 .env.local 에 없음');
 
-  const audioB64 = (await fs.readFile(clipFile)).toString('base64');
+  const mixB64 = (await fs.readFile(mixClipFile)).toString('base64');
+  const stemB64 = stemClipFile ? (await fs.readFile(stemClipFile)).toString('base64') : null;
+
   const prompt = [
-    'You are auditing excerpts from an instrumental jazz track.',
-    'These excerpts were flagged by an automatic detector as possibly containing a HUMAN VOICE.',
-    'Listen carefully and decide: is there any actual human voice — singing, humming, scat, choir, chant, spoken word, or vocal chops?',
-    'IMPORTANT: saxophone, trumpet, muted brass, breathy wind instruments, and string swells often sound voice-like. Those are NOT human voice.',
+    'You are auditing a jazz track that is SUPPOSED to be purely instrumental.',
+    stemB64
+      ? 'You will hear TWO clips. Clip 1 is the isolated "vocals" stem produced by source separation at the flagged moments (instruments sometimes bleed into it). Clip 2 is the original mix at the same moments.'
+      : 'You will hear excerpts from the original mix at the flagged moments.',
+    '',
+    'Question: does this track contain any real HUMAN VOICE? This includes lead vocals, scat singing, humming, spoken word, vocal chops, AND quiet background choir pads — sustained "ooh"/"aah" harmony textures layered behind the band.',
+    '',
+    'How to judge:',
+    stemB64
+      ? '- Focus on Clip 1 (the stem). Sustained harmonic "ooh/aah" textures, layered harmony voices, breath+vibrato singing → HUMAN VOICE, even if barely audible in Clip 2.'
+      : '- Listen for background choir pads behind the band, not just lead vocals.',
+    stemB64
+      ? '- If Clip 1 contains only a single melodic line that is clearly the saxophone/trumpet lead you also hear carrying the melody in Clip 2 (separation bleed), that is NOT a voice.'
+      : '- A single expressive saxophone/trumpet melody line is NOT a voice.',
+    '- Do not dismiss something as "voice-like instrument" if it sounds like multiple voices in harmony — jazz horns play distinct notes, choirs sing sustained blended chords.',
+    '',
     'Answer JSON only: {"has_human_voice": true/false, "confidence": 0.0-1.0, "heard": "<one short sentence: what you actually heard>"}',
   ].join('\n');
 
+  const parts = [{ text: prompt }];
+  if (stemB64) parts.push({ inlineData: { mimeType: 'audio/mp3', data: stemB64 } });
+  parts.push({ inlineData: { mimeType: 'audio/mp3', data: mixB64 } });
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}:generateContent?key=${apiKey}`;
   const body = {
-    contents: [{
-      role: 'user',
-      parts: [
-        { text: prompt },
-        { inlineData: { mimeType: 'audio/mp3', data: audioB64 } },
-      ],
-    }],
+    contents: [{ role: 'user', parts }],
     generationConfig: {
       temperature: 0.1,
       // thinking 토큰이 maxOutputTokens 를 잠식해 JSON 이 잘리는 문제 방지
@@ -146,7 +175,7 @@ async function askGemini(clipFile) {
 /**
  * 검증 대상: flagged && 사람 라벨 없음 && (AI 판정 없음 || 에러 재시도 여지 있음)
  */
-async function collectTargets(trackIds) {
+async function collectTargets(trackIds, { recheckClean = false } = {}) {
   const [results, labels, verdicts] = await Promise.all([
     readJson(RESULTS_FILE), readJson(LABELS_FILE), readJson(VERDICTS_FILE),
   ]);
@@ -160,8 +189,12 @@ async function collectTargets(trackIds) {
     if (r.verdict !== 'flagged') continue;
     if (labels[id]) continue;
     const v = verdicts[id];
-    if (v && v.verdict !== 'error') continue;
-    if (v?.verdict === 'error' && (v.error_count || 0) >= MAX_ERRORS) continue;
+    if (v) {
+      const retryError = v.verdict === 'error' && (v.error_count || 0) < MAX_ERRORS;
+      // --recheck-clean: 구버전 방식(method 상이)으로 clean 판정된 곡을 새 방식으로 재검증
+      const recheck = recheckClean && v.verdict === 'clean' && v.method !== METHOD;
+      if (!retryError && !recheck) continue;
+    }
     targets.push({ id, segments: r.segments || [] });
   }
   return { targets, verdicts, labels };
@@ -181,13 +214,23 @@ async function processOne(target, verdicts, labels = {}) {
   const ext = extname(track.storage_path) || '.mp3';
   const srcFile = join(TMP_DIR, `verify-${id}${ext}`);
   const clipFile = join(TMP_DIR, `verify-${id}-clip.mp3`);
+  const stemClipFile = join(TMP_DIR, `verify-${id}-stem.mp3`);
 
   try {
     const buf = await downloadTrack(track.storage_path);
     await fs.writeFile(srcFile, buf);
     await extractSegmentsClip(srcFile, segments, clipFile);
 
-    const ans = await askGemini(clipFile);
+    // 스캐너가 남긴 보컬 스템 mp3 (flagged/<id>_vocals.mp3) 가 있으면 같은 구간을 잘라 함께 전송
+    const stemFile = join(FLAGGED_DIR, `${id}_vocals.mp3`);
+    let hasStem = false;
+    try {
+      await fs.access(stemFile);
+      await extractSegmentsClip(stemFile, segments, stemClipFile);
+      hasStem = true;
+    } catch { /* 스템 없으면 원곡만으로 판정 */ }
+
+    const ans = await askGemini(clipFile, hasStem ? stemClipFile : null);
     const conf = typeof ans.confidence === 'number' ? ans.confidence : 0;
     // "보컬 없음" 은 확신도 0.7 이상일 때만 자동 정정(clean) — 낮으면 unsure 로
     // 사람 리뷰에 남김. (진짜 보컬을 잘못 지우는 게 최악의 실패 모드라 보수적으로.)
@@ -199,6 +242,7 @@ async function processOne(target, verdicts, labels = {}) {
       heard: ans.heard || null,
       checked_at: new Date().toISOString(),
       model: GEMINI_MODEL,
+      method: METHOD,
     };
     await fs.writeFile(VERDICTS_FILE, JSON.stringify(verdicts, null, 2));
 
@@ -230,12 +274,14 @@ async function processOne(target, verdicts, labels = {}) {
   } finally {
     await fs.unlink(srcFile).catch(() => {});
     await fs.unlink(clipFile).catch(() => {});
+    await fs.unlink(stemClipFile).catch(() => {});
   }
 }
 
 async function main() {
   const argv = process.argv.slice(2);
   const watch = argv.includes('--watch');
+  const recheckClean = argv.includes('--recheck-clean');
   const trackIds = [];
   const tIdx = argv.indexOf('--track-id');
   if (tIdx >= 0) trackIds.push(...String(argv[tIdx + 1]).split(',').map((s) => parseInt(s.trim(), 10)));
@@ -247,7 +293,7 @@ async function main() {
   const POLL_MS = 3 * 60 * 1000;
 
   for (;;) {
-    const { targets, verdicts, labels } = await collectTargets(trackIds);
+    const { targets, verdicts, labels } = await collectTargets(trackIds, { recheckClean });
     if (targets.length) {
       console.log(`검증 대상 ${targets.length}곡 (model=${GEMINI_MODEL})`);
       for (const t of targets) {
