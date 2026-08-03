@@ -43,7 +43,7 @@ premium-jazz-lounge/
 |---|---|
 | 서버 | Node.js 18+, Express, multer, cors, dotenv |
 | DB | Supabase Postgres (jhsdw123 인스턴스, quiz/stock 과 공유) |
-| Storage | Supabase Storage bucket `pjl-jazz-tracks` (private) |
+| Storage | **Cloudflare R2** (S3 호환) bucket `pjl-jazz-tracks` (private, signed URL). DB 만 Supabase 유지 |
 | LLM | Gemini 2.5-flash (`gemini-2.5-flash`) — 무료 tier 15 RPM |
 | 영상 | Remotion (Phase 4 부터) — port 3001 studio |
 | 분석 | ffprobe + silencedetect (시스템 ffmpeg 필요) |
@@ -96,6 +96,12 @@ node tools/test-phase3c1.mjs
 
 # 통합 테스트 (Phase 3-C-2-C = random RPC + instruments)
 node tools/test-phase3c2c.mjs
+
+# 보컬 자동 검출 (새 곡 업로드 후 두 줄 실행 — Demucs 1차 + Gemini 2차)
+node tools/check-vocals.mjs          # R2 → Demucs 보컬 스템 분리 → 의심 구간 플래그 (곡당 CPU 1~3분)
+node tools/verify-vocals.mjs         # 플래그 구간을 [스템+원곡] 으로 Gemini 판정 → 오탐 자동 정정
+# 사람 최종 확정: http://localhost:4001/vocal-review.html (구간 클릭 = 원곡 해당 지점 재생)
+# has_vocals=true 곡은 Pool 탭에서 제목 형광연두 하이라이트
 ```
 
 ---
@@ -103,7 +109,7 @@ node tools/test-phase3c2c.mjs
 ## 중요 규칙 (지키지 않으면 깨짐)
 
 1. **모든 Supabase 테이블/함수에 `pjl_` prefix.** quiz/stock 인스턴스 공유 중. 예외 없음.
-2. **Storage bucket 은 `pjl-jazz-tracks` (private).** 외부 노출 금지 — 항상 signed URL 로 서빙. 환경변수 `SUPABASE_STORAGE_BUCKET` 로 override 가능.
+2. **파일 저장소는 Cloudflare R2 (S3 호환), bucket `pjl-jazz-tracks` (private).** `lib/storage.mjs`(aws-sdk) 경유로만 접근, 직접 `supabase.storage` 호출 금지. 항상 signed URL 로 서빙(R2 SigV4 상한 = 7일). 설정은 `.env.local` 의 `S3_*`. 나중에 MinIO 전환 시 env 만 교체. 템플릿 배경(`template-bg/*`)은 DB 에 **path 만** 저장하고 GET 시 재서명(`signTemplateBg`).
 3. **Gemini 모델은 `gemini-2.5-flash`.** `2.0-flash-exp` 는 deprecated — 2026년 이후 호출하면 404. 환경변수 `GEMINI_MODEL` 로 override 가능.
 4. **Gemini RPM 무료 15/min — 호출 사이 4500ms sleep 필수.** 일괄 생성 (`/api/titles/bulk-generate`) 에서는 항상 throttle. 안 그러면 429 폭탄.
 5. **`.env.local` 자동 로드는 `lib/supabase.mjs` 에서 절대경로로 처리.** CWD 무관하게 동작해야 함 (cron / 다른 폴더에서 require 되어도). `process.env` 를 다른 모듈에서 읽기 전에 이 모듈이 import 되어야 함 (ESM 호이스팅 활용).

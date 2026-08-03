@@ -78,6 +78,7 @@ npm install
 | 채워야 할 가능성 높은 키 (시크릿) | 안 건드려도 되는 키 (공개/고정값) |
 |---|---|
 | `SUPABASE_SERVICE_KEY` | `SUPABASE_URL` (보통 그대로) |
+| `S3_SECRET_ACCESS_KEY` (R2 시크릿) | `S3_ENDPOINT` / `S3_ACCESS_KEY_ID` / `S3_BUCKET` (R2, 보통 그대로) |
 | `GEMINI_API_KEY` | `SUPABASE_STORAGE_BUCKET=pjl-jazz-tracks` |
 | `OPENAI_API_KEY` (있으면) | `PORT=4001` |
 | `YOUTUBE_CLIENT_ID` | `YOUTUBE_REDIRECT_URI=http://localhost:4001/auth/youtube/callback` |

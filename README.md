@@ -43,8 +43,8 @@ premium-jazz-lounge/
 
 ## DB / 인프라
 
-- **Supabase**: 곡/제목/프로젝트/업로드 메타데이터
-- **Supabase Storage**: 곡 파일 (bucket: `jazz-tracks`)
+- **Supabase Postgres**: 곡/제목/프로젝트/업로드 메타데이터 (DB 전용)
+- **Cloudflare R2** (S3 호환): 곡 파일 + 템플릿 배경 (bucket: `pjl-jazz-tracks`, private/signed URL). 설정은 `.env.local` 의 `S3_*`
 - **로컬 캐시**: `data/tracks/` (선택적 동기화)
 
 자세한 내용은 [`tools/supabase_schema.sql`](./tools/supabase_schema.sql) 참고.
