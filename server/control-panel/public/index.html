@@ -370,6 +370,17 @@
       margin-top: 1px; font-family: 'SF Mono', Menlo, Consolas, monospace;
       max-width: 480px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
+    /* 생성 툴 배지 — 파일명 앞. 클릭하면 생성 당시 제목 복사 */
+    .source-badge {
+      display: inline-block; margin-right: 6px; padding: 0 6px;
+      border: 1px solid var(--border); border-radius: 3px;
+      font-size: 10px; letter-spacing: 0.03em; cursor: pointer;
+      color: var(--text-dim); font-family: inherit;
+    }
+    .source-badge:hover { border-color: var(--jazz-gold-dim); color: var(--jazz-gold); }
+    .source-badge.mureka { color: #7fd4c1; border-color: rgba(127, 212, 193, 0.4); }
+    .source-badge.other  { color: #c9a2e8; border-color: rgba(201, 162, 232, 0.4); }
+    .dropzone-controls select.narrow { min-width: 110px; }
     .empty {
       text-align: center; padding: 32px 16px;
       color: var(--text-muted); font-size: 13px;
@@ -1543,6 +1554,14 @@
             <button class="icon-btn" type="button" id="newPromptBtn" title="새 프롬프트 추가">+</button>
             <button class="icon-btn" type="button" id="promptLibBtn" title="프롬프트 라이브러리 — 골라서 복사">📋</button>
           </span>
+          <span>
+            <label for="sourceToolSelect">생성 툴</label>
+            <select id="sourceToolSelect" class="narrow" title="곡을 만든 툴 — 파일명(생성 당시 제목)과 함께 DB 에 저장">
+              <option value="mureka" selected>Mureka</option>
+              <option value="suno">Suno</option>
+              <option value="other">기타</option>
+            </select>
+          </span>
           <label class="vocal-check">
             <input type="checkbox" id="hasVocals" />
             보컬 포함
@@ -1576,6 +1595,15 @@
               <option value="">전체</option>
               <option value="true">보컬 있음</option>
               <option value="false">보컬 없음</option>
+            </select>
+          </span>
+          <span class="filter-group">
+            <label>생성 툴</label>
+            <select id="filterSource">
+              <option value="">전체</option>
+              <option value="mureka">Mureka</option>
+              <option value="suno">Suno</option>
+              <option value="other">기타</option>
             </select>
           </span>
           <span class="filter-group">

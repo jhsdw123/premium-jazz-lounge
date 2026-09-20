@@ -58,7 +58,7 @@ premium-jazz-lounge/
 | `pjl_prompts` | Suno 프롬프트 라이브러리 (use_count, is_favorite) |
 | `pjl_instruments` | 악기 정규화 마스터 (canonical_name, aliases[]) |
 | `pjl_titles` | LLM 자동 생성 제목 풀 (status: available/used/rejected, normalized_words[] GIN) |
-| `pjl_tracks` | 곡 메타 (Storage path, file_hash, instruments[], bpm, duration, prefix_order 1-5) |
+| `pjl_tracks` | 곡 메타 (Storage path, file_hash, instruments[], bpm, duration, prefix_order 1-5, **source_tool** suno/mureka/other, **source_title** = 생성 툴에서의 원제목 — Mureka 사이트 검색용. 영상 제목(pjl_titles)과 별개) |
 | `pjl_video_projects` | 영상 프로젝트 (build_id, track_ids[], template_json, status) |
 | `pjl_video_tracks` | 영상 ↔ 곡 N:M (position, start_sec, end_sec) |
 | `pjl_video_translations` | 16개 언어 번역 캐시 (lang_code 별 title/description/tags[]) |

@@ -19,7 +19,10 @@ import {
   uploadTrack, uploadObject, downloadTrack, deleteTrack, deleteTracks,
   getSignedUrl, storageHealth,
 } from '../../lib/storage.mjs';
-import { computeFileHash, parsePrefixOrder } from '../../lib/track-utils.mjs';
+import {
+  computeFileHash, parsePrefixOrder, parseSourceTitle,
+  SOURCE_TOOLS, DEFAULT_SOURCE_TOOL,
+} from '../../lib/track-utils.mjs';
 import { analyzeTrack } from '../../lib/track-meta.mjs';
 import { generateTitleCandidates } from '../../lib/llm.mjs';
 import {
@@ -196,6 +199,15 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
     const promptText = (req.body.promptText || '').trim();
     const hasVocals = req.body.hasVocals === 'true' || req.body.hasVocals === true;
 
+    // 곡 생성 툴 — 안 주면 mureka. 모르는 값은 조용히 바꾸지 않고 거절.
+    const sourceTool = String(req.body.sourceTool || DEFAULT_SOURCE_TOOL).trim().toLowerCase();
+    if (!SOURCE_TOOLS.includes(sourceTool)) {
+      return res.status(400).json({
+        ok: false,
+        error: `sourceTool 은 ${SOURCE_TOOLS.join(' / ')} 중 하나여야 합니다 (받은 값: ${sourceTool})`,
+      });
+    }
+
     // promptText 만 주어지면 upsert 후 promptId 채움
     if (!promptId && promptText) {
       const { data: pdata, error: perr } = await supabase
@@ -267,6 +279,7 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
           console.warn(`[upload] analyzeTrack 실패 (${filename}): ${e.message}`);
         }
         const prefixOrder = parsePrefixOrder(filename);
+        const sourceTitle = parseSourceTitle(filename);
 
         // DB insert (실패 시 Storage rollback)
         const { data: track, error: insErr } = await supabase
@@ -283,11 +296,16 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
             duration_raw_sec: durationRawSec,
             duration_actual_sec: durationActualSec,
             instruments: inferredInstruments,
+            source_tool: sourceTool,
+            source_title: sourceTitle,
           })
           .select('id')
           .single();
         if (insErr) {
           await deleteTrack(storagePath).catch(() => {});
+          if (/source_tool|source_title/.test(insErr.message || '')) {
+            throw new Error('DB 에 source_tool/source_title 컬럼이 없습니다 — tools/migrations/0006_track_source.sql 을 Supabase SQL Editor 에서 먼저 실행하세요');
+          }
           throw new Error(`DB insert 실패: ${insErr.message}`);
         }
 
@@ -296,6 +314,8 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
           status: 'uploaded',
           trackId: track.id,
           storagePath,
+          source_tool: sourceTool,
+          source_title: sourceTitle,
           duration_raw_sec: durationRawSec,
           duration_actual_sec: durationActualSec,
           instruments: inferredInstruments,
@@ -321,7 +341,7 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
 app.get('/api/tracks', async (req, res) => {
   try {
     const {
-      ids, search, promptId, hasVocals, instrument,
+      ids, search, promptId, hasVocals, instrument, sourceTool,
       usedFilter = 'all', prefixOrder = 'any',
       minDuration, maxDuration, fromDate, toDate,
       limit = 100, orderBy = 'newest',
@@ -394,6 +414,7 @@ app.get('/api/tracks', async (req, res) => {
     if (pid) q = q.eq('prompt_id', pid);
     if (hasVocals === 'true') q = q.eq('has_vocals', true);
     else if (hasVocals === 'false') q = q.eq('has_vocals', false);
+    if (SOURCE_TOOLS.includes(sourceTool)) q = q.eq('source_tool', sourceTool);
     if (usedFilter === 'unused') q = q.eq('used_count', 0);
     else if (usedFilter === 'used') q = q.gt('used_count', 0);
     if (prefixOrder === 'with-prefix') q = q.not('prefix_order', 'is', null);

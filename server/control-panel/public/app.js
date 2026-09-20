@@ -75,6 +75,8 @@ async function apiPost(path, body) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const SOURCE_TOOL_LABELS = { mureka: 'Mureka', suno: 'Suno', other: '기타' };
+
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"]/g, (c) => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
@@ -391,6 +393,7 @@ function readFiltersFromUrl() {
     search: p.get('search') || '',
     promptId: p.get('prompt') || '',
     hasVocals: p.get('vocals') || '',
+    sourceTool: p.get('source') || '',
     usedFilter: p.get('used') || 'all',
     prefixOrder: p.get('prefix') || 'any',
     instrument: p.get('instrument') || '',
@@ -405,6 +408,7 @@ function writeFiltersToUrl(f) {
   if (f.search) p.set('search', f.search);
   if (f.promptId) p.set('prompt', f.promptId);
   if (f.hasVocals) p.set('vocals', f.hasVocals);
+  if (f.sourceTool) p.set('source', f.sourceTool);
   if (f.usedFilter && f.usedFilter !== 'all') p.set('used', f.usedFilter);
   if (f.prefixOrder && f.prefixOrder !== 'any') p.set('prefix', f.prefixOrder);
   if (f.instrument) p.set('instrument', f.instrument);
@@ -419,6 +423,7 @@ function applyFiltersToForm(f) {
   $('#searchInput').value = f.search;
   $('#filterPrompt').value = f.promptId;
   $('#filterVocals').value = f.hasVocals;
+  $('#filterSource').value = f.sourceTool || '';
   $('#filterUsed').value = f.usedFilter || 'all';
   $('#filterPrefix').value = f.prefixOrder || 'any';
   $('#filterInstrument').value = f.instrument || '';
@@ -432,6 +437,7 @@ function readFiltersFromForm() {
     search: $('#searchInput').value.trim(),
     promptId: $('#filterPrompt').value,
     hasVocals: $('#filterVocals').value,
+    sourceTool: $('#filterSource').value,
     usedFilter: $('#filterUsed').value,
     prefixOrder: $('#filterPrefix').value,
     instrument: $('#filterInstrument').value,
@@ -443,7 +449,7 @@ function readFiltersFromForm() {
 
 function clearFilters() {
   applyFiltersToForm({
-    search: '', promptId: '', hasVocals: '',
+    search: '', promptId: '', hasVocals: '', sourceTool: '',
     usedFilter: 'all', prefixOrder: 'any', instrument: '',
     minDuration: '', maxDuration: '', orderBy: 'recommend',
   });
@@ -490,6 +496,7 @@ async function refreshTracks() {
   if (f.search) p.set('search', f.search);
   if (f.promptId) p.set('promptId', f.promptId);
   if (f.hasVocals) p.set('hasVocals', f.hasVocals);
+  if (f.sourceTool) p.set('sourceTool', f.sourceTool);
   if (f.usedFilter) p.set('usedFilter', f.usedFilter);
   if (f.prefixOrder) p.set('prefixOrder', f.prefixOrder);
   if (f.instrument) p.set('instrument', f.instrument);
@@ -524,7 +531,7 @@ function renderTracks() {
 
   if (!state.tracks.length) {
     const f = readFiltersFromForm();
-    const hasFilter = f.search || f.promptId || f.hasVocals
+    const hasFilter = f.search || f.promptId || f.hasVocals || f.sourceTool
       || (f.usedFilter && f.usedFilter !== 'all')
       || (f.prefixOrder && f.prefixOrder !== 'any')
       || f.instrument || f.minDuration || f.maxDuration;
@@ -570,6 +577,12 @@ function renderTracks() {
         }</div>`
       : '';
 
+    // 생성 툴 배지 — 클릭하면 생성 당시 제목(Mureka 등에서 검색할 문자열) 복사.
+    // 0006 마이그레이션 전이면 source_tool 이 없으므로 배지 생략.
+    const sourceBadge = t.source_tool
+      ? `<span class="source-badge ${escapeHtml(t.source_tool)}" data-source-title="${escapeHtml(t.source_title || '')}" title="생성 당시 제목: ${escapeHtml(t.source_title || '(없음)')} — 클릭해서 복사">${SOURCE_TOOL_LABELS[t.source_tool] || escapeHtml(t.source_tool)}</span>`
+      : '';
+
     // title_id 가 있으면 ♻ reroll, 없으면 ✨ generate
     const titleBtnIcon = t.title_id ? '♻' : '✨';
     const titleBtnTitle = t.title_id ? '제목 reroll' : '제목 생성';
@@ -589,7 +602,7 @@ function renderTracks() {
           <button class="${playBtnCls}" data-track-id="${t.id}" title="재생/일시정지">▶</button>
           ${prefixBadge}${titleHtml}${vocalIcon}
         </div>
-        <div class="filename">${escapeHtml(t.original_filename || '')}</div>
+        <div class="filename">${sourceBadge}${escapeHtml(t.original_filename || '')}</div>
         ${chipsHtml}
       </td>
       <td class="col-duration">${fmtDuration(t.duration_actual_sec)}</td>
@@ -620,6 +633,15 @@ function renderTracks() {
       renderOrderPanel();
     });
   });
+  $$('.source-badge').forEach((el) =>
+    el.addEventListener('click', async (ev) => {
+      ev.stopPropagation();
+      const text = el.dataset.sourceTitle;
+      if (!text) return toast('저장된 생성 당시 제목이 없습니다', 'info');
+      await copyTextToClipboard(text);
+      toast(`복사됨: ${text}`, 'success', 2000);
+    })
+  );
   $$('.reroll-btn').forEach((btn) =>
     btn.addEventListener('click', () => rerollOrGenerate(parseInt(btn.dataset.id, 10), btn))
   );
@@ -1024,6 +1046,7 @@ async function handleFiles(files) {
   const promptIdRaw = $('#promptSelect').value;
   const promptId = promptIdRaw ? parseInt(promptIdRaw, 10) : null;
   const hasVocals = $('#hasVocals').checked;
+  const sourceTool = $('#sourceToolSelect').value || 'mureka';
 
   progressEl.hidden = false;
   setUploadProgress(0, `${files.length}개 파일 준비 중…`);
@@ -1040,7 +1063,7 @@ async function handleFiles(files) {
       `업로드 중 ${startIdx}–${endIdx} / ${files.length}…`
     );
     try {
-      const result = await uploadChunk(chunk, promptId, hasVocals, (loaded, total) => {
+      const result = await uploadChunk(chunk, promptId, hasVocals, sourceTool, (loaded, total) => {
         const chunkPct = total > 0 ? loaded / total : 0;
         const overall = ((i / files.length) + (chunkPct * chunk.length / files.length)) * 50;
         setUploadProgress(Math.round(overall), `업로드 중 ${startIdx}–${endIdx} / ${files.length}…`);
@@ -1078,7 +1101,7 @@ async function handleFiles(files) {
   }
 }
 
-function uploadChunk(files, promptId, hasVocals, onProgress) {
+function uploadChunk(files, promptId, hasVocals, sourceTool, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/tracks/upload');
@@ -1099,6 +1122,7 @@ function uploadChunk(files, promptId, hasVocals, onProgress) {
     for (const f of files) fd.append('files', f, f.name);
     if (promptId) fd.append('promptId', String(promptId));
     fd.append('hasVocals', hasVocals ? 'true' : 'false');
+    fd.append('sourceTool', sourceTool);
     xhr.send(fd);
   });
 }
