@@ -1878,10 +1878,15 @@ $('#bSeriesNewName').addEventListener('input', updateSeriesPreview);
 // ─── Templates ──────────────────────────────────────────────────────
 async function refreshTemplates() {
   try {
-    const j = await apiGet('/api/templates');
+    // 서버가 최근순(저장·사용 중 늦은 시각)으로 정렬해 준다. 드롭다운엔 이름만 필요 → lite.
+    const j = await apiGet('/api/templates?lite=1');
     builder.templates = j.templates || [];
     const sel = $('#bTemplate');
-    const cur = sel.value;
+    // 맨 위(가장 최근)가 바뀌었으면 = 에디터에서 새로 저장했으면 그걸 선택, 아니면 고르던 것 유지
+    const topId = builder.templates[0] ? String(builder.templates[0].id) : '';
+    const topChanged = builder.templateTopId !== undefined && builder.templateTopId !== topId;
+    builder.templateTopId = topId;
+    const cur = topChanged ? '' : sel.value;
     sel.innerHTML = '';
     if (!builder.templates.length) {
       const o = document.createElement('option');
@@ -1895,10 +1900,9 @@ async function refreshTemplates() {
         o.textContent = `${t.name}${t.is_default ? ' ★ default' : ''}`;
         sel.appendChild(o);
       }
-      // default 자동 선택
-      const def = builder.templates.find((t) => t.is_default);
-      if (cur) sel.value = cur;
-      else if (def) sel.value = String(def.id);
+      // 처음 열 때·새 템플릿이 생겼을 때는 가장 최근 것(맨 위) 자동 선택
+      if (cur && builder.templates.some((t) => String(t.id) === cur)) sel.value = cur;
+      else sel.value = topId;
     }
     updateTemplatePreview();
   } catch (e) {

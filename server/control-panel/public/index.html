@@ -1017,6 +1017,25 @@
     .te-list-item .actions button:hover { color: var(--text); border-color: var(--border-strong); }
     .te-list-item .actions button.danger:hover { color: var(--red); border-color: var(--red); }
 
+    /* 저장 이름칸 — 최근 저장한 이름 드롭다운 */
+    .te-name-wrap { position: relative; }
+    .te-name-wrap input { width: 100%; }
+    .te-name-recent {
+      position: absolute; left: 0; right: 0; top: calc(100% + 3px); z-index: 50;
+      background: var(--bg-card); border: 1px solid var(--border-strong);
+      border-radius: 4px; box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+      padding: 3px; font-size: 12px;
+    }
+    .te-name-recent-head { color: var(--text-muted); font-size: 10px; padding: 3px 6px 4px; }
+    .te-name-recent-item {
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      padding: 6px 8px; border-radius: 3px; cursor: pointer;
+    }
+    .te-name-recent-item:hover, .te-name-recent-item.hl { background: var(--bg-hover); }
+    .te-name-recent-item .nm { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .te-name-recent-item .nx { color: var(--jazz-gold); white-space: nowrap; }
+    .te-name-recent-item .when { color: var(--text-muted); font-size: 10px; margin-left: 6px; }
+
     /* Canvas */
     .te-canvas-wrap {
       background: var(--bg-card);
@@ -1883,7 +1902,10 @@
             <h3>💾 저장</h3>
             <div class="te-prop">
               <label>이름</label>
-              <input type="text" id="teSaveName" placeholder="새 템플릿 이름" />
+              <div class="te-name-wrap">
+                <input type="text" id="teSaveName" placeholder="새 템플릿 이름" autocomplete="off" />
+                <div class="te-name-recent" id="teSaveNameRecent" hidden></div>
+              </div>
             </div>
             <div class="row" style="margin-top:8px;">
               <label class="vocal-check" style="font-size:12px;">

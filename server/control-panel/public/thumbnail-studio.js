@@ -1127,6 +1127,59 @@
     if (safeName) document.getElementById('txtThFilename').value = safeName;
 
     drawThumbnail();
+
+    // 4) 이 프로젝트로 올린 YouTube 영상의 영어 제목 → 상단 작은 글자 레이어
+    applyYoutubeTitle(v);
+  }
+
+  // 업로드 제목이 들어가는 레이어: "[Vol.N]" 이 들어 있는 레이어(지난번 제목) → 없으면 글자가 가장 작은 레이어.
+  //   레이어가 하나도 없으면 상단에 작은 레이어를 새로 만든다. 스타일·위치는 건드리지 않고 글자만 바꾼다.
+  function findYoutubeTitleLayer() {
+    const layers = thumbState.extraTextLayers;
+    const byVol = layers.find((l) => /\[\s*vol\.?\s*\d+\s*\]/i.test(l.text || ''));
+    if (byVol) return byVol;
+    if (!layers.length) return null;
+    return layers.reduce((a, b) => ((b.size || 0) < (a.size || 0) ? b : a));
+  }
+
+  let ytTitleReq = 0;
+  async function applyYoutubeTitle(v) {
+    const status = document.getElementById('thProjectStatus');
+    const req = ++ytTitleReq;
+    const prev = status.textContent;
+    status.textContent = `${prev} · 유튜브 제목 찾는 중...`;
+    try {
+      const r = await fetch(`/api/videos/${encodeURIComponent(v.id)}/youtube-title`);
+      const j = await r.json();
+      if (req !== ytTitleReq) return; // 그새 다른 프로젝트를 골랐으면 버림
+      if (!j.ok) throw new Error(j.error || 'API 오류');
+      if (!j.match) {
+        status.textContent = `${prev} · ⚠ 이 곡 목록으로 올린 유튜브 영상을 못 찾음 (Uploader 에서 메타 적용 후 다시 선택)`;
+        return;
+      }
+      const ytTitle = j.match.title;
+      let layer = findYoutubeTitleLayer();
+      if (layer) {
+        layer.text = ytTitle;
+      } else {
+        layer = {
+          id: Date.now() + Math.random(), text: ytTitle,
+          font: "'Playfair Display', serif", size: 44, color: '#ffffff',
+          alpha: 1.0, x: 0.5, y: 0.08, align: 'center',
+          bold: false, italic: false, underline: false, hollow: false,
+          spacing: 0, strokeW: 0, strokeCol: '#000000',
+          glow: 0, shadowX: 2, shadowY: 2,
+        };
+        thumbState.extraTextLayers.push(layer);
+      }
+      if (layer.id === thumbState.selectedExtraId) editCustomText(layer.id);
+      renderCustomTextList();
+      drawThumbnail();
+      status.textContent = `${prev} · ✅ 유튜브 제목 적용 (곡 ${j.match.matchedTracks}/${j.match.trackCount} 일치)`;
+    } catch (e) {
+      if (req !== ytTitleReq) return;
+      status.textContent = `${prev} · ⚠ 유튜브 제목 불러오기 실패: ${e.message}`;
+    }
   }
 
   // ─── Style preset slots (서버 저장, data/thumbnail-presets/) ──────

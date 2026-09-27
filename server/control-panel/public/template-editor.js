@@ -344,11 +344,22 @@ function isDarkColor(hex) {
 
 // ─── 옛 schema → 새 schema 어댑터 ─────────────────────────────
 function loadConfigToCanvas(cfg) {
-  // 새 형식: components[] 가 있으면 그대로
+  // 새 형식: components[] 가 있으면 그대로 (옛 저장본에 박힌 _audioMotion 찌꺼기는 버림)
   if (Array.isArray(cfg?.components)) {
-    return cfg.components.map((c) => ({ ...c, id: c.id || nextId() }));
+    return cfg.components.map((c) => ({ ...stripRuntimeFields(c), id: c.id || nextId() }));
   }
   // 옛 형식 → 변환
+// 런타임 전용 필드('_' prefix: _audioMotion 인스턴스·_imgObj·_customLoopRaf)를 뺀 저장용 사본.
+//   예전엔 저장 때 _audioMotion 이 통째로 JSON 이 돼 비주얼라이저 하나당 ~240KB 가 DB 에 들어갔다
+//   (템플릿 목록 25MB 의 원인). 저장·로드 양쪽에서 이 함수로 거른다.
+function stripRuntimeFields(c) {
+  const plain = {};
+  for (const k of Object.keys(c)) {
+    if (!k.startsWith('_')) plain[k] = c[k];
+  }
+  return plain;
+}
+
   const result = [];
   if (cfg?.title) {
     result.push({
@@ -1215,11 +1226,7 @@ function duplicateComponent(id) {
     return;
   }
   // 런타임 필드(_audioMotion 등 '_' prefix) 제외하고 깊은 복사.
-  const plain = {};
-  for (const k of Object.keys(src)) {
-    if (!k.startsWith('_')) plain[k] = src[k];
-  }
-  const clone = structuredClone(plain);
+  const clone = structuredClone(stripRuntimeFields(src));
   clone.id = nextId();
   clone.x = Math.round((src.x ?? 0) + 30);
   clone.y = Math.round((src.y ?? 0) + 30);
@@ -2164,7 +2171,7 @@ $('#teSaveBtn')?.addEventListener('click', async () => {
   const isFav = $('#teSaveFav').checked;
   const config_json = {
     canvas: { width: CANVAS_W, height: CANVAS_H },
-    components: te.components.map((c) => ({ ...c })), // 깊은 복사 X (단순 객체)
+    components: te.components.map(stripRuntimeFields),
   };
   try {
     const j = await apiPost('/api/templates', {
@@ -2268,12 +2275,120 @@ function renderTemplateList() {
     const isCur = te.editingTemplate?.id === t.id;
     const star = t.is_favorite ? '★' : '☆';
     const row = document.createElement('div');
+// ─── 저장 이름칸: 최근 저장한 이름 3개 드롭다운 ─────────────────
+//   "template 57" → 누르면 "template 58" 로 채움 (끝 숫자 +1, 자릿수 유지, 이미 있는 이름은 건너뜀).
+//   끝에 숫자가 없는 이름은 그대로 채운다.
+const RECENT_NAME_COUNT = 3;
+
+function recentSavedTemplates() {
+  return [...te.templates]
+    .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0))
+    .slice(0, RECENT_NAME_COUNT);
+}
+
+function nextTemplateName(name) {
+  const m = String(name).match(/^(.*?)(\d+)(\s*)$/);
+  if (!m) return name;
+  const taken = new Set(te.templates.map((t) => t.name.trim().toLowerCase()));
+  let n = parseInt(m[2], 10);
+  let cand;
+  do {
+    n += 1;
+    cand = `${m[1]}${String(n).padStart(m[2].length, '0')}`;
+  } while (taken.has(cand.trim().toLowerCase()) && n < 100000);
+  return cand;
+}
+
+function shortWhen(iso) {
+  const t = Date.parse(iso);
+  if (!t) return '';
+  const d = new Date(t);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+function updateSaveNameHint() {
+  const input = $('#teSaveName');
+  const last = recentSavedTemplates()[0];
+  if (input) input.placeholder = last ? `예: ${nextTemplateName(last.name)}` : '새 템플릿 이름';
+}
+
+const nameDrop = { open: false, hl: -1 };
+
+function openNameDrop() {
+  const box = $('#teSaveNameRecent');
+  const recent = recentSavedTemplates();
+  if (!box || !recent.length) return;
+  box.innerHTML = `<div class="te-name-recent-head">최근 저장한 이름 — 누르면 다음 번호로 채움</div>` +
+    recent.map((t, i) => {
+      const next = nextTemplateName(t.name);
+      return `<div class="te-name-recent-item" data-i="${i}" data-next="${escapeHtml(next)}">
+        <span class="nm">${escapeHtml(t.name)}<span class="when">${shortWhen(t.created_at)}</span></span>
+        <span class="nx">→ ${escapeHtml(next)}</span>
+      </div>`;
+    }).join('');
+  box.hidden = false;
+  nameDrop.open = true;
+  nameDrop.hl = -1;
+}
+
+function closeNameDrop() {
+  const box = $('#teSaveNameRecent');
+  if (box) box.hidden = true;
+  nameDrop.open = false;
+  nameDrop.hl = -1;
+}
+
+function pickNameDrop(item) {
+  const input = $('#teSaveName');
+  input.value = item.dataset.next;
+  closeNameDrop();
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+}
+
+(function bindSaveNameDrop() {
+  const input = $('#teSaveName');
+  const box = $('#teSaveNameRecent');
+  if (!input || !box) return;
+  input.addEventListener('focus', openNameDrop);
+  input.addEventListener('click', () => { if (!nameDrop.open) openNameDrop(); });
+  input.addEventListener('input', closeNameDrop);   // 직접 타이핑하면 방해하지 않게 닫음
+  input.addEventListener('blur', () => setTimeout(closeNameDrop, 120));
+  // mousedown 에서 처리 — blur 보다 먼저 와야 클릭이 먹는다
+  box.addEventListener('mousedown', (e) => {
+    const item = e.target.closest('.te-name-recent-item');
+    if (!item) return;
+    e.preventDefault();
+    pickNameDrop(item);
+  });
+  input.addEventListener('keydown', (e) => {
+    if (!nameDrop.open) {
+      if (e.key === 'ArrowDown') { openNameDrop(); e.preventDefault(); }
+      return;
+    }
+    const items = [...box.querySelectorAll('.te-name-recent-item')];
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const d = e.key === 'ArrowDown' ? 1 : -1;
+      nameDrop.hl = (nameDrop.hl + d + items.length) % items.length;
+      items.forEach((el, i) => el.classList.toggle('hl', i === nameDrop.hl));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (items[nameDrop.hl]) pickNameDrop(items[nameDrop.hl]);
+      else closeNameDrop();
+    } else if (e.key === 'Escape') {
+      closeNameDrop();
+    }
+  });
+})();
+
     row.className = `te-list-item${isCur ? ' active' : ''}`;
     row.innerHTML = `
       <span class="star ${t.is_favorite ? 'fav' : ''}" data-id="${t.id}" title="즐겨찾기 토글">${star}</span>
       <span class="name" data-load="${t.id}" title="${escapeHtml(t.description || t.name)}">${escapeHtml(t.name)}${t.is_default ? ' <span style="color:var(--jazz-gold);font-size:10px;">★default</span>' : ''}</span>
       <span class="actions">
         <button data-load="${t.id}" type="button" title="편집">편집</button>
+    updateSaveNameHint();
         <button data-dup="${t.id}" type="button" title="복제">복제</button>
         <button class="danger" data-del="${t.id}" type="button" title="삭제">✕</button>
       </span>

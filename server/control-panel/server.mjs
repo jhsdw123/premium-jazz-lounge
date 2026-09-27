@@ -1523,6 +1523,17 @@ function bgPathFromAny(value) {
   return s.startsWith('http') ? null : (s || null); // 알 수 없는 풀URL 은 버림
 }
 
+// 컴포넌트의 런타임 전용 필드('_' prefix — 에디터의 _audioMotion 인스턴스 등)는 저장하지 않는다.
+//   이게 섞여 들어가 비주얼라이저 하나당 ~240KB, 템플릿 목록이 25MB 까지 불었던 적이 있다.
+function stripTemplateRuntime(config_json) {
+  if (!config_json || !Array.isArray(config_json.components)) return config_json;
+  return {
+    ...config_json,
+    components: config_json.components.map((c) =>
+      Object.fromEntries(Object.entries(c || {}).filter(([k]) => !k.startsWith('_')))),
+  };
+}
+
 async function signTemplateBg(tpl) {
   if (!tpl) return tpl;
   const v = tpl.background_image_url;
@@ -1537,16 +1548,40 @@ async function signTemplateBg(tpl) {
   return tpl; // null 또는 (마이그레이션 전) 레거시 풀URL → 그대로
 }
 
-app.get('/api/templates', async (_req, res) => {
+// 정렬 = 최근순. recent_at = max(저장 시각, 마지막으로 Builder 에서 쓴 시각).
+//   last_used_at 은 pjl_templates 에 컬럼이 없어 pjl_video_projects 에서 템플릿별 최신 created_at 으로 계산.
+//   updated_at 은 쓰지 않는다 — use_count/즐겨찾기만 바꿔도 트리거로 갱신돼 순서가 흔들린다.
+//   ?lite=1 → config_json 과 배경 서명을 생략 (Builder 드롭다운처럼 이름만 필요한 곳).
+app.get('/api/templates', async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('pjl_templates')
-      .select('id, name, description, is_default, is_favorite, config_json, background_image_url, thumbnail_url, use_count, created_at, updated_at')
-      .order('is_favorite', { ascending: false })
-      .order('use_count', { ascending: false })
-      .order('updated_at', { ascending: false });
-    if (error) throw error;
-    const templates = await Promise.all((data || []).map(signTemplateBg));
+    const lite = req.query.lite === '1';
+    const cols = lite
+      ? 'id, name, description, is_default, is_favorite, use_count, created_at'
+      : 'id, name, description, is_default, is_favorite, config_json, background_image_url, thumbnail_url, use_count, created_at, updated_at';
+    const [tplRes, useRes] = await Promise.all([
+      supabase.from('pjl_templates').select(cols),
+      supabase
+        .from('pjl_video_projects')
+        .select('template_id, created_at')
+        .not('template_id', 'is', null)
+        .order('created_at', { ascending: false })
+        .limit(1000),
+    ]);
+    if (tplRes.error) throw tplRes.error;
+    if (useRes.error) throw useRes.error;
+
+    const lastUsed = new Map();
+    for (const v of useRes.data || []) {
+      if (!lastUsed.has(v.template_id)) lastUsed.set(v.template_id, v.created_at);
+    }
+    const rows = (tplRes.data || []).map((t) => {
+      const last_used_at = lastUsed.get(t.id) || null;
+      const recent_at = [t.created_at, last_used_at].filter(Boolean).sort().pop() || null;
+      return { ...t, last_used_at, recent_at };
+    });
+    rows.sort((a, b) => (Date.parse(b.recent_at) || 0) - (Date.parse(a.recent_at) || 0) || b.id - a.id);
+
+    const templates = lite ? rows : await Promise.all(rows.map(signTemplateBg));
     res.json({ ok: true, templates });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -1598,7 +1633,7 @@ app.post('/api/templates', async (req, res) => {
       .insert({
         name: name.trim(),
         description,
-        config_json,
+        config_json: stripTemplateRuntime(config_json),
         is_default: !!is_default,
         is_favorite: !!is_favorite,
         background_image_url: bgPathFromAny(background_image_url),
@@ -1629,7 +1664,7 @@ app.put('/api/templates/:id', async (req, res) => {
       if (!config_json || typeof config_json !== 'object') {
         return res.status(400).json({ ok: false, error: 'config_json 객체여야 함' });
       }
-      patch.config_json = config_json;
+      patch.config_json = stripTemplateRuntime(config_json);
     }
     if (thumbnail_url !== undefined) patch.thumbnail_url = thumbnail_url;
     if (background_image_url !== undefined) patch.background_image_url = bgPathFromAny(background_image_url);
@@ -2088,6 +2123,72 @@ app.get('/api/videos/recent', async (req, res) => {
     res.json({ ok: true, videos: result });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ─── 영상 프로젝트 → 업로드된 YouTube 영상 제목 (썸네일 Quick Start 용) ─────
+//   프로젝트와 YouTube 영상은 DB 로 이어져 있지 않다. Uploader 가 설명란에 넣는
+//   타임스탬프 곡 목록("03:46 Tropic Serenade")과 프로젝트 곡 제목을 대조해 가장 많이 겹치는 영상을 고른다.
+//   메타를 아직 안 넣은 영상(제목=파일명, 설명 빈칸)은 겹침 0 이라 자연히 빠진다.
+//   YouTube 목록은 60초 캐시 (호출당 쿼터 ~3).
+let ytRecentCache = { at: 0, videos: null };
+async function ytRecentVideosCached() {
+  if (ytRecentCache.videos && Date.now() - ytRecentCache.at < 60_000) return ytRecentCache.videos;
+  const videos = await ytGetMyVideos(50);
+  ytRecentCache = { at: Date.now(), videos };
+  return videos;
+}
+
+const normTrackName = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+app.get('/api/videos/:id/youtube-title', async (req, res) => {
+  if (!ytAuthGate(req, res)) return;
+  try {
+    const { data: proj, error } = await supabase
+      .from('pjl_video_projects')
+      .select('id, track_ids')
+      .eq('id', req.params.id)
+      .maybeSingle();
+    if (error) throw error;
+    if (!proj) return res.status(404).json({ ok: false, error: 'video not found' });
+    const ids = proj.track_ids || [];
+    if (!ids.length) return res.json({ ok: true, match: null });
+
+    const { data: tracks, error: terr } = await supabase
+      .from('pjl_tracks')
+      .select('id, title:pjl_titles(title_en)')
+      .in('id', ids);
+    if (terr) throw terr;
+    const names = [...new Set((tracks || []).map((t) => normTrackName(t.title?.title_en)).filter(Boolean))];
+    if (!names.length) return res.json({ ok: true, match: null });
+
+    let best = null;
+    for (const v of await ytRecentVideosCached()) {
+      const lines = new Set(
+        (v.description || '').split('\n')
+          .map((l) => l.match(/^\s*(?:\d{1,2}:)?\d{1,2}:\d{2}\s+(.+)$/)?.[1])
+          .filter(Boolean)
+          .map(normTrackName),
+      );
+      if (!lines.size) continue;
+      const hit = names.filter((n) => lines.has(n)).length;
+      if (!best || hit > best.hit) best = { v, hit };
+    }
+    // 절반 이상 겹쳐야 같은 영상으로 본다 (곡 재사용이 잦아 한두 곡 겹침은 우연)
+    if (!best || best.hit < Math.max(2, Math.ceil(names.length / 2))) {
+      return res.json({ ok: true, match: null, trackCount: names.length });
+    }
+    const v = best.v;
+    const title = v.localizations?.en?.title || v.title;
+    res.json({
+      ok: true,
+      match: {
+        videoId: v.id, title, privacyStatus: v.privacyStatus, publishAt: v.publishAt,
+        matchedTracks: best.hit, trackCount: names.length,
+      },
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 
