@@ -22,6 +22,7 @@ import {
 import {
   computeFileHash, parsePrefixOrder, parseSourceTitle,
   SOURCE_TOOLS, DEFAULT_SOURCE_TOOL,
+  GENRES, GENRE_KEYS, DEFAULT_GENRE,
 } from '../../lib/track-utils.mjs';
 import { analyzeTrack } from '../../lib/track-meta.mjs';
 import { generateTitleCandidates } from '../../lib/llm.mjs';
@@ -188,11 +189,20 @@ function uploadMiddleware(req, res, next) {
   });
 }
 
+// 곡 장르 목록 (업로드 화면 드롭다운용)
+app.get('/api/genres', (_req, res) => res.json({ ok: true, genres: GENRES, defaultGenre: DEFAULT_GENRE }));
+
 app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
   try {
     const files = req.files || [];
     if (!files.length) {
       return res.status(400).json({ ok: false, error: 'files 필드에 파일이 없습니다' });
+    }
+
+    // 장르 — 필수 (2026-10-01). 모르는 값·빈 값은 거절 (조용히 기본값으로 바꾸지 않는다)
+    const genre = String(req.body.genre || '').trim();
+    if (!GENRE_KEYS.includes(genre)) {
+      return res.status(400).json({ ok: false, error: `장르를 골라 주세요 (${GENRE_KEYS.join(' / ')} 중 하나, 받은 값: ${genre || '없음'})` });
     }
 
     let promptId = parseIntOrNull(req.body.promptId);
@@ -298,11 +308,15 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
             instruments: inferredInstruments,
             source_tool: sourceTool,
             source_title: sourceTitle,
+            genre,
           })
           .select('id')
           .single();
         if (insErr) {
           await deleteTrack(storagePath).catch(() => {});
+          if (/genre/.test(insErr.message || '')) {
+            throw new Error('DB 에 genre 칸이 없습니다 — tools/migrations/0007_track_genre.sql 을 Supabase SQL Editor 에서 먼저 실행하세요');
+          }
           if (/source_tool|source_title/.test(insErr.message || '')) {
             throw new Error('DB 에 source_tool/source_title 컬럼이 없습니다 — tools/migrations/0006_track_source.sql 을 Supabase SQL Editor 에서 먼저 실행하세요');
           }

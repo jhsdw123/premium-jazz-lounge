@@ -1047,6 +1047,8 @@ async function handleFiles(files) {
   const promptId = promptIdRaw ? parseInt(promptIdRaw, 10) : null;
   const hasVocals = $('#hasVocals').checked;
   const sourceTool = $('#sourceToolSelect').value || 'mureka';
+  const genre = $('#genreSelect')?.value || '';
+  if (!genre) { toast('장르를 먼저 골라 주세요 (필수)', 'error'); return; }
 
   progressEl.hidden = false;
   setUploadProgress(0, `${files.length}개 파일 준비 중…`);
@@ -1063,7 +1065,7 @@ async function handleFiles(files) {
       `업로드 중 ${startIdx}–${endIdx} / ${files.length}…`
     );
     try {
-      const result = await uploadChunk(chunk, promptId, hasVocals, sourceTool, (loaded, total) => {
+      const result = await uploadChunk(chunk, promptId, hasVocals, sourceTool, genre, (loaded, total) => {
         const chunkPct = total > 0 ? loaded / total : 0;
         const overall = ((i / files.length) + (chunkPct * chunk.length / files.length)) * 50;
         setUploadProgress(Math.round(overall), `업로드 중 ${startIdx}–${endIdx} / ${files.length}…`);
@@ -1101,7 +1103,7 @@ async function handleFiles(files) {
   }
 }
 
-function uploadChunk(files, promptId, hasVocals, sourceTool, onProgress) {
+function uploadChunk(files, promptId, hasVocals, sourceTool, genre, onProgress) {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/tracks/upload');
@@ -1123,6 +1125,7 @@ function uploadChunk(files, promptId, hasVocals, sourceTool, onProgress) {
     if (promptId) fd.append('promptId', String(promptId));
     fd.append('hasVocals', hasVocals ? 'true' : 'false');
     fd.append('sourceTool', sourceTool);
+    fd.append('genre', genre);
     xhr.send(fd);
   });
 }
@@ -2289,9 +2292,25 @@ document.addEventListener('click', (ev) => {
 applyGuideState();
 
 // ─── Init ───────────────────────────────────────────────────────────
+// ─── 곡 장르 (2026-10-01) — 업로드 칸 맨 앞에 필수 선택, 기본 스윙 재즈 ──────────
+//   목록은 서버 /api/genres (lib/track-utils.mjs GENRES). index.html 대신 여기서 칸을 만든다.
+async function setupGenreSelect() {
+  const controls = document.querySelector('#dropzone .dropzone-controls');
+  if (!controls || $('#genreSelect')) return;
+  let genres = [], def = 'swing';
+  try { const j = await apiGet('/api/genres'); genres = j.genres || []; def = j.defaultGenre || def; }
+  catch (e) { console.warn('[genre] 목록 실패:', e.message); }
+  const wrap = document.createElement('span');
+  wrap.innerHTML = `<label for="genreSelect">장르 <b style="color:#ff8a7a">*</b></label>`
+    + `<select id="genreSelect" title="필수 — 곡을 올리기 전에 꼭 고르세요 (기본 스윙 재즈)" style="font-weight:600;">`
+    + genres.map((g) => `<option value="${g.key}">${escapeHtml(g.name)}</option>`).join('') + '</select>';
+  controls.prepend(wrap);
+  $('#genreSelect').value = def;
+}
+
 async function init() {
   // 1) prompts + instruments 먼저 로드 (필터 dropdown 옵션 채우기 위해)
-  await Promise.all([refreshStats(), refreshPrompts(), refreshInstruments()]);
+  await Promise.all([refreshStats(), refreshPrompts(), refreshInstruments(), setupGenreSelect()]);
   // 2) URL → form 적용
   applyFiltersToForm(readFiltersFromUrl());
   // 3) 트랙 로드
