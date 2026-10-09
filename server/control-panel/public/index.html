@@ -1177,10 +1177,25 @@
       width: 90px; height: 4px; accent-color: var(--jazz-gold);
     }
 
-    .te-comp-text { display: flex; align-items: center; justify-content: center; }
-    .te-comp-text .text-render {
-      width: 100%; text-align: inherit;
+    /* ── 미리보기 = 녹화 (2026-09-20) ─────────────────────────────────
+       컴포넌트 내용은 .te-world 안에 실제 크기(1920×1080 기준 px)로 만들고 통째로 scale 한다.
+       배율은 template-editor.js 의 applyComponentTransform 이 넣는다. 글자(text / nowplaying)는
+       Studio 와 같은 canvas 코드(text-renderer.js)로 그린다 — CSS 로 흉내 내지 않는다. */
+    .te-world {
+      position: absolute; left: 0; top: 0;
+      transform-origin: 0 0;
       pointer-events: none;
+    }
+    .te-world-visualizer { display: flex; align-items: flex-end; justify-content: center; }
+    .te-world-progress { display: flex; align-items: center; }
+    /* 텍스트 배경 패널의 backdrop blur — canvas 는 밑의 배경을 떠올 수 없어 이것만 CSS.
+       (색·테두리·페더·그림자는 canvas 가 그린다. 가장자리 페더가 backdrop 엔 안 걸리는 점만 다르다.) */
+    .te-text-panel-backdrop {
+      position: absolute; inset: 0;
+      pointer-events: none;
+      border-radius: var(--tp-radius, 0px);
+      backdrop-filter: blur(var(--tp-backdrop, 0px));
+      -webkit-backdrop-filter: blur(var(--tp-backdrop, 0px));
     }
     .te-comp-image img {
       width: 100%; height: 100%;
@@ -1882,6 +1897,11 @@
               <button class="te-btn" id="teBgClearBtn" type="button" title="배경 제거">✕</button>
             </div>
             <div class="te-bg-status" id="teBgStatus">(배경 없음)</div>
+            <div class="row" style="margin-top:8px;">
+              <button class="te-btn" id="teBgVideoPickBtn" type="button">🎞 루프 영상 고르기</button>
+              <button class="te-btn" id="teBgVideoClearBtn" type="button" title="배경 영상 제거">✕</button>
+            </div>
+            <div class="te-bg-status" id="teBgVideoStatus">(영상 없음)</div>
             <input type="file" id="teBgFile" hidden accept="video/mp4,video/*,image/*" />
           </div>
 
@@ -2019,6 +2039,21 @@
                 <option value="30">30 fps — 표준 (인코딩 빠름, 8 Mbps)</option>
                 <option value="60">60 fps — 부드러움 (12 Mbps, 파일 ~1.5배)</option>
               </select>
+            </div>
+            <div style="margin-bottom:10px;">
+              <label for="studioEncoderSelect" style="display:block;font-size:12px;color:var(--text-muted);margin-bottom:4px;">Encoder</label>
+              <select id="studioEncoderSelect" style="width:100%;padding:8px;background:#2a2a2a;color:#fff;border:1px solid #444;border-radius:4px;font-size:12px;">
+                <option value="software">소프트웨어 (CPU) — 권장 · 장시간 안정</option>
+                <option value="hardware-fallback">하드웨어 (GPU) + 자동 폴백 — 죽으면 CPU 로 이어감</option>
+                <option value="hardware">하드웨어 (GPU/NVENC) — 장시간 hang 이력 · 폴백 없음</option>
+                <option value="auto">자동 (브라우저 판단)</option>
+              </select>
+              <div id="studioEncoderHint" style="font-size:11px;color:var(--text-dim);margin-top:4px;line-height:1.5;">
+                2026-08-24: NVENC hang → GPU 워치독이 GPU 프로세스를 kill, 11분만에 정지. CPU 인코딩은 그 경로를 안 탄다.<br>
+                <b>렌더 속도는 인코더와 무관하다</b> — 실시간 캡처라 30분 영상은 어느 쪽이든 30분. GPU 의 이점은 CPU 여유뿐.<br>
+                <b>자동 폴백</b>: GPU 로 시작해 죽으면 그 자리에서 CPU 로 갈아타 같은 파일에 이어서 렌더한다.
+                프로파일 호환을 위해 이 모드는 GPU 도 baseline 으로 인코딩한다 (이 콘텐츠에선 화질 차이 없음).
+              </div>
             </div>
             <button class="te-btn gold" id="studioRecordBtn" type="button" style="width:100%;height:42px;font-size:13px;">🎬 녹화 시작</button>
             <button class="te-btn" id="studioStopRecBtn" type="button" hidden style="width:100%;height:42px;background:#522;color:#fff;font-size:13px;">⏹ 녹화 중지 + 저장</button>

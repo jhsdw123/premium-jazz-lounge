@@ -1,13 +1,14 @@
 // Phase 4-D-3-A: NowPlaying 애니메이션 모듈.
 //
 // 핵심 설계: 애니메이션을 "시간 → state" 순수 함수로 정의.
-//   - DOM 드라이버 (Editor 미리보기 / Studio live preview): RAF 마다 state 를 inline style 로 적용
-//   - Canvas 드라이버 (Studio 녹화 시 mp4 인코딩): 매 frame state 를 ctx 에 적용
-//
-// 두 path 가 같은 state 를 공유 → 미리보기 = 녹화 결과 (보장).
+//   - Canvas 드라이버 (drawStateOnCanvas): Editor 미리보기 · Studio 미리보기 · mp4 녹화 **전부**.
+//   - DOM 드라이버 (applyStateToElement): 더 이상 안 쓴다 — DOM 과 canvas 는 자간·세로 중앙이
+//     달라 미리보기 ≠ 녹화의 원인이었다. 하위호환용으로만 남겨 둠.
 //
 // 5 phase: idle → 'in' (애니메이션) → 'hold' → 'out' (페이드아웃) → idle
 // 곡 전환 시 (out → 'in' new text) 자동 트리거.
+
+import { applyTextTransform, applyLetterSpacing } from './text-renderer.js';
 
 // ─── easing ──────────────────────────────────────────────────────
 const easeOutQuart = (p) => 1 - Math.pow(1 - p, 4);
@@ -218,6 +219,7 @@ export function drawStateOnCanvas(ctx, state, comp) {
   fontSpec += comp.bold ? '700 ' : '400 ';
   fontSpec += `${comp.fontSize || 48}px ${comp.fontFamily || 'system-ui, sans-serif'}`;
   ctx.font = fontSpec;
+  applyLetterSpacing(ctx, comp);   // 예전엔 canvas 에서 자간이 무시돼 에디터(DOM)와 폭이 달랐다
   ctx.fillStyle = comp.color || '#FFFFFF';
   ctx.textBaseline = 'middle';
 
@@ -241,12 +243,7 @@ export function drawStateOnCanvas(ctx, state, comp) {
   else if (align === 'right') drawX = comp.x + comp.width;
 
   // textTransform
-  let displayText = state.text || '';
-  if (comp.textTransform === 'uppercase') displayText = displayText.toUpperCase();
-  else if (comp.textTransform === 'lowercase') displayText = displayText.toLowerCase();
-  else if (comp.textTransform === 'capitalize') {
-    displayText = displayText.replace(/\b\w/g, (m) => m.toUpperCase());
-  }
+  let displayText = applyTextTransform(state.text || '', comp.textTransform || 'none');
 
   if (state.cursor) displayText += '▎';
 

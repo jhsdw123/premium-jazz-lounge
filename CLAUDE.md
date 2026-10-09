@@ -116,6 +116,9 @@ node tools/verify-vocals.mjs         # 플래그 구간을 [스템+원곡] 으�
 6. **`file_hash` 중복 검사는 항상 `is_active=true` 조건과 같이.** 삭제된 (soft-delete) 트랙과 충돌 방지.
 7. **Supabase nested embed (`select: '*, title:pjl_titles(*)'`) 와 RPC 동시 호출 금지.** 둘 중 하나만. 같이 쓰면 silently 빈 결과 반환됨 → 2-step query 로.
 8. **MIME `application/octet-stream` fallback 처리.** Windows curl 이 audio 파일에 octet-stream 을 줌 → `fileFilter` 에서 확장자로 fallback (`AUDIO_EXTS` 리스트, `server.mjs:115`).
+9. **미리보기 = 녹화: 화면에 그리는 코드는 컴포넌트당 하나.** Template Editor 와 Studio(=mp4) 는 **같은 canvas 렌더러**를 쓴다 — `text-renderer.js`(text) · `now-playing-animations.js`(drawStateOnCanvas) · `playlist-renderer.js` · `clock-renderer.js` · `visualizer-styles.js` · `text-panel.js`. 에디터에서 CSS/DOM 으로 "비슷하게" 흉내 내지 말 것 (2026-09-20 에 자간·줄바꿈·글로우·NowPlaying 크기가 어긋났던 원인). 에디터 컴포넌트 내용은 `.te-world` 안에 **1920×1080 기준 실제 px** 로 만들고 통째로 `scale()` — px 값에 배율을 손으로 곱하지 않는다. custom 비주얼라이저 목록은 `isCustomStyle` 한 곳. 새 컴포넌트/속성을 넣으면 에디터·Studio 양쪽이 같은 함수로 그리는지 확인.
+
+10. **배경 루프 영상은 R2 에 안 올린다 — 로컬 폴더 `C:\Users\User\Desktop\PJLLoopvideo`.** (UHD 300MB 를 올리면 15분.) 템플릿엔 `config_json.backgroundVideo = { key }` 만 저장. 짝은 파일 이름으로 묶는다: `PJL-Loop-007.mp4`(원본, ClipLoop Studio) + `PJL-Loop-007_….mp4`(Topaz 업스케일본) → 업스케일본을 쓴다. 고르면 `lib/loop-videos.mjs` 가 1080p·프레임마다 키프레임인 재생용 사본을 `.cache` 에 굽고, 에디터·Studio 는 `loop-video.js`(WebCodecs) 하나로 튼다 — `<video loop>` 금지(이음새에서 멈칫). 영상 배경으로 녹화할 땐 캡처 루프가 프레임마다 직접 그린다(`studio._captureDriven`) — 배경 그림 템플릿은 예전 경로 그대로.
 
 ---
 

@@ -33,6 +33,7 @@ import {
 import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
+import { LOOP_DIR, listLoops, loopThumbPath, prepareLoop, proxyFilePath } from '../../lib/loop-videos.mjs';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { google } from 'googleapis';
@@ -352,16 +353,32 @@ app.post('/api/tracks/upload', uploadMiddleware, async (req, res) => {
   }
 });
 
+// 곡 장르 바꾸기 (Pool 곡 줄의 장르 칸)
+app.post('/api/tracks/:id/genre', async (req, res) => {
+  try {
+    const id = parseIntOrNull(req.params.id);
+    const genre = String(req.body?.genre || '').trim();
+    if (!id) return res.status(400).json({ ok: false, error: 'id 가 없습니다' });
+    if (!GENRE_KEYS.includes(genre)) return res.status(400).json({ ok: false, error: `모르는 장르: ${genre}` });
+    const { error } = await supabase.from('pjl_tracks').update({ genre }).eq('id', id);
+    if (error) throw error;
+    res.json({ ok: true, id, genre });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 app.get('/api/tracks', async (req, res) => {
   try {
     const {
-      ids, search, promptId, hasVocals, instrument, sourceTool,
+      ids, search, promptId, hasVocals, instrument, sourceTool, genre,
       usedFilter = 'all', prefixOrder = 'any',
       minDuration, maxDuration, fromDate, toDate,
       limit = 100, orderBy = 'newest',
     } = req.query;
 
-    const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
+    // 상한 1000 — Builder '곡 자동 선택' 이 한 장르를 통째로 읽는다 (스윙만 500곡이 넘음)
+    const lim = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 1000);
 
     let q = supabase
       .from('pjl_tracks')
@@ -429,6 +446,7 @@ app.get('/api/tracks', async (req, res) => {
     if (hasVocals === 'true') q = q.eq('has_vocals', true);
     else if (hasVocals === 'false') q = q.eq('has_vocals', false);
     if (SOURCE_TOOLS.includes(sourceTool)) q = q.eq('source_tool', sourceTool);
+    if (GENRE_KEYS.includes(genre)) q = q.eq('genre', genre);
     if (usedFilter === 'unused') q = q.eq('used_count', 0);
     else if (usedFilter === 'used') q = q.gt('used_count', 0);
     if (prefixOrder === 'with-prefix') q = q.not('prefix_order', 'is', null);
@@ -1818,6 +1836,38 @@ app.post('/api/templates/:id/favorite', async (req, res) => {
 //   multipart/form-data, field: "file" (mp4 또는 image/*)
 //   mp4 면 ffmpeg 로 첫 프레임 PNG 추출, 이미지면 그대로.
 //   Storage 의 template-bg/ 경로에 업로드 후 signed URL 반환.
+
+// ─── 배경 루프 영상 (로컬 폴더 PJLLoopvideo — R2 에 안 올린다) ────────────
+//   템플릿에는 config_json.backgroundVideo = { key } 만 저장하고, 파일은 고를 때마다 폴더에서 찾는다.
+app.get('/api/loops', async (_req, res) => {
+  try {
+    res.json({ ok: true, dir: LOOP_DIR, loops: await listLoops() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/loops/thumb', async (req, res) => {
+  try {
+    res.sendFile(await loopThumbPath(String(req.query.key || '')), { dotfiles: 'allow' });
+  } catch (e) {
+    res.status(404).json({ ok: false, error: e.message });
+  }
+});
+
+app.post('/api/loops/prepare', async (req, res) => {
+  try {
+    res.json({ ok: true, loop: await prepareLoop(String(req.body?.key || '')) });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+app.get('/api/loops/proxy/:file', (req, res) => {
+  const full = proxyFilePath(req.params.file);
+  if (!full || !fs.existsSync(full)) return res.status(404).json({ ok: false, error: 'not found' });
+  res.sendFile(full, { dotfiles: 'allow' });
+});
 
 const bgUpload = multer({
   storage: multer.memoryStorage(),

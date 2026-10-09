@@ -394,6 +394,7 @@ function readFiltersFromUrl() {
     promptId: p.get('prompt') || '',
     hasVocals: p.get('vocals') || '',
     sourceTool: p.get('source') || '',
+    genre: p.has('genre') ? (p.get('genre') === 'all' ? '' : p.get('genre')) : savedPoolGenre(),
     usedFilter: p.get('used') || 'all',
     prefixOrder: p.get('prefix') || 'any',
     instrument: p.get('instrument') || '',
@@ -409,6 +410,8 @@ function writeFiltersToUrl(f) {
   if (f.promptId) p.set('prompt', f.promptId);
   if (f.hasVocals) p.set('vocals', f.hasVocals);
   if (f.sourceTool) p.set('source', f.sourceTool);
+  if (f.genre !== POOL_GENRE_DEFAULT) p.set('genre', f.genre || 'all');
+  localStorage.setItem(POOL_GENRE_LS_KEY, f.genre || 'all');
   if (f.usedFilter && f.usedFilter !== 'all') p.set('used', f.usedFilter);
   if (f.prefixOrder && f.prefixOrder !== 'any') p.set('prefix', f.prefixOrder);
   if (f.instrument) p.set('instrument', f.instrument);
@@ -424,6 +427,7 @@ function applyFiltersToForm(f) {
   $('#filterPrompt').value = f.promptId;
   $('#filterVocals').value = f.hasVocals;
   $('#filterSource').value = f.sourceTool || '';
+  if ($('#filterGenre')) $('#filterGenre').value = f.genre || '';
   $('#filterUsed').value = f.usedFilter || 'all';
   $('#filterPrefix').value = f.prefixOrder || 'any';
   $('#filterInstrument').value = f.instrument || '';
@@ -438,6 +442,7 @@ function readFiltersFromForm() {
     promptId: $('#filterPrompt').value,
     hasVocals: $('#filterVocals').value,
     sourceTool: $('#filterSource').value,
+    genre: $('#filterGenre')?.value || '',
     usedFilter: $('#filterUsed').value,
     prefixOrder: $('#filterPrefix').value,
     instrument: $('#filterInstrument').value,
@@ -449,7 +454,7 @@ function readFiltersFromForm() {
 
 function clearFilters() {
   applyFiltersToForm({
-    search: '', promptId: '', hasVocals: '', sourceTool: '',
+    search: '', promptId: '', hasVocals: '', sourceTool: '', genre: POOL_GENRE_DEFAULT,
     usedFilter: 'all', prefixOrder: 'any', instrument: '',
     minDuration: '', maxDuration: '', orderBy: 'recommend',
   });
@@ -497,6 +502,7 @@ async function refreshTracks() {
   if (f.promptId) p.set('promptId', f.promptId);
   if (f.hasVocals) p.set('hasVocals', f.hasVocals);
   if (f.sourceTool) p.set('sourceTool', f.sourceTool);
+  if (f.genre) p.set('genre', f.genre);
   if (f.usedFilter) p.set('usedFilter', f.usedFilter);
   if (f.prefixOrder) p.set('prefixOrder', f.prefixOrder);
   if (f.instrument) p.set('instrument', f.instrument);
@@ -531,7 +537,7 @@ function renderTracks() {
 
   if (!state.tracks.length) {
     const f = readFiltersFromForm();
-    const hasFilter = f.search || f.promptId || f.hasVocals || f.sourceTool
+    const hasFilter = f.search || f.promptId || f.hasVocals || f.sourceTool || f.genre
       || (f.usedFilter && f.usedFilter !== 'all')
       || (f.prefixOrder && f.prefixOrder !== 'any')
       || f.instrument || f.minDuration || f.maxDuration;
@@ -602,7 +608,7 @@ function renderTracks() {
           <button class="${playBtnCls}" data-track-id="${t.id}" title="재생/일시정지">▶</button>
           ${prefixBadge}${titleHtml}${vocalIcon}
         </div>
-        <div class="filename">${sourceBadge}${escapeHtml(t.original_filename || '')}</div>
+        <div class="filename">${genreSelectHtml(t)}${sourceBadge}${escapeHtml(t.original_filename || '')}</div>
         ${chipsHtml}
       </td>
       <td class="col-duration">${fmtDuration(t.duration_actual_sec)}</td>
@@ -631,6 +637,22 @@ function renderTracks() {
       cb.closest('tr').classList.toggle('selected', cb.checked);
       updateBulkBar();
       renderOrderPanel();
+    });
+  });
+  $$('.genre-sel').forEach((sel) => {
+    sel.addEventListener('click', (ev) => ev.stopPropagation());
+    sel.addEventListener('change', async () => {
+      const id = parseInt(sel.dataset.id, 10), genre = sel.value;
+      const t = state.tracks.find((x) => x.id === id);
+      try {
+        await apiPost(`/api/tracks/${id}/genre`, { genre });
+        if (t) t.genre = genre;
+        sel.className = `genre-sel g-${genre}`;
+        toast(`장르: ${genreName(genre)}`, 'success', 1500);
+      } catch (e) {
+        if (t) sel.value = t.genre;
+        toast(`장르 변경 실패: ${e.message}`, 'error');
+      }
     });
   });
   $$('.source-badge').forEach((el) =>
@@ -1622,6 +1644,9 @@ function renderBuilderTracks() {
       : '';
     const warn = warns.get(idx);
     if (warn) row.classList.add('diversity-warn');
+    const isSwap = builderSwap.marked.has(t.id);
+    if (isSwap) row.classList.add('swap-marked');
+    if (builderSwap.fresh.has(t.id)) row.classList.add('swap-fresh');
 
     const warnIcon = warn
       ? `<span class="bdiversity-warn" title="${escapeHtml(warn.keyword)} ${warn.runLength}연속 — 셔플 권장">⚠</span>`
@@ -1638,6 +1663,7 @@ function renderBuilderTracks() {
         ${warnIcon}
       </span>
       <span class="bdur">${fmtMinSec(dur)}</span>
+      <button class="bswap${isSwap ? ' on' : ''}" data-id="${t.id}" title="${isSwap ? '표시 풀기' : '마음에 안 드는 곡으로 표시 — 위 [표시한 곡만 다시 뽑기] 로 이 자리만 다른 곡으로 바꿉니다'}">🎲</button>
       <button class="bremove" data-id="${t.id}" title="제외">×</button>
     `;
     container.appendChild(row);
@@ -1650,6 +1676,16 @@ function renderBuilderTracks() {
   $('#bSumNatural').textContent = fmtNatural(totalDur);
 
   // 핸들러
+  container.querySelectorAll('.bswap').forEach((b) =>
+    b.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const id = parseInt(b.dataset.id, 10);
+      if (builderSwap.marked.has(id)) builderSwap.marked.delete(id); else builderSwap.marked.add(id);
+      builderSwap.fresh.clear();
+      renderBuilderTracks();
+    })
+  );
+  updateSwapBar();
   container.querySelectorAll('.bremove').forEach((b) =>
     b.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -2294,18 +2330,217 @@ applyGuideState();
 // ─── Init ───────────────────────────────────────────────────────────
 // ─── 곡 장르 (2026-10-01) — 업로드 칸 맨 앞에 필수 선택, 기본 스윙 재즈 ──────────
 //   목록은 서버 /api/genres (lib/track-utils.mjs GENRES). index.html 대신 여기서 칸을 만든다.
+let GENRES = [];
+const POOL_GENRE_DEFAULT = 'swing';   // 이 패널은 PJL(스윙) 용 — 누아르(PNL) 곡과 섞이지 않게 처음부터 걸어 둔다
+const POOL_GENRE_LS_KEY = 'pjl.pool.genre';
+const genreName = (k) => GENRES.find((g) => g.key === k)?.name || k || '—';
+const genreOptions = () => GENRES.map((g) => `<option value="${g.key}">${escapeHtml(g.name)}</option>`).join('');
+function savedPoolGenre() {
+  const v = localStorage.getItem(POOL_GENRE_LS_KEY);
+  if (v === 'all') return '';
+  return GENRES.some((g) => g.key === v) ? v : POOL_GENRE_DEFAULT;
+}
+function genreSelectHtml(t) {
+  if (t.genre === undefined || !GENRES.length) return '';
+  return `<select class="genre-sel g-${escapeHtml(t.genre)}" data-id="${t.id}" title="장르 — 바꾸면 바로 저장">`
+    + GENRES.map((g) => `<option value="${g.key}"${g.key === t.genre ? ' selected' : ''}>${escapeHtml(g.name)}</option>`).join('')
+    + '</select>';
+}
 async function setupGenreSelect() {
   const controls = document.querySelector('#dropzone .dropzone-controls');
   if (!controls || $('#genreSelect')) return;
-  let genres = [], def = 'swing';
-  try { const j = await apiGet('/api/genres'); genres = j.genres || []; def = j.defaultGenre || def; }
+  let def = 'swing';
+  try { const j = await apiGet('/api/genres'); GENRES = j.genres || []; def = j.defaultGenre || def; }
   catch (e) { console.warn('[genre] 목록 실패:', e.message); }
   const wrap = document.createElement('span');
   wrap.innerHTML = `<label for="genreSelect">장르 <b style="color:#ff8a7a">*</b></label>`
     + `<select id="genreSelect" title="필수 — 곡을 올리기 전에 꼭 고르세요 (기본 스윙 재즈)" style="font-weight:600;">`
-    + genres.map((g) => `<option value="${g.key}">${escapeHtml(g.name)}</option>`).join('') + '</select>';
+    + genreOptions() + '</select>';
   controls.prepend(wrap);
   $('#genreSelect').value = def;
+
+  const css = document.createElement('style');
+  css.textContent = `
+    .genre-sel { width: auto; max-width: 120px; font-size: 11px; padding: 1px 3px; margin-right: 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text); }
+    .genre-sel.g-swing { color: #f0c36a; } .genre-sel.g-noir { color: #c9a45a; } .genre-sel.g-calm { color: #9fc3ff; } .genre-sel.g-bossa { color: #7fd4a0; }
+    .genre-sel.g-ballad { color: #ff9fbf; } .genre-sel.g-blues { color: #7fa8ff; } .genre-sel.g-bebop { color: #ffb37a; } .genre-sel.g-lounge { color: #c9a0ff; }
+    #filterGenre { border-color: var(--jazz-gold-dim, #8a7433); font-weight: 600; }
+    .btrack { grid-template-columns: 28px 24px 22px 28px 1fr 56px 28px 24px; }
+    .btrack .bswap { background: transparent; border: 1px solid transparent; border-radius: 4px; cursor: pointer; font-size: 13px; padding: 1px 0; opacity: 0.35; filter: grayscale(1); }
+    .btrack .bswap:hover { opacity: 0.9; border-color: var(--border-strong); }
+    .btrack .bswap.on { opacity: 1; filter: none; border-color: #ff8a7a; background: rgba(255, 110, 90, 0.18); }
+    .btrack.swap-marked { background: rgba(255, 110, 90, 0.10); border-color: rgba(255, 110, 90, 0.55); }
+    .btrack.swap-marked .btitle-text { text-decoration: line-through; color: var(--text-dim); }
+    .btrack.swap-fresh { background: rgba(110, 220, 150, 0.10); border-color: rgba(110, 220, 150, 0.55); }`;
+  document.head.appendChild(css);
+
+  // Pool 필터 바 — 장르 (생성 툴 앞). 바꾸면 바로 적용.
+  const srcGroup = $('#filterSource')?.closest('.filter-group');
+  if (srcGroup) {
+    const g = document.createElement('span');
+    g.className = 'filter-group';
+    g.innerHTML = `<label>장르</label><select id="filterGenre" title="기본 = 스윙 재즈. 누아르(PNL) 곡과 섞이지 않게 걸려 있습니다"><option value="">전체 (섞임)</option>${genreOptions()}</select>`;
+    srcGroup.before(g);
+    $('#filterGenre').addEventListener('change', () => applyFilters());
+  }
+  setupAutoPick();
+}
+
+// ─── 곡 자동 선택 (2026-10-04, PNL 3D Studio 에서 옮김) ───────────────
+//   장르 안에서 '안 쓴 곡 : 쓴 곡' 비율(슬라이더)대로 무작위로 뽑아 목표 길이를 채운다. 순서도 섞는다.
+const AUTO_LS_KEY = 'pjl.autoPick';
+const trackDur = (t) => Number(t.duration_actual_sec) || Number(t.duration_raw_sec) || 0;
+function shuffled(arr) { const a = [...arr]; for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+function setupAutoPick() {
+  const tab = $('#tab-builder');
+  if (!tab || $('#bAutoCard')) return;
+  const inp = 'background:var(--bg-input); color:var(--text); border:1px solid var(--border); border-radius:4px; padding:6px 8px; font-size:13px;';
+  const card = document.createElement('div');
+  card.className = 'builder-card';
+  card.id = 'bAutoCard';
+  card.style.marginBottom = '12px';
+  card.innerHTML = `
+    <h3>🎲 곡 자동 선택 <span style="font-size:11px;font-weight:normal;color:var(--text-dim)">누를 때마다 아래 곡 목록을 새로 뽑습니다 (뽑힌 뒤 빼거나 순서를 바꿔도 됩니다)</span></h3>
+    <div class="row" style="gap:16px;align-items:center;flex-wrap:wrap;">
+      <label style="font-size:12px;">길이 <input type="number" id="bAutoMin" value="30" min="5" max="180" step="5" style="width:64px; ${inp}" /> 분</label>
+      <label style="font-size:12px;">장르 <select id="bAutoGenre" style="${inp}"><option value="">전체 장르 (섞임)</option>${genreOptions()}</select></label>
+      <label style="font-size:12px;flex:1;min-width:300px;display:flex;gap:10px;align-items:center;">안 쓴 곡 비율
+        <input type="range" id="bAutoUnused" min="0" max="100" step="5" value="70" style="flex:1;" />
+        <span id="bAutoRatio" style="color:var(--jazz-gold);min-width:150px;font-variant-numeric:tabular-nums;"></span>
+      </label>
+      <button class="filter-btn primary" id="bAutoBtn" type="button" style="height:38px;padding:0 18px;font-size:13px;">🎲 자동 선택</button>
+    </div>
+    <div class="preview-line" id="bAutoNote"></div>
+    <div class="row" id="bSwapBar" style="gap:12px;align-items:center;flex-wrap:wrap;margin-top:10px;padding-top:10px;border-top:1px solid var(--border);" hidden>
+      <button class="filter-btn" id="bSwapBtn" type="button" style="height:34px;padding:0 14px;font-size:13px;" disabled>🔁 표시한 곡만 다시 뽑기</button>
+      <button class="filter-btn" id="bSwapClearBtn" type="button" style="height:34px;padding:0 12px;font-size:12px;" hidden>표시 모두 풀기</button>
+      <span id="bSwapNote" style="font-size:12px;color:var(--text-dim);flex:1;min-width:260px;"></span>
+    </div>`;
+  tab.prepend(card);
+  $('#bSwapBtn').addEventListener('click', swapMarkedTracks);
+  $('#bSwapClearBtn').addEventListener('click', () => { builderSwap.marked.clear(); renderBuilderTracks(); });
+  let pref = {};
+  try { pref = JSON.parse(localStorage.getItem(AUTO_LS_KEY) || '{}') || {}; } catch {}
+  const want = pref.genre ?? POOL_GENRE_DEFAULT;
+  $('#bAutoGenre').value = GENRES.some((g) => g.key === want) ? want : '';
+  if (pref.min) $('#bAutoMin').value = pref.min;
+  if (pref.pct != null) $('#bAutoUnused').value = pref.pct;
+  const showRatio = () => { const p = +$('#bAutoUnused').value; $('#bAutoRatio').textContent = `쓴 곡 ${100 - p} : 안 쓴 곡 ${p}`; };
+  $('#bAutoUnused').addEventListener('input', showRatio);
+  showRatio();
+  $('#bAutoBtn').addEventListener('click', autoPickTracks);
+}
+async function autoPickTracks() {
+  const min = Math.min(180, Math.max(5, parseInt($('#bAutoMin').value, 10) || 30));
+  const pct = +$('#bAutoUnused').value, genre = $('#bAutoGenre').value;
+  localStorage.setItem(AUTO_LS_KEY, JSON.stringify({ min, pct, genre }));
+  const btn = $('#bAutoBtn'), note = $('#bAutoNote');
+  btn.disabled = true;
+  try {
+    const j = await apiGet(`/api/tracks?limit=1000${genre ? `&genre=${genre}` : ''}`);
+    const all = (j.tracks || []).filter((t) => trackDur(t) > 20);
+    if (!all.length) { note.textContent = `${genre ? genreName(genre) : '전체'} 장르에 곡이 없습니다.`; return; }
+    const pool = { unused: shuffled(all.filter((t) => !(t.used_count > 0))), used: shuffled(all.filter((t) => t.used_count > 0)) };
+    const have = { unused: pool.unused.length, used: pool.used.length };
+    const target = min * 60, picked = [];
+    let total = 0;
+    // goal(누적 길이)에 가장 가까워질 때까지 꺼낸다 — 다음 곡을 넣으면 오히려 멀어지면 멈춘다
+    const take = (list, goal) => { while (list.length && total < goal && Math.abs(total + trackDur(list[0]) - goal) <= goal - total) { const t = list.shift(); picked.push(t); total += trackDur(t); } };
+    take(pool.unused, target * pct / 100);
+    const secUnused = total;
+    take(pool.used, target);
+    const short = [];
+    if (total < target - 90) { const b = picked.length; take(pool.unused, target); if (picked.length > b) short.push(`쓴 곡이 모자라 안 쓴 곡 ${picked.length - b}곡을 더 넣음`); }
+    if (pct > 0 && pct < 100 && secUnused < target * pct / 100 - 90) short.push(`안 쓴 곡이 ${have.unused}곡뿐이라 비율을 못 채움`);
+    if (total < target - 90) short.push(`곡이 모자라 ${fmtMinSec(total)} 까지만 채움`);
+    if (!picked.length) { note.textContent = '뽑을 곡이 없습니다.'; return; }
+    builderSwap.marked.clear(); builderSwap.fresh.clear(); builderSwap.rejected.clear();
+    sessionStorage.setItem(BUILDER_SS_KEY, JSON.stringify(shuffled(picked).map((t) => t.id)));
+    await window.builderOnEnter();
+    note.innerHTML = `${picked.length}곡 · ${fmtMinSec(total)} — 안 쓴 곡 ${picked.filter((t) => !(t.used_count > 0)).length}곡 + 쓴 곡 ${picked.filter((t) => t.used_count > 0).length}곡 `
+      + `<span style="color:var(--text-dim)">(${genre ? escapeHtml(genreName(genre)) : '전체'}: 안 쓴 곡 ${have.unused} · 쓴 곡 ${have.used})</span>`
+      + (short.length ? `<br><span style="color:#f0b46a">⚠ ${short.map(escapeHtml).join(' · ')}</span>` : '');
+  } catch (e) {
+    toast(`자동 선택 실패: ${e.message}`, 'error', 6000);
+  } finally { btn.disabled = false; }
+}
+
+// ─── 표시한 곡만 다시 뽑기 (2026-10-04) ──────────────────────────────
+//   Builder 곡 줄의 🎲 로 마음에 안 드는 곡을 표시 → 그 자리만 다른 곡으로 바꾼다. 나머지 곡·순서는 그대로.
+//   새 곡은 되도록 '남겨 둔 곡들과 같은 프롬프트'에서 (남긴 곡이 많은 프롬프트일수록 자주), 없으면 같은 장르에서.
+//   한 번 퇴짜 놓은 곡은 [🎲 자동 선택] 을 새로 누르기 전까지 다시 나오지 않는다.
+const builderSwap = { marked: new Set(), fresh: new Set(), rejected: new Set() };
+function updateSwapBar() {
+  const bar = $('#bSwapBar');
+  if (!bar) return;
+  const ids = new Set(builder.tracks.map((t) => t.id));
+  for (const id of [...builderSwap.marked]) if (!ids.has(id)) builderSwap.marked.delete(id);
+  const n = builderSwap.marked.size;
+  bar.hidden = !builder.tracks.length;
+  $('#bSwapBtn').disabled = !n;
+  $('#bSwapBtn').classList.toggle('primary', n > 0);
+  $('#bSwapBtn').textContent = n ? `🔁 표시한 ${n}곡만 다시 뽑기` : '🔁 표시한 곡만 다시 뽑기';
+  $('#bSwapClearBtn').hidden = !n;
+  if (n || !builderSwap.fresh.size) {
+    $('#bSwapNote').textContent = n
+      ? '나머지 곡과 순서는 그대로 두고, 남겨 둔 곡과 같은 프롬프트에서 새로 뽑습니다.'
+      : '마음에 안 드는 곡은 곡 줄 오른쪽 🎲 을 눌러 표시하세요 — 그 곡들만 다시 뽑습니다.';
+  }
+}
+async function swapMarkedTracks() {
+  const marked = builder.tracks.filter((t) => builderSwap.marked.has(t.id));
+  if (!marked.length) return;
+  const kept = builder.tracks.filter((t) => !builderSwap.marked.has(t.id));
+  const btn = $('#bSwapBtn');
+  btn.disabled = true;
+  try {
+    const pct = +($('#bAutoUnused')?.value ?? 70);
+    // 후보 = 바꿀 곡들과 같은 장르 전체 (장르별 한 번씩 읽음)
+    const byGenre = new Map();
+    for (const g of new Set(marked.map((t) => t.genre || ''))) {
+      const j = await apiGet(`/api/tracks?limit=1000${g ? `&genre=${g}` : ''}`);
+      byGenre.set(g, (j.tracks || []).filter((t) => trackDur(t) > 20));
+    }
+    for (const t of marked) builderSwap.rejected.add(t.id);
+    const taken = new Set(builder.tracks.map((t) => t.id));
+    const free = (t) => !taken.has(t.id) && !builderSwap.rejected.has(t.id);
+    // 안 쓴 곡 비율 슬라이더 = 안 쓴 곡에서 뽑을 확률
+    const pickOne = (list) => {
+      const un = list.filter((t) => !(t.used_count > 0)), us = list.filter((t) => t.used_count > 0);
+      const from = !un.length ? us : !us.length ? un : (Math.random() * 100 < pct ? un : us);
+      return from[Math.floor(Math.random() * from.length)];
+    };
+    const keptPrompts = kept.map((t) => t.prompt_id).filter((v) => v != null);
+    const fresh = new Set();
+    let same = 0, other = 0, none = 0;
+    builder.tracks = builder.tracks.map((t) => {
+      if (!builderSwap.marked.has(t.id)) return t;
+      const cands = (byGenre.get(t.genre || '') || []).filter(free);
+      let nt = null;
+      // 남긴 곡 하나를 무작위로 골라 그 프롬프트에서 → 곡이 다 떨어진 프롬프트면 다른 남긴 곡의 프롬프트로
+      for (const pid of shuffled(keptPrompts)) {
+        const list = cands.filter((c) => c.prompt_id === pid);
+        if (list.length) { nt = pickOne(list); same++; break; }
+      }
+      if (!nt && cands.length) { nt = pickOne(cands); other++; }
+      if (!nt) { none++; return t; }
+      taken.add(nt.id); fresh.add(nt.id);
+      return nt;
+    });
+    builderSwap.marked.clear();
+    builderSwap.fresh = fresh;
+    saveBuilderOrder();
+    renderBuilderTracks();
+    const parts = [];
+    if (same) parts.push(`${same}곡을 남긴 곡과 같은 프롬프트에서 새로 뽑음 (초록 줄)`);
+    if (other) parts.push(`${other}곡은 같은 프롬프트에 남은 곡이 없어 같은 장르에서 뽑음`);
+    if (none) parts.push(`${none}곡은 바꿀 곡이 없어 그대로 둠`);
+    if (!keptPrompts.length && other) parts.push('남겨 둔 곡이 없어 프롬프트를 못 맞춤');
+    $('#bSwapNote').innerHTML = `<span style="color:${other || none ? '#f0b46a' : '#7fd4a0'}">${parts.map(escapeHtml).join(' · ')}</span>`;
+  } catch (e) {
+    toast(`다시 뽑기 실패: ${e.message}`, 'error', 6000);
+    updateSwapBar();
+  }
 }
 
 async function init() {

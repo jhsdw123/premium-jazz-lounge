@@ -5,16 +5,18 @@ import AudioMotionAnalyzer from 'https://cdn.jsdelivr.net/npm/audiomotion-analyz
 import {
   ANIMATION_TYPES,
   createController as createNPController,
-  applyStateToElement as applyNPState,
-  runPreview as runNPPreview,
+  drawStateOnCanvas as drawNPState,
 } from './now-playing-animations.js';
 import { drawPlaylist } from './playlist-renderer.js';
+import { LoopVideo, createSmoothClock, openLoopPicker } from './loop-video.js';
 import { drawClock } from './clock-renderer.js';
 import {
   getAmplitudes,
   drawCustomVisualizer,
   isCustomStyle,
 } from './visualizer-styles.js';
+import { drawTextPanel, hasTextPanel, TEXT_PANEL_DEFAULTS } from './text-panel.js';
+import { drawTextComponent } from './text-renderer.js';
 
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
@@ -26,6 +28,8 @@ const te = {
   templates: [],           // GET /api/templates
   components: [],          // 현재 캔버스 컴포넌트들
   bgUrl: null,             // 배경 이미지 URL
+  bgVideoKey: null,        // 배경 루프 영상 묶음 이름 (config_json.backgroundVideo.key 로 저장)
+  bgVideo: null,           // LoopVideo — Studio 와 같은 재생기
   selectedId: null,        // 선택된 컴포넌트 id
   editingTemplate: null,   // 현재 편집 기준 템플릿 (있으면 새 저장 시 dup, 없으면 fresh)
   initialized: false,
@@ -110,6 +114,11 @@ function defaultsFor(type) {
         textTransform: 'none',
         glowIntensity: 1.0,         // 0~2, textShadow 강도. 어두운 색이면 자동 비활성.
         autoWrap: true,             // true: 박스 폭 넘으면 자동 wrap, false: 고정 (overflow ellipsis)
+        // ── 배경 패널 (Phase 4-E-1) ──
+        //   배경에 선/무늬가 지나가면 그 위 글자가 안 읽힌다 → 글자 놓을 자리를 직접 만든다.
+        //   기본은 꺼짐 — 켜야 보이므로 기존 템플릿은 아무 영향 없다.
+        panelEnabled: false,
+        ...TEXT_PANEL_DEFAULTS,
       };
     case 'image':
       return { ...base, src: '', fit: 'contain', width: 400, height: 400 };
@@ -343,12 +352,6 @@ function isDarkColor(hex) {
 }
 
 // ─── 옛 schema → 새 schema 어댑터 ─────────────────────────────
-function loadConfigToCanvas(cfg) {
-  // 새 형식: components[] 가 있으면 그대로 (옛 저장본에 박힌 _audioMotion 찌꺼기는 버림)
-  if (Array.isArray(cfg?.components)) {
-    return cfg.components.map((c) => ({ ...stripRuntimeFields(c), id: c.id || nextId() }));
-  }
-  // 옛 형식 → 변환
 // 런타임 전용 필드('_' prefix: _audioMotion 인스턴스·_imgObj·_customLoopRaf)를 뺀 저장용 사본.
 //   예전엔 저장 때 _audioMotion 이 통째로 JSON 이 돼 비주얼라이저 하나당 ~240KB 가 DB 에 들어갔다
 //   (템플릿 목록 25MB 의 원인). 저장·로드 양쪽에서 이 함수로 거른다.
@@ -360,6 +363,12 @@ function stripRuntimeFields(c) {
   return plain;
 }
 
+function loadConfigToCanvas(cfg) {
+  // 새 형식: components[] 가 있으면 그대로 (옛 저장본에 박힌 _audioMotion 찌꺼기는 버림)
+  if (Array.isArray(cfg?.components)) {
+    return cfg.components.map((c) => ({ ...stripRuntimeFields(c), id: c.id || nextId() }));
+  }
+  // 옛 형식 → 변환
   const result = [];
   if (cfg?.title) {
     result.push({
@@ -524,7 +533,9 @@ function audioMotionOptions(c) {
 
 function applyVisualizerGlow(container, c) {
   if (!container) return;
-  const glow = Math.max(0, c.glow ?? 0);
+  // custom 스타일(wave-time/mirror/mirror-fill)은 drawCustomVisualizer 가 canvas 안에서 이미
+  // glow 를 건다 → CSS glow 까지 얹으면 에디터에서만 두 번 걸려 Studio 보다 번져 보인다.
+  const glow = isCustomStyle(c.visualizerStyle) ? 0 : Math.max(0, c.glow ?? 0);
   if (glow > 0) {
     // Phase 4-D-3-D-1 polish: glow color 는 항상 c.glowColor 를 직접 사용.
     // colorMode 와 독립 — 자동 매칭 X.
@@ -659,7 +670,8 @@ function startCustomVisualizerLoop(c) {
     const ctx = cv.getContext('2d');
     ctx.clearRect(0, 0, cv.width, cv.height);
     const amps = getAmplitudes(am);
-    drawCustomVisualizer(ctx, cur, amps, 0, 0, cv.width, cv.height);
+    // opacity 는 부모 .te-comp 가 CSS 로 이미 건다 → 여기선 1 (이중 적용 방지).
+    drawCustomVisualizer(ctx, { ...cur, opacity: 1 }, amps, 0, 0, cv.width, cv.height);
     cur._customLoopRaf = requestAnimationFrame(tick);
   };
   c._customLoopRaf = requestAnimationFrame(tick);
@@ -768,47 +780,76 @@ function renderProgress(c) {
   </div>`;
 }
 
-function buildTextShadow(c) {
-  if (isDarkColor(c.color)) return 'none';
-  const intensity = c.glowIntensity ?? 1.0;
-  if (intensity <= 0) return 'none';
-  const blur = Math.round(20 * intensity);
-  const alpha = Math.min(1, 0.5 + intensity * 0.3);
-  return `0 0 ${blur}px rgba(212,175,55,${alpha.toFixed(2)})`;
+// ─── 미리보기 = 녹화 (2026-09-20) ────────────────────────────────
+// 글자가 들어가는 컴포넌트(text / nowplaying)는 편집 캔버스에서도 **Studio 와 같은 canvas 코드**로
+// 그린다. 예전엔 여기만 HTML/CSS 였고, 그래서 자간·줄바꿈·글로우 크기·세로 중앙이 Studio 와
+// 조금씩 달랐다. (playlist / clock 은 원래부터 이 방식.)
+//
+// bleed canvas: 글로우·패널 그림자·넘친 글자는 박스 밖으로 나간다 → canvas 를 박스보다
+// BLEED 만큼 사방으로 크게 잡고 그만큼 음수 위치에 둔다. 단위는 world px (.te-world 안).
+const BLEED = 240;
+
+function renderBleedCanvas(c) {
+  const w = Math.round(c.width) + BLEED * 2;
+  const h = Math.round(c.height) + BLEED * 2;
+  return `<canvas class="te-bleed-canvas" data-bleed-id="${c.id}" width="${w}" height="${h}"
+    style="position:absolute;left:${-BLEED}px;top:${-BLEED}px;width:${w}px;height:${h}px;pointer-events:none;"></canvas>`;
 }
 
-function buildTextDecoration(c) {
-  const parts = [];
-  if (c.underline) parts.push('underline');
-  if (c.strikethrough) parts.push('line-through');
-  return parts.length ? parts.join(' ') : 'none';
+// bleed canvas 를 비우고, 컴포넌트의 world 좌표(c.x, c.y)가 박스 좌상단에 오도록 맞춘 ctx 를 돌려준다.
+function beginBleedDraw(c) {
+  const cv = document.querySelector(`canvas[data-bleed-id="${c.id}"]`);
+  if (!cv) return null;
+  const w = Math.round(c.width) + BLEED * 2;
+  const h = Math.round(c.height) + BLEED * 2;
+  if (cv.width !== w) { cv.width = w; cv.style.width = `${w}px`; }
+  if (cv.height !== h) { cv.height = h; cv.style.height = `${h}px`; }
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.translate(BLEED - c.x, BLEED - c.y);
+  return ctx;
+}
+
+// opacity / rotation 은 부모 .te-comp 가 CSS 로 건다 → canvas 안에선 중립값 (이중 적용 방지).
+function renderTextOnCanvas(c) {
+  const ctx = beginBleedDraw(c);
+  if (!ctx) return;
+  const vars = { trackTitle: 'Track Title (preview)', trackNumber: 1, totalTracks: 14 };
+  // backdrop blur 만은 canvas 가 밑의 배경을 떠올 수 없어 CSS 레이어로 흉내낸다 (아래 renderTextInner).
+  drawTextComponent(ctx, { ...c, opacity: 1, rotation: 0 }, vars, { allowBackdrop: false });
+}
+
+function renderNowPlayingOnCanvas(c, state) {
+  const ctx = beginBleedDraw(c);
+  if (!ctx) return;
+  const st = state || { opacity: 1, text: c.previewText || 'Sample Track Title' };
+  drawNPState(ctx, st, { ...c, opacity: 1, rotation: 0 });
+}
+
+function paintComponentCanvas(c) {
+  if (c.type === 'text') renderTextOnCanvas(c);
+  else if (c.type === 'nowplaying') renderNowPlayingOnCanvas(c);
+  else if (c.type === 'playlist') renderPlaylistOnCanvas(c);
+  else if (c.type === 'clock') renderClockOnCanvas(c);
+}
+
+// 웹폰트가 늦게 도착하면 canvas 는 저절로 다시 그려지지 않는다 (DOM 과 다른 점) → 직접 다시 그린다.
+if (document.fonts?.addEventListener) {
+  document.fonts.addEventListener('loadingdone', () => {
+    if (!te.initialized) return;
+    for (const c of te.components) paintComponentCanvas(c);
+  });
 }
 
 function renderTextInner(c) {
-  const shadow = buildTextShadow(c);
-  // autoWrap=true:  pre-line  → 형님 입력 \n 만 줄바꿈, 박스 폭 넘으면 자동 wrap
-  // autoWrap=false: pre       → \n 만 줄바꿈, 박스 폭 넘으면 hidden + ellipsis
-  const autoWrap = c.autoWrap !== false; // default true
-  const whiteSpace = autoWrap ? 'pre-line' : 'pre';
-  const overflow = autoWrap ? 'visible' : 'hidden';
-  const wordWrap = autoWrap ? 'break-word' : 'normal';
-  return `<div class="text-render" style="
-    color: ${c.color || '#FFFFFF'};
-    font-size: ${c.fontSize || 72}px;
-    font-family: ${c.fontFamily || 'Playfair Display, serif'};
-    text-align: ${c.textAlign || 'center'};
-    text-shadow: ${shadow};
-    line-height: ${c.lineHeight ?? 1.2};
-    font-weight: ${c.bold ? 700 : 400};
-    font-style: ${c.italic ? 'italic' : 'normal'};
-    text-decoration: ${buildTextDecoration(c)};
-    letter-spacing: ${c.letterSpacing ?? 0}px;
-    text-transform: ${c.textTransform || 'none'};
-    white-space: ${whiteSpace};
-    overflow: ${overflow};
-    word-wrap: ${wordWrap};
-    width: 100%;
-  ">${escapeHtml(placeholderText(c.content || ''))}</div>`;
+  // 글자·패널 색·테두리·페더·그림자 = canvas. backdrop blur 만 CSS.
+  const backdrop = hasTextPanel(c) && typeof c.panelBackdropBlur === 'number' ? c.panelBackdropBlur : 0;
+  const radius = typeof c.panelRadius === 'number' ? c.panelRadius : TEXT_PANEL_DEFAULTS.panelRadius;
+  const layer = backdrop > 0 && !c.rotation
+    ? `<div class="te-text-panel te-text-panel-backdrop" style="--tp-backdrop:${backdrop}px;--tp-radius:${radius}px;"></div>`
+    : '';
+  return `${layer}${renderBleedCanvas(c)}`;
 }
 
 function renderImageInner(c) {
@@ -819,7 +860,7 @@ function renderImageInner(c) {
   return `<img src="${escapeHtml(c.src)}" style="object-fit:${fit};width:100%;height:100%;" />`;
 }
 
-function renderComponentInner(c) {
+function renderComponentBody(c) {
   switch (c.type) {
     case 'text':       return renderTextInner(c);
     case 'image':      return renderImageInner(c);
@@ -830,6 +871,16 @@ function renderComponentInner(c) {
     case 'clock':      return renderClockInner(c);
   }
   return '';
+}
+
+// 컴포넌트 내용은 전부 .te-world 안에 **실제 크기(1920×1080 기준 px)** 로 만들고, 통째로
+// transform: scale() 로 줄여 보여 준다 (applyComponentTransform).
+//   예전엔 px 값마다 배율을 손으로 곱했는데 빠뜨린 게 많았다 — NowPlaying 글자 크기, 자간,
+//   글로우 반경, 비주얼라이저 glow … 전부 축소 화면에서 상대적으로 크게 보였다.
+//   AudioMotion 도 컨테이너 크기로 내부 해상도를 정하므로, 여기서 실제 크기를 줘야
+//   선 굵기·LED 칸 수·피크 두께가 Studio 와 같아진다.
+function renderComponentInner(c) {
+  return `<div class="te-world te-world-${c.type}" style="width:${c.width}px;height:${c.height}px;">${renderComponentBody(c)}</div>`;
 }
 
 // Playlist inner — Editor 도 canvas 로 그림 (Studio 의 미리보기 = 녹화 일치 보장 패턴 동일).
@@ -893,24 +944,9 @@ function renderPlaylistOnCanvas(c) {
   drawPlaylist(ctx, localComp, tracks, curIdx);
 }
 
-// NowPlaying inner — Editor 미리보기는 plain div. 애니메이션 미리보기 시 inline style 갱신.
+// NowPlaying inner — Studio 와 같은 drawStateOnCanvas 로 그린다 (bleed canvas).
 function renderNowPlayingInner(c) {
-  const align = c.textAlign || 'center';
-  const justify = align === 'left' ? 'flex-start' : align === 'right' ? 'flex-end' : 'center';
-  const fs = `${c.italic ? 'italic ' : ''}${c.bold ? '700 ' : '400 '}${c.fontSize || 48}px ${c.fontFamily || 'system-ui, sans-serif'}`;
-  const color = c.color || '#FFFFFF';
-  const glow = Math.max(0, c.glow ?? 0);
-  const glowColor = c.glowColor || '#D4AF37';
-  const shadow = glow > 0 ? `0 0 ${glow}px ${glowColor}, 0 0 ${glow * 2}px ${glowColor}` : 'none';
-  return `<div class="te-np-text" data-np-id="${c.id}" style="
-    width:100%;height:100%;display:flex;align-items:center;justify-content:${justify};
-    font:${fs};color:${color};text-shadow:${shadow};
-    text-transform:${c.textTransform || 'none'};
-    text-decoration:${c.underline ? 'underline' : 'none'};
-    letter-spacing:${c.letterSpacing ?? 0}px;
-    white-space:nowrap;overflow:visible;
-    pointer-events:none;user-select:none;
-  ">${escapeHtml(c.previewText || 'Sample Track Title')}</div>`;
+  return renderBleedCanvas(c);
 }
 
 function applyComponentTransform(el, c) {
@@ -927,10 +963,12 @@ function applyComponentTransform(el, c) {
   el.dataset.w = String(c.width);
   el.dataset.h = String(c.height);
 
-  // Text/visualizer 의 fontSize 등 내부 비주얼 요소도 scale 반영
-  if (c.type === 'text') {
-    const tr = el.querySelector('.text-render');
-    if (tr) tr.style.fontSize = `${(c.fontSize || 72) * s}px`;
+  // 내용물은 실제 크기 그대로 두고 통째로 축소 — 개별 px 값에 배율을 곱하지 않는다.
+  const world = el.querySelector(':scope > .te-world');
+  if (world) {
+    world.style.width = `${c.width}px`;
+    world.style.height = `${c.height}px`;
+    world.style.transform = `scale(${s})`;
   }
 }
 
@@ -965,14 +1003,8 @@ function renderCanvas() {
   for (const c of te.components) {
     if (c.type === 'visualizer') attachVisualizerInstance(c);
   }
-  // playlist 캔버스 그리기 (DOM 이 들어간 다음에)
-  for (const c of te.components) {
-    if (c.type === 'playlist') renderPlaylistOnCanvas(c);
-  }
-  // clock 캔버스 그리기
-  for (const c of te.components) {
-    if (c.type === 'clock') renderClockOnCanvas(c);
-  }
+  // canvas 로 그리는 컴포넌트 (text / nowplaying / playlist / clock) — DOM 이 들어간 다음에
+  for (const c of te.components) paintComponentCanvas(c);
   $('#teCompCount').textContent = String(te.components.length);
   renderBg();
   renderProps();
@@ -984,13 +1016,70 @@ function renderCanvas() {
 function renderBg() {
   const bgEl = $('#teCanvasBg');
   if (!bgEl) return;
-  if (te.bgUrl) {
-    bgEl.classList.remove('empty');
-    bgEl.style.backgroundImage = `url("${te.bgUrl}")`;
+  bgEl.classList.toggle('empty', !te.bgUrl && !te.bgVideo);
+  bgEl.style.backgroundImage = te.bgUrl ? `url("${te.bgUrl}")` : '';
+  // 배경 영상은 그림 위에 canvas 로 얹는다 (영상을 못 읽으면 그림이 그대로 보인다).
+  let cv = bgEl.querySelector('canvas.te-bg-video');
+  if (te.bgVideo) {
+    if (!cv) {
+      cv = document.createElement('canvas');
+      cv.className = 'te-bg-video';
+      cv.width = CANVAS_W;
+      cv.height = CANVAS_H;
+      cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;';
+      bgEl.appendChild(cv);
+    }
+    te.bgVideoDrawn = -1;
+    startBgVideoLoop();
   } else {
-    bgEl.classList.add('empty');
-    bgEl.style.backgroundImage = '';
+    cv?.remove();
   }
+}
+
+// ─── 배경 루프 영상 ───────────────────────────────────────────
+//   음악을 재생하면 영상도 같이 돈다 (Studio 와 같은 재생기·같은 시계). 멈춰 있으면 그 자리 프레임.
+const bgVideoClock = createSmoothClock();
+let bgVideoRaf = 0;
+
+function startBgVideoLoop() {
+  if (bgVideoRaf) return;
+  const tick = () => {
+    bgVideoRaf = 0;
+    const lv = te.bgVideo;
+    const cv = $('#teCanvasBg canvas.te-bg-video');
+    if (!lv || !cv) return;
+    const el = audio.element;
+    lv.tick(bgVideoClock.now(el?.currentTime || 0, !!el && !el.paused));
+    if (lv.currentIndex !== te.bgVideoDrawn && lv.draw(cv.getContext('2d'), CANVAS_W, CANVAS_H)) {
+      te.bgVideoDrawn = lv.currentIndex;
+    }
+    bgVideoRaf = requestAnimationFrame(tick);
+  };
+  bgVideoRaf = requestAnimationFrame(tick);
+}
+
+async function setBgVideo(key) {
+  te.bgVideoKey = key || null;
+  te.bgVideo?.destroy();
+  te.bgVideo = null;
+  const status = $('#teBgVideoStatus');
+  if (!key) {
+    if (status) status.textContent = '(영상 없음)';
+    renderBg();
+    return;
+  }
+  try {
+    const lv = await LoopVideo.load(key, (msg) => { if (status) status.textContent = msg; });
+    // 불러오는 사이에 다른 영상을 골랐으면 버린다.
+    if (te.bgVideoKey !== key) { lv.destroy(); return; }
+    te.bgVideo = lv;
+    if (status) status.textContent = `${key} · ${lv.meta.source}`;
+  } catch (e) {
+    if (te.bgVideoKey !== key) return;
+    if (status) status.textContent = `(실패: ${e.message})`;
+    toast(`배경 영상 로드 실패: ${e.message}`, 'error');
+  }
+  renderBg();
 }
 
 // ─── interact.js bindings ─────────────────────────────────────
@@ -1110,8 +1199,14 @@ function bindComponentInteractions(el, c) {
         // Text 는 폭에 비례해 폰트 크기 함께 스케일.
         // drag start 시점 기준 누적 ratio (per-frame round 누적 X).
         if ((cur.type === 'text' || cur.type === 'nowplaying' || cur.type === 'clock') && _dragStart && _dragStart.width > 0) {
-          const factor = cur.width / _dragStart.width;
-          cur.fontSize = Math.max(8, Math.round(_dragStart.fontSize * factor));
+          // Phase 4-E-1: 배경 패널을 켠 텍스트는 폰트를 연동하지 않는다.
+          //   패널을 켰다 = 이 박스를 '글자 담는 상자'로 쓰겠다는 뜻이다. 그런데 상자를 키울 때
+          //   글자가 같이 커지면 여백이 영영 안 생긴다 — 이 기능을 켠 목적 자체가 무너진다.
+          const linkFontToWidth = !(cur.type === 'text' && hasTextPanel(cur));
+          if (linkFontToWidth) {
+            const factor = cur.width / _dragStart.width;
+            cur.fontSize = Math.max(8, Math.round(_dragStart.fontSize * factor));
+          }
         }
         applyComponentTransform(el, cur);
         // 비주얼라이저: AudioMotion 의 canvas 는 컨테이너 크기 따라 자체 ResizeObserver 로 갱신.
@@ -1135,6 +1230,7 @@ function bindComponentInteractions(el, c) {
             el.insertBefore(newInner.firstChild, el.firstChild);
           }
           applyComponentTransform(el, cur);
+          paintComponentCanvas(cur);
         } else if (cur.type === 'playlist') {
           // canvas 픽셀 해상도 갱신 + 재그리기 (HTML 교체 X — canvas 보존).
           renderPlaylistOnCanvas(cur);
@@ -1202,8 +1298,7 @@ function updateComponent(id, patch) {
     el.insertBefore(inner.firstChild, el.firstChild);
   }
   applyComponentTransform(el, cur);
-  if (cur.type === 'playlist') renderPlaylistOnCanvas(cur);
-  if (cur.type === 'clock') renderClockOnCanvas(cur);
+  paintComponentCanvas(cur);
 }
 
 function removeComponent(id) {
@@ -1321,6 +1416,10 @@ function renderProps() {
         <span class="val" data-val-for="${key}">${val}${suffix}</span>
       </div>
     `;
+    // 배경 패널 값 — 저장된 값이 없으면 공용 기본값(text-panel.js)을 쓴다.
+    // 기본값을 여기 또 적으면 canvas 렌더와 조용히 어긋나므로 한 곳에서만 가져온다.
+    const pd = TEXT_PANEL_DEFAULTS;
+    const pv = (k) => (typeof c[k] === 'number' && Number.isFinite(c[k]) ? c[k] : pd[k]);
     typeFields = `
       <div class="te-prop full">
         <label>Content (변수: {{trackTitle}}, {{trackNumber}}, {{totalTracks}})</label>
@@ -1374,6 +1473,48 @@ function renderProps() {
       ${slider('lineHeight', 'Line Height', 0.8, 3.0, 0.05, c.lineHeight ?? 1.2, '')}
       ${slider('glowIntensity', 'Glow', 0, 2, 0.05, c.glowIntensity ?? 1.0, '')}
       ${isDarkColor(c.color) ? `<div class="te-prop-warn">⚠ 어두운 텍스트 컬러 — 그림자 자동 비활성. 밝은 색을 권장합니다.</div>` : ''}
+
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
+        <label style="color:var(--jazz-gold)">— Background Panel —</label>
+      </div>
+      <div class="te-prop full">
+        <label class="vocal-check" style="font-size:12px;cursor:pointer;">
+          <input type="checkbox" data-prop-bool="panelEnabled" ${c.panelEnabled ? 'checked' : ''} />
+          글자 뒤에 배경 상자 깔기 (배경 무늬 위에서도 읽히게)
+        </label>
+      </div>
+      ${!c.panelEnabled ? '' : `
+      <div class="te-prop"><label>Panel Color</label><input type="color" data-prop="panelColor" value="${c.panelColor || pd.panelColor}" /></div>
+      ${slider('panelOpacity', 'Panel Opacity', 0, 1, 0.01, pv('panelOpacity'), '')}
+      ${slider('panelRadius', 'Corner Radius', 0, 300, 1, pv('panelRadius'), 'px')}
+      ${slider('panelFeather', 'Edge Feather', 0, 150, 1, pv('panelFeather'), 'px')}
+      ${slider('panelBackdropBlur', 'Backdrop Blur', 0, 40, 1, pv('panelBackdropBlur'), 'px')}
+      ${slider('panelPadding', 'Padding', 0, 200, 2, pv('panelPadding'), 'px')}
+      <div class="te-prop full" style="font-size:11px;color:var(--text-dim);line-height:1.5;">
+        <b>Edge Feather</b> = 상자 가장자리를 흐리게 녹여 배경과 섞음 ·
+        <b>Backdrop Blur</b> = 상자 뒤 배경을 뿌옇게(유리 느낌) ·
+        <b>Padding</b> = 글자를 상자 안쪽으로 밀어 넣는 여백<br>
+        <span style="color:var(--jazz-gold)">패널을 켜면 상자를 드래그로 키워도 글자 크기는 그대로입니다</span>
+        — 여백을 만들려는 건데 글자가 같이 커지면 안 되니까요. (패널을 끄면 예전처럼 함께 커집니다)
+      </div>
+
+      <div class="te-prop full" style="margin-top:4px;">
+        <label style="color:var(--text-muted);font-size:11px;">테두리</label>
+      </div>
+      ${slider('panelBorderWidth', 'Border Width', 0, 20, 0.5, pv('panelBorderWidth'), 'px')}
+      <div class="te-prop"><label>Border Color</label><input type="color" data-prop="panelBorderColor" value="${c.panelBorderColor || pd.panelBorderColor}" /></div>
+      ${slider('panelBorderOpacity', 'Border Opacity', 0, 1, 0.05, pv('panelBorderOpacity'), '')}
+
+      <div class="te-prop full" style="margin-top:4px;">
+        <label style="color:var(--text-muted);font-size:11px;">그림자</label>
+      </div>
+      ${slider('panelShadow', 'Shadow Blur', 0, 80, 1, pv('panelShadow'), 'px')}
+      ${slider('panelShadowOffsetY', 'Shadow Y', -40, 80, 1, pv('panelShadowOffsetY'), 'px')}
+      <div class="te-prop"><label>Shadow Color</label><input type="color" data-prop="panelShadowColor" value="${c.panelShadowColor || pd.panelShadowColor}" /></div>
+      ${slider('panelShadowOpacity', 'Shadow Opacity', 0, 1, 0.05, pv('panelShadowOpacity'), '')}
+      ${(pv('panelFeather') > 0 && pv('panelBorderWidth') > 0) ? `<div class="te-prop-warn">⚠ Edge Feather 와 테두리를 같이 쓰면 테두리도 같이 흐려집니다 — 선명한 테두리를 원하면 Feather 를 0 으로.</div>` : ''}
+      ${(pv('panelBackdropBlur') > 0 && c.rotation) ? `<div class="te-prop-warn">⚠ 회전된 텍스트에는 Backdrop Blur 가 적용되지 않습니다 (배경 좌표가 어긋남). 색·Feather·테두리는 정상입니다.</div>` : ''}
+      `}
     `;
   } else if (c.type === 'image') {
     typeFields = `
@@ -1908,6 +2049,8 @@ function renderProps() {
       updateComponent(c.id, { [inp.dataset.propBool]: inp.checked });
       // highlightEnabled 토글 시 강조 sub-옵션 show/hide 위해 props 다시 그리기.
       if (inp.dataset.propBool === 'highlightEnabled') renderProps();
+      // panelEnabled 도 마찬가지 — 켜야 패널 슬라이더들이 나타난다.
+      if (inp.dataset.propBool === 'panelEnabled') renderProps();
     });
   });
 
@@ -2075,16 +2218,17 @@ function playNowPlayingPreview(compId) {
   if (prev?.rafId) cancelAnimationFrame(prev.rafId);
   if (prev?.host) prev.host.remove();
 
-  // 컴포넌트 인너의 div 자체를 사용 — 임시로 inline style 갱신해 애니메이션
-  const compEl = document.querySelector(`#teCanvasInner [data-id="${compId}"] [data-np-id="${compId}"]`);
-  if (!compEl) return;
+  // Studio 와 같은 canvas 드라이버로 재생 — 이동 거리(px)도 world 단위 그대로.
+  if (!document.querySelector(`canvas[data-bleed-id="${compId}"]`)) return;
 
   const ctrl = createNPController(cur);
   ctrl.startIn(cur.previewText || 'Sample Track Title');
 
   const tick = () => {
     const state = ctrl.stateAt();
-    applyNPState(compEl, state, cur);
+    // 재생 도중 속성이 바뀌면 컴포넌트 객체가 교체된다 → 최신 것으로 그린다.
+    const live = te.components.find((x) => x.id === compId) || cur;
+    renderNowPlayingOnCanvas(live, state);
     if (ctrl.phase === 'in') {
       const rafId = requestAnimationFrame(tick);
       _npPreviewState.set(compId, { ctrl, rafId, host: null });
@@ -2123,6 +2267,15 @@ $('#teBgClearBtn')?.addEventListener('click', () => {
   $('#teBgStatus').textContent = '(배경 없음)';
   renderBg();
 });
+$('#teBgVideoPickBtn')?.addEventListener('click', async () => {
+  try {
+    const key = await openLoopPicker(te.bgVideoKey);
+    if (key) await setBgVideo(key);
+  } catch (e) {
+    toast(`루프 영상 목록 실패: ${e.message}`, 'error');
+  }
+});
+$('#teBgVideoClearBtn')?.addEventListener('click', () => setBgVideo(null));
 
 // ─── Image upload (컴포넌트 src) ─────────────────────────────
 function promptImageUpload(onUrl) {
@@ -2165,13 +2318,14 @@ $('#teSaveBtn')?.addEventListener('click', async () => {
     $('#teSaveName').focus();
     return;
   }
-  if (!te.components.length && !te.bgUrl) {
+  if (!te.components.length && !te.bgUrl && !te.bgVideoKey) {
     if (!confirm('컴포넌트도 배경도 없습니다. 그래도 빈 템플릿을 저장할까요?')) return;
   }
   const isFav = $('#teSaveFav').checked;
   const config_json = {
     canvas: { width: CANVAS_W, height: CANVAS_H },
     components: te.components.map(stripRuntimeFields),
+    ...(te.bgVideoKey ? { backgroundVideo: { key: te.bgVideoKey } } : {}),
   };
   try {
     const j = await apiPost('/api/templates', {
@@ -2191,90 +2345,6 @@ $('#teSaveBtn')?.addEventListener('click', async () => {
   }
 });
 
-// ─── Template list (좌측) ─────────────────────────────────────
-async function refreshTemplateList() {
-  try {
-    const j = await apiGet('/api/templates');
-    te.templates = j.templates || [];
-    renderTemplateList();
-  } catch (e) {
-    toast(`템플릿 로드 실패: ${e.message}`, 'error');
-  }
-}
-
-// ─── 갤러리 / 리스트 모드 ────────────────────────────────────
-const VIEW_MODE_KEY = 'pjl.te.viewMode';
-const BG_MODE_KEY = 'pjl.te.galleryBgMode';
-
-const gallery = {
-  mode: localStorage.getItem(VIEW_MODE_KEY) || 'list',
-  bgMode: localStorage.getItem(BG_MODE_KEY) || 'image',  // 'image' | 'dark' | 'light'
-  imgCache: new Map(),       // url → { img: Image, ready: bool }
-  observer: null,            // IntersectionObserver — 화면 진입 시점에만 카드 그리기
-  drawnTids: new Set(),      // 이미 그린 카드 id (캐싱)
-};
-
-function applyModeToggleUI() {
-  const wrap = $('#teModeToggle');
-  if (wrap) {
-    wrap.querySelectorAll('button').forEach((b) => {
-      b.classList.toggle('active', b.dataset.mode === gallery.mode);
-    });
-  }
-  // 배경 토글은 갤러리 모드에서만 표시
-  const bgWrap = $('#teGalleryBgToggle');
-  if (bgWrap) {
-    bgWrap.hidden = gallery.mode !== 'gallery';
-    bgWrap.querySelectorAll('button').forEach((b) => {
-      b.classList.toggle('active', b.dataset.bgmode === gallery.bgMode);
-    });
-  }
-}
-
-function bindModeToggle() {
-  $('#teModeToggle')?.querySelectorAll('button').forEach((b) => {
-    b.addEventListener('click', () => {
-      gallery.mode = b.dataset.mode;
-      localStorage.setItem(VIEW_MODE_KEY, gallery.mode);
-      applyModeToggleUI();
-      renderTemplateList();
-    });
-  });
-  $('#teGalleryBgToggle')?.querySelectorAll('button').forEach((b) => {
-    b.addEventListener('click', () => {
-      gallery.bgMode = b.dataset.bgmode;
-      localStorage.setItem(BG_MODE_KEY, gallery.bgMode);
-      applyModeToggleUI();
-      // 모든 카드 썸네일 재드로우 (캐시 무효화)
-      gallery.drawnTids.clear();
-      renderTemplateList();
-    });
-  });
-}
-
-function renderTemplateList() {
-  applyModeToggleUI();
-  if (gallery.mode === 'gallery') {
-    renderTemplateGallery();
-    return;
-  }
-  // 리스트 모드 (기존)
-  const ul = $('#teList');
-  if (!ul) return;
-  // observer 정리 — 리스트 모드에선 lazy load 불필요
-  if (gallery.observer) { gallery.observer.disconnect(); gallery.observer = null; }
-  gallery.drawnTids.clear();
-
-  ul.className = 'te-list';
-  ul.innerHTML = '';
-  if (!te.templates.length) {
-    ul.innerHTML = `<div style="color:var(--text-muted);font-size:11px;padding:8px;">(저장된 템플릿 없음)</div>`;
-    return;
-  }
-  for (const t of te.templates) {
-    const isCur = te.editingTemplate?.id === t.id;
-    const star = t.is_favorite ? '★' : '☆';
-    const row = document.createElement('div');
 // ─── 저장 이름칸: 최근 저장한 이름 3개 드롭다운 ─────────────────
 //   "template 57" → 누르면 "template 58" 로 채움 (끝 숫자 +1, 자릿수 유지, 이미 있는 이름은 건너뜀).
 //   끝에 숫자가 없는 이름은 그대로 채운다.
@@ -2382,13 +2452,97 @@ function pickNameDrop(item) {
   });
 })();
 
+// ─── Template list (좌측) ─────────────────────────────────────
+async function refreshTemplateList() {
+  try {
+    const j = await apiGet('/api/templates');
+    te.templates = j.templates || [];
+    renderTemplateList();
+    updateSaveNameHint();
+  } catch (e) {
+    toast(`템플릿 로드 실패: ${e.message}`, 'error');
+  }
+}
+
+// ─── 갤러리 / 리스트 모드 ────────────────────────────────────
+const VIEW_MODE_KEY = 'pjl.te.viewMode';
+const BG_MODE_KEY = 'pjl.te.galleryBgMode';
+
+const gallery = {
+  mode: localStorage.getItem(VIEW_MODE_KEY) || 'list',
+  bgMode: localStorage.getItem(BG_MODE_KEY) || 'image',  // 'image' | 'dark' | 'light'
+  imgCache: new Map(),       // url → { img: Image, ready: bool }
+  observer: null,            // IntersectionObserver — 화면 진입 시점에만 카드 그리기
+  drawnTids: new Set(),      // 이미 그린 카드 id (캐싱)
+};
+
+function applyModeToggleUI() {
+  const wrap = $('#teModeToggle');
+  if (wrap) {
+    wrap.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.mode === gallery.mode);
+    });
+  }
+  // 배경 토글은 갤러리 모드에서만 표시
+  const bgWrap = $('#teGalleryBgToggle');
+  if (bgWrap) {
+    bgWrap.hidden = gallery.mode !== 'gallery';
+    bgWrap.querySelectorAll('button').forEach((b) => {
+      b.classList.toggle('active', b.dataset.bgmode === gallery.bgMode);
+    });
+  }
+}
+
+function bindModeToggle() {
+  $('#teModeToggle')?.querySelectorAll('button').forEach((b) => {
+    b.addEventListener('click', () => {
+      gallery.mode = b.dataset.mode;
+      localStorage.setItem(VIEW_MODE_KEY, gallery.mode);
+      applyModeToggleUI();
+      renderTemplateList();
+    });
+  });
+  $('#teGalleryBgToggle')?.querySelectorAll('button').forEach((b) => {
+    b.addEventListener('click', () => {
+      gallery.bgMode = b.dataset.bgmode;
+      localStorage.setItem(BG_MODE_KEY, gallery.bgMode);
+      applyModeToggleUI();
+      // 모든 카드 썸네일 재드로우 (캐시 무효화)
+      gallery.drawnTids.clear();
+      renderTemplateList();
+    });
+  });
+}
+
+function renderTemplateList() {
+  applyModeToggleUI();
+  if (gallery.mode === 'gallery') {
+    renderTemplateGallery();
+    return;
+  }
+  // 리스트 모드 (기존)
+  const ul = $('#teList');
+  if (!ul) return;
+  // observer 정리 — 리스트 모드에선 lazy load 불필요
+  if (gallery.observer) { gallery.observer.disconnect(); gallery.observer = null; }
+  gallery.drawnTids.clear();
+
+  ul.className = 'te-list';
+  ul.innerHTML = '';
+  if (!te.templates.length) {
+    ul.innerHTML = `<div style="color:var(--text-muted);font-size:11px;padding:8px;">(저장된 템플릿 없음)</div>`;
+    return;
+  }
+  for (const t of te.templates) {
+    const isCur = te.editingTemplate?.id === t.id;
+    const star = t.is_favorite ? '★' : '☆';
+    const row = document.createElement('div');
     row.className = `te-list-item${isCur ? ' active' : ''}`;
     row.innerHTML = `
       <span class="star ${t.is_favorite ? 'fav' : ''}" data-id="${t.id}" title="즐겨찾기 토글">${star}</span>
       <span class="name" data-load="${t.id}" title="${escapeHtml(t.description || t.name)}">${escapeHtml(t.name)}${t.is_default ? ' <span style="color:var(--jazz-gold);font-size:10px;">★default</span>' : ''}</span>
       <span class="actions">
         <button data-load="${t.id}" type="button" title="편집">편집</button>
-    updateSaveNameHint();
         <button data-dup="${t.id}" type="button" title="복제">복제</button>
         <button class="danger" data-del="${t.id}" type="button" title="삭제">✕</button>
       </span>
@@ -2534,8 +2688,11 @@ function drawCardThumbnail(canvas, template) {
     // image 모드 — 템플릿의 배경 이미지 사용
     ctx.fillStyle = '#0A0A0A';
     ctx.fillRect(0, 0, W, H);
-    if (template.background_image_url) {
-      const img = loadGalleryImage(template.background_image_url, () => {
+    // 영상 배경 템플릿은 루프 썸네일을 배경으로 보여 준다.
+    const loopKey = template.config_json?.backgroundVideo?.key;
+    const bgSrc = loopKey ? `/api/loops/thumb?key=${encodeURIComponent(loopKey)}` : template.background_image_url;
+    if (bgSrc) {
+      const img = loadGalleryImage(bgSrc, () => {
         const card = document.querySelector(`.te-tcard[data-tid="${template.id}"]`);
         if (card) {
           const cv = card.querySelector('canvas.te-tcard-thumb');
@@ -2587,8 +2744,15 @@ function drawCardComponent(ctx, c, template, sx, sy) {
 }
 
 function drawCardText(ctx, c, sx, sy) {
-  const x = c.x * sx, y = c.y * sy;
-  const w = c.width * sx, h = c.height * sy;
+  let x = c.x * sx, y = c.y * sy;
+  let w = c.width * sx, h = c.height * sy;
+  // Phase 4-E-1: 배경 패널 — 카드에서는 backdrop blur 를 끈다.
+  //   카드 썸네일은 배경 이미지를 먼저 깔지 않는 경우가 있어 흐릴 대상이 없다.
+  drawTextPanel(ctx, c, { x, y, w, h }, { scale: sx, allowBackdrop: false });
+  if (hasTextPanel(c)) {
+    const p = Math.max(0, (typeof c.panelPadding === 'number' ? c.panelPadding : TEXT_PANEL_DEFAULTS.panelPadding) * sx);
+    if (w - p * 2 > 1 && h - p * 2 > 1) { x += p; y += p; w -= p * 2; h -= p * 2; }
+  }
   const fs = (c.fontSize || 72) * sx;
   if (fs < 3) return; // 너무 작으면 스킵 (무의미)
   let weight = c.bold ? 700 : 400;
@@ -2737,6 +2901,7 @@ async function loadTemplate(id) {
     te.selectedId = null;
     $('#teEditingName').textContent = j.template.name;
     $('#teBgStatus').textContent = te.bgUrl ? '(편집 중인 템플릿의 배경)' : '(배경 없음)';
+    setBgVideo(j.template.config_json?.backgroundVideo?.key || null);
     renderCanvas();
     renderTemplateList();
     toast(`로드: ${j.template.name}`, 'info', 1500);
