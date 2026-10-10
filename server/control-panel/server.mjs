@@ -34,6 +34,9 @@ import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
 import { LOOP_DIR, listLoops, loopThumbPath, prepareLoop, proxyFilePath } from '../../lib/loop-videos.mjs';
+import {
+  listQueue, addJob, patchJob, removeJob, clearFinished, openFile, writeAt, closeFile, startExtend,
+} from '../../lib/render-queue.mjs';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { google } from 'googleapis';
@@ -4048,6 +4051,29 @@ app.post('/api/window/topmost', async (req, res) => {
     res.status(500).json({ ok: false, error: e.message });
   }
 });
+
+// ─── 예약 렌더 대기열 (lib/render-queue.mjs) ─────────────────────────────
+//   Builder 에서 [곡 + 템플릿] 을 걸어 두고 한 번에 순서대로 녹화. 녹화는 브라우저가 하고,
+//   조각을 여기로 보내 디스크에 쓴다 (저장 창은 클릭이 있어야 떠서 자는 동안 못 쓴다).
+const rqRoute = (fn) => async (req, res) => {
+  try { res.json({ ok: true, ...(await fn(req)) }); }
+  catch (e) { res.status(400).json({ ok: false, error: e.message }); }
+};
+app.get('/api/render-queue', rqRoute(() => listQueue()));
+app.post('/api/render-queue', rqRoute((req) => ({ item: addJob(req.body) })));
+app.post('/api/render-queue/clear-finished', rqRoute(() => { clearFinished(); return listQueue(); }));
+app.post('/api/render-queue/:id', rqRoute((req) => ({ item: patchJob(req.params.id, req.body) })));
+app.delete('/api/render-queue/:id', rqRoute((req) => { removeJob(req.params.id); return listQueue(); }));
+app.post('/api/render-queue/:id/file/open', rqRoute((req) => openFile(req.params.id)));
+app.put('/api/render-queue/:id/file',
+  express.raw({ type: 'application/octet-stream', limit: '128mb' }),
+  rqRoute((req) => {
+    if (!Buffer.isBuffer(req.body)) throw new Error('본문이 없습니다');
+    writeAt(req.params.id, Number(req.query.pos), req.body);
+    return {};
+  }));
+app.post('/api/render-queue/:id/file/close', rqRoute((req) => ({ saved: closeFile(req.params.id, { discard: !!req.body?.discard }) })));
+app.post('/api/render-queue/:id/extend', rqRoute((req) => ({ item: startExtend(req.params.id) })));
 
 // Phase 4-D-5-C: 글로벌 에러 핸들러 — 라우트 안에서 throw 가 res 에 처리되지 않은 채
 //   bubble up 한 경우 마지막 안전망. 정상 라우트들은 try/catch 로 직접 500 응답.

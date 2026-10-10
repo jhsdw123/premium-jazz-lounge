@@ -120,6 +120,8 @@ node tools/verify-vocals.mjs         # 플래그 구간을 [스템+원곡] 으�
 
 10. **배경 루프 영상은 R2 에 안 올린다 — 로컬 폴더 `C:\Users\User\Desktop\PJLLoopvideo`.** (UHD 300MB 를 올리면 15분.) 템플릿엔 `config_json.backgroundVideo = { key }` 만 저장. 짝은 파일 이름으로 묶는다: `PJL-Loop-007.mp4`(원본, ClipLoop Studio) + `PJL-Loop-007_….mp4`(Topaz 업스케일본) → 업스케일본을 쓴다. 고르면 `lib/loop-videos.mjs` 가 1080p·프레임마다 키프레임인 재생용 사본을 `.cache` 에 굽고, 에디터·Studio 는 `loop-video.js`(WebCodecs) 하나로 튼다 — `<video loop>` 금지(이음새에서 멈칫). 영상 배경으로 녹화할 땐 캡처 루프가 프레임마다 직접 그린다(`studio._captureDriven`) — 배경 그림 템플릿은 예전 경로 그대로.
 
+11. **예약 렌더(Builder 의 [📋 예약에 추가] → [▶ 예약 렌더링 시작])는 Studio 녹화 코드를 그대로 탄다.** `render-queue.js` 가 `window.pjlStudioRunQueued(session, sink)` 를 부르고, 다른 것은 저장 위치뿐 — 저장 창(`showSaveFilePicker`)은 클릭이 있어야 떠서 자는 동안 못 쓰므로 조각을 서버(`lib/render-queue.mjs`, `PUT /api/render-queue/:id/file?pos=`)로 보내 `Desktop\PJLLoopvideo\30분완성본` 에 쓴다. 녹화 경로를 고칠 땐 수동 녹화와 예약 녹화가 갈라지지 않게 `startRecording(opts)` 한 곳만 고칠 것. 3시간 연장은 `PNL-3D-Studio\tools\loop-video.py --intro pjl-title` 을 서버가 부른다(녹화가 끝난 뒤, 다음 편 시작 전에 — 녹화는 실시간 캡처라 동시에 돌리지 않는다). 시험: 패널을 `PJL_RENDER_DIR`·`PJL_EXTEND_HOURS=0.02` 로 따로 띄우고 `node tools/test-render-queue.mjs <폴더>`.
+
 ---
 
 ## 형님(Dexter) 선호 — 작업 스타일

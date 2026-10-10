@@ -2174,6 +2174,42 @@ $('#bStudioBtn')?.addEventListener('click', async () => {
   }
 });
 
+// 예약에 추가 — 지금 녹화하지 않고 [곡 순서 + 템플릿] 만 대기열에 건다 (render-queue.js).
+//   영상 프로젝트(DB)는 그 편이 실제로 돌기 직전에 만든다 → 걸어만 두고 뺀 예약이 유령 draft 로 안 남는다.
+$('#bQueueBtn')?.addEventListener('click', async () => {
+  if (!builder.tracks.length) {
+    toast('트랙이 없습니다. Pool 탭으로 돌아가서 다시 선택하세요', 'error');
+    return;
+  }
+  const templateId = parseInt($('#bTemplate').value, 10) || null;
+  if (!templateId) {
+    toast('템플릿을 선택하세요', 'error');
+    return;
+  }
+  const tpl = builder.templates.find((x) => String(x.id) === String(templateId));
+  const ordered = getOrderedTracksForRender();
+  $('#bQueueBtn').disabled = true;
+  try {
+    const added = await window.pjlRenderQueue.add({ tracks: ordered, templateId, templateName: tpl?.name || '' });
+    if (!added) return;
+    toast(`예약에 추가됨 (${ordered.length}곡) — 다음 영상의 곡을 고르세요`, 'success', 4000);
+    // 다음 편을 고를 수 있게 비운다. Pool 의 선택도 같이 푼다 (안 풀면 같은 곡이 다음 편에 또 딸려 온다).
+    sessionStorage.removeItem(BUILDER_SS_KEY);
+    builder.tracks = [];
+    $('#builderEmpty').hidden = false;
+    $('#builderMain').hidden = true;
+    for (const t of ordered) state.selected.delete(t.id);
+    pruneOrder();
+    if (!state.selected.size) clearOrder();
+    renderTracks();
+    renderOrderPanel();
+  } catch (e) {
+    toast(`예약 추가 실패: ${e.message}`, 'error', 6000);
+  } finally {
+    $('#bQueueBtn').disabled = false;
+  }
+});
+
 $('#bResetBtn').addEventListener('click', () => {
   if (!confirm('Builder 작업을 모두 초기화합니다. 계속?')) return;
   sessionStorage.removeItem(BUILDER_SS_KEY);

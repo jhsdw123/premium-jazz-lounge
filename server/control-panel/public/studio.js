@@ -921,6 +921,11 @@ window.studioOnEnter = async function studioOnEnter() {
     bindVisibilityWatcher();
     studio.initialized = true;
   }
+  // 예약 렌더가 세션을 직접 부팅하는 중 — 여기서 또 부팅하면 두 벌이 겹친다.
+  if (studio._queueBoot) {
+    showMain();
+    return;
+  }
   const session = await loadSession();
   if (!session) {
     showEmpty();
@@ -1212,7 +1217,9 @@ function setRecStatus(msg) {
   if (el) el.innerHTML = msg;
 }
 
-async function startRecording() {
+// opts.sink — 예약 렌더용. { name, write({position,data}), close(), abort() } 를 주면 저장 창을
+//   띄우지 않고 거기로 흘려보낸다 (FileSystemWritableFileStream 과 같은 모양 → 아래 경로 그대로).
+async function startRecording(opts = {}) {
   if (studio.recording) return;
   if (!studio.session?.tracks?.length) {
     setRecStatus('⚠ 세션이 없습니다');
@@ -1240,7 +1247,11 @@ async function startRecording() {
   studio._writable = null;
   studio._writeChain = Promise.resolve();
   studio._writeError = null;
-  if (typeof window.showSaveFilePicker === 'function') {
+  studio._recTrackErrors = [];
+  if (opts.sink) {
+    studio._writable = opts.sink;
+    studio._saveHandle = { name: opts.sink.name };
+  } else if (typeof window.showSaveFilePicker === 'function') {
     const stamp0 = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const safeTitle0 = (studio.session?.title || 'pjl').replace(/[^a-zA-Z0-9가-힣\s_\-]/g, '_').slice(0, 60);
     try {
@@ -1430,6 +1441,7 @@ async function startRecording() {
       globalTime += trackDur;
     } catch (e) {
       console.error(`녹화 실패 (track ${t.id}):`, e);
+      studio._recTrackErrors.push(`${t.title}: ${e?.message || e}`);
       // Phase 4-D-7: 인코더 사망이 원인이면 markEncoderDead 가 띄운 안내를 덮지 않는다.
       //   (죽은 인코더에 encode 하면 여기로 InvalidStateError 가 떨어진다.)
       if (!studio._encError) {
@@ -1726,6 +1738,9 @@ async function finishRecording() {
   if (studio._fallbackUsed) {
     console.warn(`[REC] 이 녹화는 자동 폴백을 사용했습니다 — 사유: ${studio._fallbackReason}`);
   }
+  // 예약 렌더가 결과를 읽는다 (studio._lastResult). saved = 파일이 디스크에 온전히 마감됨.
+  let saved = false;
+  let failMsg = null;
   try {
     // Phase 4-D-7: 죽은 인코더에 flush() 를 걸면 reject 된다.
     //   예전엔 그게 catch 로 튀어 _writable.abort() → **녹화분 전체 삭제**로 이어졌다.
@@ -1748,6 +1763,7 @@ async function finishRecording() {
       }
       // 정지(recCancelled)여도 지금까지 인코딩+finalize 된 부분은 유효한 mp4 → 저장한다.
       await studio._writable.close();
+      saved = true;
       const mb = (enc.getMuxerMaxEnd() / 1048576).toFixed(1);
       const fname = studio._saveHandle?.name || 'video.mp4';
       if (studio._encError) {
@@ -1790,6 +1806,7 @@ async function finishRecording() {
       }
       // 정지여도 지금까지 걸 다운로드 (부분 저장).
       downloadBlobFallback(blob);
+      saved = true;
       const mb2 = (blob.size / 1024 / 1024).toFixed(1);
       if (studio._encError) {
         setRecStatus(`⚠ 인코더 사망으로 중단 — 여기까지만 저장됨 (${mb2} MB)<br>사유: ${studio._encError.message}`);
@@ -1818,6 +1835,8 @@ async function finishRecording() {
     await markVideoDone(studio.session?.videoId);
   } catch (e) {
     console.error('finalize 실패:', e);
+    saved = false;
+    failMsg = e?.message || String(e);
     // Phase 4-D-7: abort() 는 swap 파일을 폐기해 **녹화분 전체를 날린다**.
     //   먼저 close() 로 디스크에 남기고, 그것마저 실패할 때만 abort.
     //   moov 가 없으면 그냥은 재생 안 되지만 untrunc 등으로 복구할 여지는 남는다.
@@ -1844,6 +1863,15 @@ async function finishRecording() {
   } finally {
     // Phase 4-D-7: 초기화하기 전에 사망 여부를 잡아둔다 (아래 제목 마커용).
     const diedMsg = studio._encError?.message || null;
+    studio._lastResult = {
+      saved,
+      cancelled: !!studio.recCancelled && !diedMsg,
+      died: diedMsg,
+      error: failMsg,
+      bytes: enc.getMuxerMaxEnd(),
+      trackErrors: studio._recTrackErrors || [],
+      fallbackUsed: !!studio._fallbackUsed,
+    };
     studio.recording = false;
     studio.recCancelled = false;
     studio.recordingFps = null;
@@ -1881,3 +1909,36 @@ window.pjlKillEncoder = (reason = '수동 테스트 강제 사망') => {
   markEncoderDead('VideoEncoder', new Error(reason));
 };
 window.pjlStudio = studio;
+
+// ─── 예약 렌더 진입점 (render-queue.js) ───────────────────────────────
+// 세션을 Studio 에 올리고 → 저장 창 없이 sink 로 녹화 → 결과(studio._lastResult)를 돌려준다.
+// 사람이 [Studio 로 이동] → [녹화] 를 누르는 것과 같은 코드를 탄다. 다른 것은 저장 위치뿐.
+window.pjlStudioRunQueued = async function pjlStudioRunQueued(session, sink, { fps } = {}) {
+  if (studio.recording) throw new Error('이미 녹화 중입니다');
+  if (!studio.initialized) {
+    bindControls();
+    bindVisibilityWatcher();
+    studio.initialized = true;
+  }
+  studio._queueBoot = true;
+  try {
+    sessionStorage.setItem(SS_KEY, JSON.stringify(session));
+    window.switchTab?.('studio');
+    teardown();
+    showMain();
+    await bootSession(session);
+  } finally {
+    studio._queueBoot = false;
+  }
+  // 자는 동안 도는 렌더다 — 배경 영상이 안 올라왔으면 엉뚱한 화면으로 30분을 굽지 말고 실패로 남긴다.
+  const bgKey = session.template?.config_json?.backgroundVideo?.key;
+  if (bgKey && !studio.bgVideo) throw new Error(`배경 영상을 못 불러옴: ${bgKey}`);
+  if (fps && fps !== studio.fps) {
+    applyFpsChange(fps);
+    const sel = $('#studioFpsSelect');
+    if (sel) sel.value = String(fps);
+  }
+  studio._lastResult = null;
+  await startRecording({ sink });
+  return studio._lastResult;
+};
