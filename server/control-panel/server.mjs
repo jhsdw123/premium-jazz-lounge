@@ -33,7 +33,7 @@ import {
 import { detectInstruments } from '../../lib/instruments.mjs';
 import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
-import { LOOP_DIR, listLoops, loopThumbPath, prepareLoop, proxyFilePath } from '../../lib/loop-videos.mjs';
+import { LOOP_DIR, listLoops, loopThumbPath, prepareLoop, proxyFilePath, deleteLoops } from '../../lib/loop-videos.mjs';
 import {
   listQueue, addJob, patchJob, removeJob, clearFinished, openFile, writeAt, closeFile, startExtend,
 } from '../../lib/render-queue.mjs';
@@ -1870,6 +1870,21 @@ app.get('/api/loops', async (_req, res) => {
     ]);
     for (const loop of loops) loop.used = used?.get(loop.key) || null;
     res.json({ ok: true, dir: LOOP_DIR, loops, usageKnown: !!used });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// 이미 영상에 쓴 루프의 파일(원본 + 업스케일본)을 휴지통으로. 사용 기록(DB)은 그대로 남는다.
+//   body.keys 는 화면에서 확인받은 목록 — 서버가 "사용됨" 인 것만 다시 걸러서 지운다.
+app.post('/api/loops/delete-used', async (req, res) => {
+  try {
+    if (listQueue().items.some((it) => it.status === 'rendering')) {
+      return res.status(409).json({ ok: false, error: '지금 녹화 중입니다 — 끝난 뒤에 지우세요' });
+    }
+    const used = await loopUsage();
+    const keys = (Array.isArray(req.body?.keys) ? req.body.keys : []).map(String).filter((k) => used.has(k));
+    res.json({ ok: true, ...(await deleteLoops(keys)) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

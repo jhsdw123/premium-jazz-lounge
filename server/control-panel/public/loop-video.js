@@ -229,6 +229,52 @@ export async function openLoopPicker(currentKey = null) {
     head.querySelector('span').textContent = j.usageKnown ? j.dir : `${j.dir} — ⚠ 사용 기록을 못 읽어 "사용됨" 표시가 빠졌습니다`;
     box.appendChild(head);
 
+    // 사용한 영상 삭제 — 원본 + 업스케일본을 묶음째 휴지통으로. 지금 템플릿에 고른 것은 남긴다.
+    const cards = new Map(); // key → card
+    let usedLoops = j.loops.filter((l) => l.used && l.key !== currentKey);
+    const delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.style.cssText = 'padding:6px 12px;border-radius:6px;border:1px solid #b3261e;background:transparent;color:#ff8a80;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap;';
+    const paintDelBtn = () => {
+      delBtn.textContent = `🗑 사용한 영상 삭제 (${usedLoops.length})`;
+      delBtn.style.display = usedLoops.length ? '' : 'none';
+    };
+    paintDelBtn();
+    delBtn.addEventListener('click', async () => {
+      const lines = usedLoops.map((l) => `· ${l.key} — 파일 ${l.fileCount}개, ${Math.round(l.totalMB)}MB (${usedText(l.used)} 사용)`);
+      if (!confirm(`이미 영상에 쓴 루프 ${usedLoops.length}개를 지울까요?
+원본과 업스케일본이 같이 휴지통으로 갑니다.
+
+${lines.join('\n')}`)) return;
+      delBtn.disabled = true;
+      delBtn.textContent = '지우는 중…';
+      try {
+        const r = await fetch('/api/loops/delete-used', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ keys: usedLoops.map((l) => l.key) }),
+        });
+        const d = await r.json();
+        if (!r.ok || !d.ok) throw new Error(d.error || `HTTP ${r.status}`);
+        const gone = new Set(d.deleted.map((x) => x.key));
+        for (const key of gone) cards.get(key)?.remove();
+        usedLoops = usedLoops.filter((l) => !gone.has(l.key));
+        const mb = d.deleted.reduce((a, x) => a + x.sizeMB, 0);
+        let msg = `${d.deleted.length}개 삭제 (${Math.round(mb)}MB) — 휴지통에 있습니다.`;
+        if (d.skipped.length) msg += `
+
+못 지운 것:
+${d.skipped.map((x) => `· ${x.key}: ${x.reason}`).join('\n')}`;
+        alert(msg);
+      } catch (e) {
+        alert(`삭제 실패: ${e.message}`);
+      } finally {
+        delBtn.disabled = false;
+        paintDelBtn();
+      }
+    });
+    head.appendChild(delBtn);
+
     if (!j.loops.length) {
       const empty = document.createElement('div');
       empty.style.cssText = 'padding:40px;text-align:center;color:var(--text-dim,#999);';
@@ -268,6 +314,7 @@ export async function openLoopPicker(currentKey = null) {
       if (usable && loop.writing) spec.innerHTML += ' <span style="color:#e0a040;">(다른 파일 저장 중)</span>';
       info.append(name, spec);
       card.append(img, info);
+      cards.set(loop.key, card);
       if (usable) {
         card.addEventListener('click', () => {
           if (loop.used && !picked && !confirm(`${loop.key} 은(는) 이미 영상에 쓴 루프입니다 (${usedText(loop.used)}).
