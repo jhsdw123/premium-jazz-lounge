@@ -1852,13 +1852,19 @@ async function loopUsage() {
     .not('template_json->backgroundVideo->>key', 'is', null)
     .order('created_at', { ascending: false });
   if (error) throw error;
-  const used = new Map(); // key → { count, lastUsedAt }
+  const uses = new Map(); // key → [사용 시각(ms), 최근순]
   for (const row of data || []) {
-    const u = used.get(row.key);
-    if (u) u.count++;
-    else used.set(row.key, { count: 1, lastUsedAt: row.created_at });
+    if (!uses.has(row.key)) uses.set(row.key, []);
+    uses.get(row.key).push(Date.parse(row.created_at));
   }
-  return used;
+  return uses;
+}
+
+// 이름만으로 판정하면 안 된다 — 쓴 루프를 지우면 ClipLoop Studio 가 그 번호를 새 클립에 다시 붙일 수 있다
+// (2026-10-11: 지운 010 자리에 새 010 이 들어와 "사용됨" 으로 나옴). 그 파일이 생긴 뒤의 사용만 센다.
+function usedInfo(uses, loop) {
+  const times = (uses?.get(loop.key) || []).filter((t) => t > loop.originalMtime);
+  return times.length ? { count: times.length, lastUsedAt: new Date(times[0]).toISOString() } : null;
 }
 
 app.get('/api/loops', async (_req, res) => {
@@ -1868,7 +1874,7 @@ app.get('/api/loops', async (_req, res) => {
       listLoops(),
       loopUsage().catch((e) => { console.warn('[loops] 사용 기록 조회 실패:', e.message); return null; }),
     ]);
-    for (const loop of loops) loop.used = used?.get(loop.key) || null;
+    for (const loop of loops) loop.used = usedInfo(used, loop);
     res.json({ ok: true, dir: LOOP_DIR, loops, usageKnown: !!used });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -1882,9 +1888,11 @@ app.post('/api/loops/delete-used', async (req, res) => {
     if (listQueue().items.some((it) => it.status === 'rendering')) {
       return res.status(409).json({ ok: false, error: '지금 녹화 중입니다 — 끝난 뒤에 지우세요' });
     }
-    const used = await loopUsage();
-    const keys = (Array.isArray(req.body?.keys) ? req.body.keys : []).map(String).filter((k) => used.has(k));
-    res.json({ ok: true, ...(await deleteLoops(keys)) });
+    const uses = await loopUsage();
+    const asked = new Set((Array.isArray(req.body?.keys) ? req.body.keys : []).map(String));
+    const targets = (await listLoops()).filter((l) => asked.has(l.key) && usedInfo(uses, l));
+    const mtimes = Object.fromEntries(targets.map((l) => [l.key, l.originalMtime]));
+    res.json({ ok: true, ...(await deleteLoops(Object.keys(mtimes), mtimes)) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }
