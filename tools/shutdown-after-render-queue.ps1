@@ -30,6 +30,9 @@ function DurationOf([string]$file) {
   } catch { return 0 }
 }
 
+# "-File ... -Ids a,b" arrives as one string "a,b" - split it.
+$Ids = @($Ids | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
 Say "watch start: ids=$($Ids -join ',') every ${IntervalSec}s"
 $misses = 0
 while ($true) {
