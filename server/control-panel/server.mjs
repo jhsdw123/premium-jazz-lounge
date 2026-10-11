@@ -1842,9 +1842,34 @@ app.post('/api/templates/:id/favorite', async (req, res) => {
 
 // ─── 배경 루프 영상 (로컬 폴더 PJLLoopvideo — R2 에 안 올린다) ────────────
 //   템플릿에는 config_json.backgroundVideo = { key } 만 저장하고, 파일은 고를 때마다 폴더에서 찾는다.
+//   "사용됨" 은 따로 적지 않는다 — 영상 프로젝트(pjl_video_projects)에 빌드 때의 템플릿 사본이 남으므로,
+//   mp4 까지 나온(done/uploaded) 프로젝트의 backgroundVideo.key 를 모으면 그게 쓴 루프다.
+async function loopUsage() {
+  const { data, error } = await supabase
+    .from('pjl_video_projects')
+    .select('created_at, key:template_json->backgroundVideo->>key')
+    .in('status', ['done', 'uploaded'])
+    .not('template_json->backgroundVideo->>key', 'is', null)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  const used = new Map(); // key → { count, lastUsedAt }
+  for (const row of data || []) {
+    const u = used.get(row.key);
+    if (u) u.count++;
+    else used.set(row.key, { count: 1, lastUsedAt: row.created_at });
+  }
+  return used;
+}
+
 app.get('/api/loops', async (_req, res) => {
   try {
-    res.json({ ok: true, dir: LOOP_DIR, loops: await listLoops() });
+    // DB 가 잠깐 안 돼도 고르기는 돼야 한다 — 그땐 표시만 빠진다.
+    const [loops, used] = await Promise.all([
+      listLoops(),
+      loopUsage().catch((e) => { console.warn('[loops] 사용 기록 조회 실패:', e.message); return null; }),
+    ]);
+    for (const loop of loops) loop.used = used?.get(loop.key) || null;
+    res.json({ ok: true, dir: LOOP_DIR, loops, usageKnown: !!used });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

@@ -197,6 +197,12 @@ function specText(f) {
   return `${f.width}×${f.height} · ${Math.round(f.fps)}fps`;
 }
 
+// used = { count, lastUsedAt } — 그 루프로 mp4 를 뽑은 영상 수와 마지막 날짜.
+function usedText(used) {
+  const d = new Date(used.lastUsedAt);
+  return `${d.getMonth() + 1}/${d.getDate()}${used.count > 1 ? ` · ${used.count}번` : ''}`;
+}
+
 // 고른 묶음의 key 를 돌려준다. 닫으면 null.
 export async function openLoopPicker(currentKey = null) {
   const r = await fetch('/api/loops');
@@ -220,7 +226,7 @@ export async function openLoopPicker(currentKey = null) {
     const head = document.createElement('div');
     head.style.cssText = 'display:flex;align-items:baseline;gap:12px;margin-bottom:12px;';
     head.innerHTML = `<b style="font-size:15px;">🎞 배경 루프 영상 고르기</b><span style="font-size:11px;color:var(--text-dim,#999);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>`;
-    head.querySelector('span').textContent = j.dir;
+    head.querySelector('span').textContent = j.usageKnown ? j.dir : `${j.dir} — ⚠ 사용 기록을 못 읽어 "사용됨" 표시가 빠졌습니다`;
     box.appendChild(head);
 
     if (!j.loops.length) {
@@ -232,15 +238,23 @@ export async function openLoopPicker(currentKey = null) {
 
     const grid = document.createElement('div');
     grid.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;';
-    for (const loop of j.loops) {
+    // 안 쓴 것이 위, 이미 영상에 쓴 것은 아래로 (각각 최근순 그대로).
+    const loops = [...j.loops].sort((x, y) => !!x.used - !!y.used);
+    for (const loop of loops) {
       const usable = !!loop.use;
       const card = document.createElement('div');
       const picked = loop.key === currentKey;
-      card.style.cssText = `border:2px solid ${picked ? 'var(--jazz-gold,#D4AF37)' : 'var(--border,#333)'};border-radius:8px;overflow:hidden;background:var(--bg-input,#111);cursor:${usable ? 'pointer' : 'default'};opacity:${usable ? 1 : 0.5};`;
+      card.style.cssText = `position:relative;border:2px solid ${picked ? 'var(--jazz-gold,#D4AF37)' : 'var(--border,#333)'};border-radius:8px;overflow:hidden;background:var(--bg-input,#111);cursor:${usable ? 'pointer' : 'default'};opacity:${usable ? 1 : 0.5};`;
       const img = document.createElement('img');
       img.src = `/api/loops/thumb?key=${encodeURIComponent(loop.key)}`;
       img.loading = 'lazy';
-      img.style.cssText = 'width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000;';
+      img.style.cssText = `width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000;${loop.used ? 'filter:grayscale(1) brightness(.45);' : ''}`;
+      if (loop.used) {
+        const badge = document.createElement('div');
+        badge.style.cssText = 'position:absolute;z-index:1;top:8px;left:8px;padding:3px 9px;border-radius:4px;background:#b3261e;color:#fff;font-size:12px;font-weight:700;';
+        badge.textContent = `✓ 사용됨 · ${usedText(loop.used)}`;
+        card.appendChild(badge);
+      }
       const info = document.createElement('div');
       info.style.cssText = 'padding:8px 10px;font-size:12px;line-height:1.5;';
       const name = document.createElement('div');
@@ -254,7 +268,13 @@ export async function openLoopPicker(currentKey = null) {
       if (usable && loop.writing) spec.innerHTML += ' <span style="color:#e0a040;">(다른 파일 저장 중)</span>';
       info.append(name, spec);
       card.append(img, info);
-      if (usable) card.addEventListener('click', () => close(loop.key));
+      if (usable) {
+        card.addEventListener('click', () => {
+          if (loop.used && !picked && !confirm(`${loop.key} 은(는) 이미 영상에 쓴 루프입니다 (${usedText(loop.used)}).
+그래도 고를까요?`)) return;
+          close(loop.key);
+        });
+      }
       grid.appendChild(card);
     }
     box.appendChild(grid);
