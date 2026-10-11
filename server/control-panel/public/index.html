@@ -1006,6 +1006,20 @@
     .te-comp-buttons {
       display: grid; grid-template-columns: 1fr 1fr; gap: 6px;
     }
+    .te-fx-row {
+      display: flex; align-items: center; gap: 4px;
+      padding: 3px 4px; border: 1px solid transparent; border-radius: 4px;
+    }
+    .te-fx-row.selected { border-color: var(--jazz-gold); background: var(--bg-input); }
+    .te-fx-row .te-fx-name {
+      flex: 1; min-width: 0; font-size: 12px; cursor: pointer;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .te-fx-row .te-fx-name:hover { color: var(--jazz-gold); }
+    .te-fx-row .te-fx-layer { font-size: 10px; color: var(--text-muted); }
+    .te-fx-row .te-btn { padding: 2px 6px; font-size: 11px; }
+    /* 이펙트 canvas 의 mix-blend-mode 가 무대 밖(페이지 배경)과 섞이지 않게 무대를 한 묶음으로 */
+    .te-canvas-frame { isolation: isolate; }
     .te-btn {
       background: var(--bg-input); color: var(--text);
       border: 1px solid var(--border); border-radius: 4px;
@@ -2005,6 +2019,16 @@
               <button class="te-btn" data-add="playlist" id="teAddPlaylistBtn" type="button" title="전체 곡 목록 + 현재 곡 강조 (한 영상에 1개)">+ Playlist</button>
               <button class="te-btn" data-add="clock" id="teAddClockBtn" type="button" title="현재 곡 경과 시간 + 4종 디자인 (한 영상에 1개)">+ Clock</button>
             </div>
+          </div>
+
+          <div class="te-card">
+            <h3>✨ 이펙트 필터</h3>
+            <div class="row" style="gap:6px;">
+              <select id="teFxType" style="flex:1;min-width:0;"></select>
+              <button class="te-btn" id="teFxAddBtn" type="button">+ 추가</button>
+            </div>
+            <div id="teFxList" style="margin-top:8px;"></div>
+            <div class="te-bg-status">이름을 클릭하면 오른쪽에서 세부 조정 · 체크로 켜고 끄기</div>
           </div>
 
           <div class="te-card">

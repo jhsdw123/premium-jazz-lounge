@@ -14,7 +14,21 @@ import {
   getAmplitudes,
   drawCustomVisualizer,
   isCustomStyle,
+  LINE_WIDTH_STYLES,
+  FILL_OPACITY_STYLES,
+  STYLE_PARAMS,
 } from './visualizer-styles.js';
+import {
+  EFFECT_TYPES,
+  EFFECT_GROUPS,
+  EFFECT_BLENDS,
+  defaultEffect,
+  effectParam,
+  effectBlend,
+  effectOpacity,
+  normalizeEffects,
+  drawEffect,
+} from './effects-renderer.js';
 import { drawTextPanel, hasTextPanel, TEXT_PANEL_DEFAULTS } from './text-panel.js';
 import { drawTextComponent } from './text-renderer.js';
 
@@ -31,6 +45,8 @@ const te = {
   bgVideoKey: null,        // 배경 루프 영상 묶음 이름 (config_json.backgroundVideo.key 로 저장)
   bgVideo: null,           // LoopVideo — Studio 와 같은 재생기
   selectedId: null,        // 선택된 컴포넌트 id
+  effects: [],             // 이펙트 필터 (config_json.effects 로 저장) — effects-renderer.js
+  selectedFxId: null,      // 속성 패널에서 고치는 중인 이펙트 id (컴포넌트 선택과 둘 중 하나)
   editingTemplate: null,   // 현재 편집 기준 템플릿 (있으면 새 저장 시 dup, 없으면 fresh)
   initialized: false,
 };
@@ -1259,6 +1275,7 @@ window.addEventListener('resize', () => {
 // ─── State mutators ─────────────────────────────────────────────
 function selectComponent(id) {
   te.selectedId = id;
+  if (id) te.selectedFxId = null;
   // 선택 표시만 갱신 (전체 re-render 하면 interact 핸들러 다시 바인딩되어 비싸짐)
   $$('#teCanvasInner .te-comp').forEach((el) => {
     el.classList.toggle('selected', el.dataset.id === id);
@@ -1396,12 +1413,248 @@ function updateAddClockBtn() {
     : '현재 곡 경과 시간 + 4종 디자인 (한 영상에 1개)';
 }
 
+// ─── 이펙트 필터 ───────────────────────────────────────────────
+//   화면 전체에 얹는 분위기 효과. 그리는 코드는 effects-renderer.js 하나 (Studio 와 공유).
+//   에디터는 이펙트마다 1920×1080 canvas 를 무대 위에 두고 CSS mix-blend-mode / opacity 로 얹는다 —
+//   Studio 가 임시 canvas 에 그려서 같은 blend·opacity 로 얹는 것과 같은 계산.
+//   'back' 은 배경 바로 위(컴포넌트 뒤), 'front' 는 모든 것 위.
+
+function fxCanvasOf(id) {
+  return document.querySelector(`#teCanvasFrame canvas[data-fx-id="${id}"]`);
+}
+
+// te.effects 와 무대 위 canvas 를 맞춘다 (없는 건 만들고, 지워진 건 치우고, 순서·blend·opacity 반영).
+function syncFxCanvases() {
+  const frame = $('#teCanvasFrame');
+  const inner = $('#teCanvasInner');
+  if (!frame || !inner) return;
+  const alive = new Set(te.effects.map((fx) => fx.id));
+  frame.querySelectorAll('canvas[data-fx-id]').forEach((cv) => {
+    if (!alive.has(cv.dataset.fxId)) cv.remove();
+  });
+  for (const fx of te.effects) {
+    let cv = fxCanvasOf(fx.id);
+    if (!cv) {
+      cv = document.createElement('canvas');
+      cv.dataset.fxId = fx.id;
+      cv.width = CANVAS_W;
+      cv.height = CANVAS_H;
+      cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;';
+    }
+    // 목록 순서대로 다시 꽂는다: back 은 컴포넌트 층 앞에, front 는 그 뒤에.
+    if ((fx.layer || 'front') === 'back') frame.insertBefore(cv, inner);
+    else frame.insertBefore(cv, frame.querySelector('svg.guide-overlay'));
+    cv.style.mixBlendMode = effectBlend(fx);
+    cv.style.opacity = String(effectOpacity(fx));
+    cv.style.display = fx.enabled === false ? 'none' : '';
+  }
+  startFxLoop();
+}
+
+let fxRaf = 0;
+let fxLast = 0;
+function startFxLoop() {
+  if (fxRaf) return;
+  fxLast = performance.now();
+  const tick = (now) => {
+    fxRaf = 0;
+    if (!te.effects.some((fx) => fx.enabled !== false)) return;   // 켜진 게 없으면 쉰다
+    const dt = (now - fxLast) / 1000;
+    fxLast = now;
+    const frame = $('#teCanvasFrame');
+    if (frame && frame.offsetParent !== null) {                    // 다른 탭을 보는 중이면 안 그린다
+      for (const fx of te.effects) {
+        if (fx.enabled === false) continue;
+        const cv = fxCanvasOf(fx.id);
+        if (!cv) continue;
+        const ctx = cv.getContext('2d');
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalAlpha = 1;
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+        drawEffect(ctx, fx, CANVAS_W, CANVAS_H, dt);
+      }
+    }
+    fxRaf = requestAnimationFrame(tick);
+  };
+  fxRaf = requestAnimationFrame(tick);
+}
+
+function addEffect(type) {
+  const fx = defaultEffect(type);
+  if (!fx) return;
+  te.effects.push(fx);
+  syncFxCanvases();
+  selectEffect(fx.id);
+}
+
+function removeEffect(id) {
+  te.effects = te.effects.filter((fx) => fx.id !== id);
+  if (te.selectedFxId === id) te.selectedFxId = null;
+  syncFxCanvases();
+  renderProps();
+}
+
+function selectEffect(id) {
+  selectComponent(null);          // 컴포넌트 선택 표시를 지운다 (안에서 renderProps 한 번)
+  te.selectedFxId = id;
+  renderProps();
+}
+
+// 목록에서 위/아래로 — 아래에 있을수록 나중에(위에) 얹힌다.
+function moveEffect(id, dir) {
+  const i = te.effects.findIndex((fx) => fx.id === id);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= te.effects.length) return;
+  [te.effects[i], te.effects[j]] = [te.effects[j], te.effects[i]];
+  syncFxCanvases();
+  renderFxList();
+}
+
+function renderFxList() {
+  const box = $('#teFxList');
+  if (!box) return;
+  if (!te.effects.length) {
+    box.innerHTML = '<div class="te-bg-status">(이펙트 없음 — 위에서 골라 추가)</div>';
+    return;
+  }
+  box.innerHTML = te.effects.map((fx, i) => `
+    <div class="te-fx-row ${fx.id === te.selectedFxId ? 'selected' : ''}" data-fx-row="${fx.id}">
+      <input type="checkbox" data-fx-on ${fx.enabled !== false ? 'checked' : ''} title="켜기 / 끄기" />
+      <span class="te-fx-name" data-fx-pick title="클릭하면 오른쪽에서 세부 조정">${EFFECT_TYPES[fx.type]?.label || fx.type}</span>
+      <span class="te-fx-layer" title="얹는 자리">${(fx.layer || 'front') === 'back' ? '뒤' : '앞'}</span>
+      <button type="button" class="te-btn" data-fx-up ${i === 0 ? 'disabled' : ''} title="위로 (먼저 그림 = 아래에 깔림)">↑</button>
+      <button type="button" class="te-btn" data-fx-down ${i === te.effects.length - 1 ? 'disabled' : ''} title="아래로 (나중에 그림 = 위에 얹힘)">↓</button>
+      <button type="button" class="te-btn danger" data-fx-del title="삭제">✕</button>
+    </div>
+  `).join('');
+  box.querySelectorAll('[data-fx-row]').forEach((row) => {
+    const id = row.dataset.fxRow;
+    row.querySelector('[data-fx-on]').addEventListener('change', (e) => {
+      const fx = te.effects.find((x) => x.id === id);
+      if (!fx) return;
+      fx.enabled = e.target.checked;
+      syncFxCanvases();
+    });
+    row.querySelector('[data-fx-pick]').addEventListener('click', () => selectEffect(id));
+    row.querySelector('[data-fx-up]').addEventListener('click', () => moveEffect(id, -1));
+    row.querySelector('[data-fx-down]').addEventListener('click', () => moveEffect(id, 1));
+    row.querySelector('[data-fx-del]').addEventListener('click', () => removeEffect(id));
+  });
+}
+
+// 이펙트 속성 패널 — EFFECT_TYPES 의 params 표에서 그대로 만든다.
+function renderFxProps(wrap, fx) {
+  const def = EFFECT_TYPES[fx.type];
+  wrap.classList.remove('empty');
+  const fmt = (v) => String(Math.round(v * 1000) / 1000);
+  const slider = (key, label, min, max, step, val, suffix = '') => `
+    <div class="slider-row">
+      <label>${label}</label>
+      <input type="range" data-fx-prop="${key}" min="${min}" max="${max}" step="${step}" value="${val}" />
+      <span class="val" data-fx-val="${key}">${fmt(val)}${suffix}</span>
+    </div>
+  `;
+  const field = (prm) => {
+    const v = effectParam(fx, prm.key);
+    if (prm.type === 'color') {
+      return `<div class="te-prop"><label>${prm.label}</label><input type="color" data-fx-prop="${prm.key}" value="${v}" /></div>`;
+    }
+    if (prm.type === 'select') {
+      return `<div class="te-prop"><label>${prm.label}</label><select data-fx-prop="${prm.key}">
+        ${prm.options.map(([o, lab]) => `<option value="${o}" ${o === v ? 'selected' : ''}>${lab}</option>`).join('')}
+      </select></div>`;
+    }
+    if (prm.type === 'bool') {
+      return `<div class="te-prop"><label class="vocal-check" style="font-size:12px;cursor:pointer;">
+        <input type="checkbox" data-fx-prop="${prm.key}" ${v ? 'checked' : ''} /> ${prm.label}</label></div>`;
+    }
+    return slider(prm.key, prm.label, prm.min, prm.max, prm.step, v, prm.suffix || '');
+  };
+  wrap.innerHTML = `
+    <h3>이펙트 — ${def.label}</h3>
+    <div class="te-prop-grid">
+      <div class="te-prop">
+        <label>얹는 자리</label>
+        <select data-fx-prop="layer">
+          <option value="front" ${(fx.layer || 'front') === 'front' ? 'selected' : ''}>앞 — 모든 것 위</option>
+          <option value="back" ${fx.layer === 'back' ? 'selected' : ''}>뒤 — 배경 바로 위 (글자·비주얼라이저 뒤)</option>
+        </select>
+      </div>
+      <div class="te-prop">
+        <label>얹는 방식 (블렌드)</label>
+        <select data-fx-prop="blend">
+          ${EFFECT_BLENDS.map(([b, lab]) => `<option value="${b}" ${effectBlend(fx) === b ? 'selected' : ''}>${lab}${b === def.blend ? ' ← 기본' : ''}</option>`).join('')}
+        </select>
+      </div>
+      ${slider('opacity', '전체 진하기', 0, 1, 0.01, effectOpacity(fx), '')}
+      <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:row;align-items:center;justify-content:space-between;">
+        <label style="color:var(--jazz-gold)">— 세부 조정 —</label>
+        <button type="button" class="te-btn" id="teFxReset" style="padding:2px 8px;font-size:11px;">↺ 기본값</button>
+      </div>
+      ${def.params.map(field).join('')}
+    </div>
+  `;
+  // 값이 바뀌어도 패널을 다시 그리지 않는다 (색상 창이 닫히지 않게) — 숫자 표시만 제자리에서 고친다.
+  wrap.querySelectorAll('[data-fx-prop]').forEach((inp) => {
+    const key = inp.dataset.fxProp;
+    const apply = () => {
+      const cur = te.effects.find((x) => x.id === fx.id);
+      if (!cur) return;
+      let val;
+      if (inp.type === 'checkbox') val = inp.checked;
+      else if (inp.type === 'range') val = parseFloat(inp.value);
+      else val = inp.value;
+      if (typeof val === 'number' && Number.isNaN(val)) return;
+      cur[key] = val;
+      const valEl = wrap.querySelector(`[data-fx-val="${key}"]`);
+      if (valEl) {
+        const suffix = valEl.textContent.replace(/^[\d.\-]+/, '');
+        valEl.textContent = `${fmt(val)}${suffix}`;
+      }
+      if (key === 'layer' || key === 'blend' || key === 'opacity') {
+        syncFxCanvases();
+        if (key === 'layer') renderFxList();
+      }
+    };
+    inp.addEventListener('input', apply);
+    inp.addEventListener('change', apply);
+  });
+  wrap.querySelector('#teFxReset')?.addEventListener('click', () => {
+    const cur = te.effects.find((x) => x.id === fx.id);
+    if (!cur) return;
+    for (const prm of def.params) cur[prm.key] = prm.def;
+    renderProps();
+  });
+}
+
+let fxUiReady = false;
+function initFxUi() {
+  if (fxUiReady) return;
+  fxUiReady = true;
+  const sel = $('#teFxType');
+  if (sel) {
+    sel.innerHTML = EFFECT_GROUPS.map(([group, types]) => `
+      <optgroup label="${group}">
+        ${types.map((t) => `<option value="${t}">${EFFECT_TYPES[t].label}</option>`).join('')}
+      </optgroup>
+    `).join('');
+  }
+  $('#teFxAddBtn')?.addEventListener('click', () => addEffect($('#teFxType').value));
+  renderFxList();
+  syncFxCanvases();
+}
+
 // ─── Properties panel ─────────────────────────────────────────
 function renderProps() {
   const wrap = $('#teProps');
   if (!wrap) return;
   const c = te.components.find((x) => x.id === te.selectedId);
+  if (c && te.selectedFxId) te.selectedFxId = null;   // 컴포넌트가 골라져 있으면 그쪽이 우선
+  renderFxList();
   if (!c) {
+    const fx = te.effects.find((x) => x.id === te.selectedFxId);
+    if (fx) { renderFxProps(wrap, fx); return; }
     wrap.classList.add('empty');
     wrap.innerHTML = '컴포넌트를 클릭하면 여기서 속성을 편집합니다.';
     return;
@@ -1554,8 +1807,10 @@ function renderProps() {
     // 곡선 계열(선 두께·부드러움 옵션) / 채움 계열 / 연기 계열 세분화
     const isCurve = vstyle === 'wave-time' || vstyle === 'mirror' || vstyle === 'mirror-fill' || vstyle === 'aurora-hills';
     const isSmoke = vstyle === 'smoke';
-    const showFill = isLine || vstyle === 'mirror-fill' || vstyle === 'aurora-hills' || vstyle === 'reflection-bars' || isSmoke;
-    const hasStyleOpts = isCurve || showFill || isSmoke;
+    const usesLineWidth = LINE_WIDTH_STYLES.includes(vstyle);
+    const showFill = isLine || vstyle === 'mirror-fill' || vstyle === 'aurora-hills' || vstyle === 'reflection-bars' || isSmoke
+      || FILL_OPACITY_STYLES.includes(vstyle);
+    const hasStyleOpts = isCurve || showFill || isSmoke || usesLineWidth;
     // Phase 4-D-3-D-1 polish — 3 modes:
     //   solid    → c.color (단색, AM 에는 1색 dynamic gradient 등록)
     //   gradient → c.gradientStops (3-stop, AM 에는 multi-stop dynamic gradient 등록)
@@ -1648,6 +1903,20 @@ function renderProps() {
           <option value="reflection-bars" ${vstyle === 'reflection-bars' ? 'selected' : ''}>Reflection Bars (반사 막대)</option>
           <option value="peak-dots" ${vstyle === 'peak-dots' ? 'selected' : ''}>Peak Dots (피크 점)</option>
           <option value="smoke" ${vstyle === 'smoke' ? 'selected' : ''}>Smoke (연기처럼 퍼짐)</option>
+          <optgroup label="부드럽고 역동적인 스타일">
+            ${[
+              ['silk-ribbon', 'Silk Ribbon (겹겹이 흐르는 리본)'],
+              ['liquid-wave', 'Liquid Wave (출렁이는 액체)'],
+              ['echo-trails', 'Echo Trails (잔상이 위로 흐름)'],
+              ['neon-strings', 'Neon Strings (떨리는 다섯 줄 현)'],
+              ['spring-bars', 'Spring Bars (탄력 있는 대칭 막대)'],
+              ['dot-matrix', 'Dot Matrix (차오르는 점 격자)'],
+              ['floating-orbs', 'Floating Orbs (떠다니는 빛망울)'],
+              ['pulse-rings', 'Pulse Rings (박자마다 퍼지는 원)'],
+              ['radial-bloom', 'Radial Bloom (돌며 피어나는 꽃잎)'],
+              ['radial-bars', 'Radial Bars (원형 햇살 막대)'],
+            ].map(([v, lab]) => `<option value="${v}" ${vstyle === v ? 'selected' : ''}>${lab}</option>`).join('')}
+          </optgroup>
         </select>
       </div>
 
@@ -1655,10 +1924,21 @@ function renderProps() {
         <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
           <label style="color:var(--jazz-gold)">— 스타일 옵션 —</label>
         </div>
-        ${(isCurve || isLine) ? slider('lineWidth', 'Line Width', 1, 10, 0.5, c.lineWidth ?? 3, 'px') : ''}
+        ${(isCurve || isLine || usesLineWidth) ? slider('lineWidth', 'Line Width', 1, 10, 0.5, c.lineWidth ?? 3, 'px') : ''}
         ${isCurve ? slider('smoothness', 'Smoothness', 0, 1, 0.05, c.smoothness ?? 0.5, '') : ''}
-        ${showFill ? slider('fillOpacity', isSmoke ? 'Smoke Opacity' : 'Fill Opacity', 0, 1, 0.05, c.fillOpacity ?? (isSmoke ? 0.5 : 0.3), '') : ''}
+        ${showFill ? slider('fillOpacity', isSmoke ? 'Smoke Opacity' : 'Fill Opacity', 0, 1, 0.05, c.fillOpacity ?? (isSmoke ? 0.5 : vstyle === 'floating-orbs' ? 0.6 : 0.3), '') : ''}
         ${isSmoke ? slider('smokeDensity', 'Smoke Density', 0.2, 3, 0.1, c.smokeDensity ?? 1, '') : ''}
+      ` : ''}
+
+      ${STYLE_PARAMS[vstyle] ? `
+        <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;display:flex;flex-direction:row;align-items:center;justify-content:space-between;">
+          <label style="color:var(--jazz-gold)">— 세부 조정 —</label>
+          <button type="button" class="te-btn" id="teVizDetailReset" style="padding:2px 8px;font-size:11px;" title="이 스타일의 세부 조정 값을 처음 모양으로">↺ 기본값</button>
+        </div>
+        ${STYLE_PARAMS[vstyle].map((sp) => {
+          const v = typeof c[sp.key] === 'number' && Number.isFinite(c[sp.key]) ? c[sp.key] : sp.def;
+          return slider(sp.key, sp.label, sp.min, sp.max, sp.step, v, sp.suffix || '');
+        }).join('')}
       ` : ''}
 
       <div class="te-prop full" style="margin-top:6px;border-top:1px solid var(--border);padding-top:8px;">
@@ -2038,7 +2318,12 @@ function renderProps() {
         const suffix = valEl.textContent.replace(/^[\d.\-]+/, '') || '';
         valEl.textContent = `${val}${suffix}`;
       }
-      updateComponent(c.id, { [prop]: val });
+      const patch = { [prop]: val };
+      if (prop === 'visualizerStyle') {
+        // 세부 조정 값(vzGain 등)은 스타일마다 알맞은 값이 다르다 → 새 스타일의 기본값에서 시작.
+        for (const sp of STYLE_PARAMS[val] || []) patch[sp.key] = undefined;
+      }
+      updateComponent(c.id, patch);
       // visualizerStyle 변경 시 props 패널 sub-옵션 show/hide 위해 다시 그리기.
       if (prop === 'visualizerStyle') renderProps();
     });
@@ -2114,6 +2399,16 @@ function renderProps() {
     });
   });
 
+  // Visualizer — 세부 조정 값을 그 스타일의 기본값으로 (값을 지우면 그리는 쪽이 기본값을 쓴다)
+  wrap.querySelector('#teVizDetailReset')?.addEventListener('click', () => {
+    const cur = te.components.find((x) => x.id === c.id);
+    if (!cur) return;
+    const patch = {};
+    for (const sp of STYLE_PARAMS[cur.visualizerStyle] || []) patch[sp.key] = undefined;
+    updateComponent(cur.id, patch);
+    renderProps();
+  });
+
   // Visualizer — Color Mode 라디오 (solid / gradient / preset)
   wrap.querySelectorAll('input[name="vmcolor"][data-mode]').forEach((r) => {
     r.addEventListener('change', () => {
@@ -2152,9 +2447,16 @@ function renderProps() {
       if (idx < 0 || idx >= stops.length) return;
       stops[idx] = { ...stops[idx], ...patch };
       updateComponent(cur.id, { gradientStops: stops });
-      renderProps();
+      // 여기서 renderProps() 를 부르면 안 된다 — 패널을 통째로 다시 만들면서 지금 열려 있는
+      // 색상 입력칸이 사라져, 마우스를 떼기도 전에 색상 창이 닫히고 첫 색으로 굳는다.
+      // 바뀐 자리(미리보기 띠·글자)만 제자리에서 고친다.
+      const preview = wrap.querySelector('.te-gradient-preview');
+      if (preview) preview.style.background = gradientCss(stops);
+      const text = row.querySelector('.stop-text');
+      if (text) text.textContent = `${String(stops[idx].color).toUpperCase()} @ ${stops[idx].position}%`;
     };
     posIn?.addEventListener('input', () => {
+      if (posIn.value === '') return;               // 지우고 다시 치는 중
       const v = Math.max(0, Math.min(100, parseInt(posIn.value, 10) || 0));
       updateStop({ position: v });
     });
@@ -2318,7 +2620,7 @@ $('#teSaveBtn')?.addEventListener('click', async () => {
     $('#teSaveName').focus();
     return;
   }
-  if (!te.components.length && !te.bgUrl && !te.bgVideoKey) {
+  if (!te.components.length && !te.bgUrl && !te.bgVideoKey && !te.effects.length) {
     if (!confirm('컴포넌트도 배경도 없습니다. 그래도 빈 템플릿을 저장할까요?')) return;
   }
   const isFav = $('#teSaveFav').checked;
@@ -2326,6 +2628,7 @@ $('#teSaveBtn')?.addEventListener('click', async () => {
     canvas: { width: CANVAS_W, height: CANVAS_H },
     components: te.components.map(stripRuntimeFields),
     ...(te.bgVideoKey ? { backgroundVideo: { key: te.bgVideoKey } } : {}),
+    ...(te.effects.length ? { effects: te.effects.map((fx) => ({ ...fx })) } : {}),
   };
   try {
     const j = await apiPost('/api/templates', {
@@ -2899,6 +3202,9 @@ async function loadTemplate(id) {
     te.components = loadConfigToCanvas(j.template.config_json || {});
     te.bgUrl = j.template.background_image_url || null;
     te.selectedId = null;
+    te.effects = normalizeEffects(j.template.config_json?.effects);
+    te.selectedFxId = null;
+    syncFxCanvases();
     $('#teEditingName').textContent = j.template.name;
     $('#teBgStatus').textContent = te.bgUrl ? '(편집 중인 템플릿의 배경)' : '(배경 없음)';
     setBgVideo(j.template.config_json?.backgroundVideo?.key || null);
@@ -2948,6 +3254,7 @@ async function templatesOnEnter() {
     await Promise.all([refreshTemplateList(), refreshPreviewTracks()]);
     renderCanvas();
     startVisualizerTicker();
+    initFxUi();
     bindPreviewControls();
     bindModeToggle();
     applyModeToggleUI();

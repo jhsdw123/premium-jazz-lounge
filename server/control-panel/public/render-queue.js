@@ -103,6 +103,8 @@ function render() {
       if (ext.error) lines.push(`⚠ 연장: ${esc(ext.error)}`);
       if (ext.warn) lines.push(`⚠ ${esc(ext.warn)}`);
       const canRemove = !(it.status === 'rendering' && rq.running) && ext.status !== 'running';
+      // 중지·실패한 편은 [예약 렌더링 시작] 이 건너뛴다 → 이 단추로 대기(queued)에 되돌려야 다시 돈다.
+      const canRetry = !rq.running && (it.status === 'stopped' || it.status === 'failed');
       const extTag = it.status === 'queued' || it.status === 'rendering'
         ? (it.extend ? `<span class="rq-tag">+ ${rq.extendHours}시간 연장</span>` : '')
         : '';
@@ -115,6 +117,7 @@ function render() {
             ${lines.map((l) => `<div class="rq-sub">${l}</div>`).join('')}
           </div>
           ${statusBadge(it)}
+          ${canRetry ? '<button class="bulk-btn rq-retry" type="button" title="처음부터 다시 녹화하도록 대기로 되돌린다 (부분 저장된 파일은 그대로 남는다)">↻ 다시 예약</button>' : ''}
           ${canRemove ? '<button class="bulk-btn rq-del" type="button" title="예약에서 빼기">✕</button>' : ''}
         </div>`;
     }).join('');
@@ -394,6 +397,13 @@ function bind() {
     try { await api('POST', '/api/render-queue/clear-finished'); await refresh(); } catch (e) { toast(e.message, 'error'); }
   });
   $('#rqList').addEventListener('click', async (ev) => {
+    const retry = ev.target.closest('.rq-retry');
+    if (retry) {
+      const rid = retry.closest('.rq-row')?.dataset.id;
+      if (!rid) return;
+      try { await api('POST', `/api/render-queue/${rid}`, { status: 'queued', error: null, note: null }); await refresh(); } catch (e) { toast(e.message, 'error'); }
+      return;
+    }
     const btn = ev.target.closest('.rq-del');
     if (!btn) return;
     const id = btn.closest('.rq-row')?.dataset.id;

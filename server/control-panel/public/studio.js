@@ -16,6 +16,7 @@ import {
 import { drawPlaylist } from './playlist-renderer.js';
 import { drawClock } from './clock-renderer.js';
 import { getAmplitudes, drawCustomVisualizer, isCustomStyle } from './visualizer-styles.js';
+import { drawEffectsOnto, normalizeEffects, resetEffectStates } from './effects-renderer.js';
 import { drawTextComponent } from './text-renderer.js';
 import { LoopVideo, createSmoothClock } from './loop-video.js';
 
@@ -303,6 +304,11 @@ function renderFrame() {
     ctx.drawImage(img, dx, dy, dw, dh);
   }
 
+  // 1-b) 이펙트 필터 '뒤' 층 — 배경 바로 위, 컴포넌트 아래. (effects-renderer.js, 에디터와 같은 코드)
+  //   시간은 프레임당 1/fps 고정 — 녹화가 밀려도 영상 속 비·눈의 속도는 일정하다.
+  const fxDt = 1 / (studio.fps || 60);
+  drawEffectsOnto(ctx, studio.effects, 'back', CANVAS_W, CANVAS_H, fxDt);
+
   // 2) 변수 컨텍스트
   const tracks = studio.session?.tracks || [];
   const idx = studio.currentTrackIdx >= 0 ? studio.currentTrackIdx : 0;
@@ -361,6 +367,9 @@ function renderFrame() {
     drawNPState(ctx, studio.npCtrl.stateAt(), studio.npComp);
     ctx.restore();
   }
+
+  // 5) 이펙트 필터 '앞' 층 — 모든 것 위.
+  drawEffectsOnto(ctx, studio.effects, 'front', CANVAS_W, CANVAS_H, fxDt);
 }
 
 // ─── NowPlaying 셋업 / 트리거 ─────────────────────────────────────
@@ -883,6 +892,8 @@ async function bootSession(session) {
 
   const tpl = session.template || {};
   studio.components = adaptTemplate(tpl.config_json || {});
+  studio.effects = normalizeEffects(tpl.config_json?.effects);
+  resetEffectStates();
   studio.bgImg = await loadImage(tpl.background_image_url);
   // 배경 루프 영상 — 폴더에서 지워졌거나 못 읽으면 배경 그림으로 남는다.
   const bgKey = tpl.config_json?.backgroundVideo?.key;
@@ -966,6 +977,7 @@ function teardown() {
   destroyClock();
   studio.session = null;
   studio.components = [];
+  studio.effects = [];
   studio.bgImg = null;
   studio.bgVideo?.destroy();
   studio.bgVideo = null;
