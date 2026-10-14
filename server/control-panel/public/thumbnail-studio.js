@@ -1070,17 +1070,38 @@
     const status = document.getElementById('thProjectStatus');
     status.textContent = '프로젝트 목록 불러오는 중...';
     try {
-      const r = await fetch('/api/videos/recent?limit=20');
+      // done=1: 영상이 실제로 나온 것만 (3D Studio·임시 draft 제외), yt=1: 올린 유튜브 영상 제목·공개일
+      const r = await fetch('/api/videos/recent?limit=20&done=1&yt=1');
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || 'API 오류');
       thumbState.recentProjects = j.videos || [];
+
+      // 이름 = 올린 유튜브 제목 + 공개(예약)일. 아직 안 올렸으면 빌드 시각 + 첫 곡.
+      const md = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}/${d.getDate()}`; };
+      const hm = (iso) => { const d = new Date(iso); return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+      const cut = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+      const label = (v) => {
+        const yt = v.youtube;
+        if (yt) {
+          // 날짜를 앞에 — 칸이 좁아 뒤가 잘려도 같은 제목 영상(Gatsby 등)을 구분할 수 있게
+          const when = yt.publishAt && yt.privacyStatus !== 'public'
+            ? `${md(yt.publishAt)} 예약` : `${md(yt.publishedAt || yt.publishAt)} 공개`;
+          return `${when} · ${cut(yt.title, 60)}`;
+        }
+        const first = v.tracks?.[0]?.title_en || '';
+        return `${md(v.created_at)} ${hm(v.created_at)} 빌드 · ${v.tracks?.length || 0}곡${first ? ` · 첫 곡 ${first}` : ''}`;
+      };
+      const opts = (list) => list.map(({ v, i }) => {
+        const noBg = v.template?.background_image_url ? '' : ' (배경없음)';
+        return `<option value="${i}">${escapeHtml(label(v))}${noBg}</option>`;
+      }).join('');
+      const items = thumbState.recentProjects.map((v, i) => ({ v, i }));
+      const up = items.filter(({ v }) => v.youtube);
+      const notUp = items.filter(({ v }) => !v.youtube);
       sel.innerHTML = '<option value="">— 최근 영상 프로젝트 선택 —</option>' +
-        thumbState.recentProjects.map((v, i) => {
-          const name = v.title || v.build_id || v.id;
-          const noBg = v.template?.background_image_url ? '' : ' (배경없음)';
-          return `<option value="${i}">${escapeHtml(name)}${noBg}</option>`;
-        }).join('');
-      status.textContent = `${thumbState.recentProjects.length}개 프로젝트 — 선택하면 배경+제목 자동 세팅`;
+        (up.length ? `<optgroup label="📺 유튜브에 올린 영상">${opts(up)}</optgroup>` : '') +
+        (notUp.length ? `<optgroup label="⏳ 아직 안 올린 영상">${opts(notUp)}</optgroup>` : '');
+      status.textContent = `${thumbState.recentProjects.length}개 프로젝트 (올림 ${up.length} · 안 올림 ${notUp.length}) — 선택하면 배경+제목 자동 세팅`;
     } catch (e) {
       status.textContent = '목록 로드 실패: ' + e.message;
     }

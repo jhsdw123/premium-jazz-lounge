@@ -2212,14 +2212,20 @@ app.get('/api/videos', async (_req, res) => {
 //   Builder '최근 영상 불러오기' 용 — 곡·순서 복원 + 즉석 썸네일 렌더 데이터.
 //   ⚠ '/:id' 라우트보다 먼저 정의해야 함 (안 그러면 id='recent' 로 매칭됨).
 // ─────────────────────────────────────────────────────────────
+//   ?done=1 → 영상이 실제로 나온(done/uploaded) + 템플릿 있는 것만 (썸네일 Quick Start —
+//            3D Studio·임시 draft 가 목록 20칸을 차지하던 것 정리).
+//   ?yt=1   → 각 프로젝트에 업로드된 YouTube 영상 { videoId, title, privacyStatus, publishAt, publishedAt }
+//            (곡 목록 대조, matchYoutubeVideo). 인증 안 됐으면 youtube=null.
 app.get('/api/videos/recent', async (req, res) => {
   try {
     const limit = Math.min(Math.max(parseIntOrNull(req.query.limit) || 5, 1), 20);
-    const { data: vids, error } = await supabase
+    let q = supabase
       .from('pjl_video_projects')
       .select('id, build_id, title, status, total_duration_sec, track_ids, template_id, created_at')
       .order('created_at', { ascending: false })
       .limit(limit);
+    if (req.query.done === '1') q = q.in('status', ['done', 'uploaded']).not('template_id', 'is', null);
+    const { data: vids, error } = await q;
     if (error) throw error;
     const videos = vids || [];
 
@@ -2267,6 +2273,20 @@ app.get('/api/videos/recent', async (req, res) => {
       template: v.template_id != null ? (tplMap.get(v.template_id) || null) : null,
     }));
 
+    if (req.query.yt === '1' && ytConfigured() && ytLoadToken()) {
+      const ytVideos = await ytRecentVideosCached();
+      for (const v of result) {
+        const m = matchYoutubeVideo(v.tracks.map((t) => t.title_en), ytVideos);
+        v.youtube = m && {
+          videoId: m.v.id,
+          title: m.v.localizations?.en?.title || m.v.title,
+          privacyStatus: m.v.privacyStatus,
+          publishAt: m.v.publishAt || null,
+          publishedAt: m.v.publishedAt || null,
+        };
+      }
+    }
+
     res.json({ ok: true, videos: result });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
@@ -2288,6 +2308,27 @@ async function ytRecentVideosCached() {
 
 const normTrackName = (s) => String(s || '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
+// 곡 제목들 ↔ YouTube 영상 설명란 타임스탬프 곡 목록 대조 → 가장 많이 겹치는 영상 { v, hit, trackCount } 또는 null.
+//   절반 이상 겹쳐야 같은 영상으로 본다 (곡 재사용이 잦아 한두 곡 겹침은 우연).
+function matchYoutubeVideo(titles, ytVideos) {
+  const names = [...new Set((titles || []).map(normTrackName).filter(Boolean))];
+  if (!names.length) return null;
+  let best = null;
+  for (const v of ytVideos || []) {
+    const lines = new Set(
+      (v.description || '').split('\n')
+        .map((l) => l.match(/^\s*(?:\d{1,2}:)?\d{1,2}:\d{2}\s+(.+)$/)?.[1])
+        .filter(Boolean)
+        .map(normTrackName),
+    );
+    if (!lines.size) continue;
+    const hit = names.filter((n) => lines.has(n)).length;
+    if (!best || hit > best.hit) best = { v, hit };
+  }
+  if (!best || best.hit < Math.max(2, Math.ceil(names.length / 2))) return null;
+  return { ...best, trackCount: names.length };
+}
+
 app.get('/api/videos/:id/youtube-title', async (req, res) => {
   if (!ytAuthGate(req, res)) return;
   try {
@@ -2306,24 +2347,11 @@ app.get('/api/videos/:id/youtube-title', async (req, res) => {
       .select('id, title:pjl_titles(title_en)')
       .in('id', ids);
     if (terr) throw terr;
-    const names = [...new Set((tracks || []).map((t) => normTrackName(t.title?.title_en)).filter(Boolean))];
-    if (!names.length) return res.json({ ok: true, match: null });
-
-    let best = null;
-    for (const v of await ytRecentVideosCached()) {
-      const lines = new Set(
-        (v.description || '').split('\n')
-          .map((l) => l.match(/^\s*(?:\d{1,2}:)?\d{1,2}:\d{2}\s+(.+)$/)?.[1])
-          .filter(Boolean)
-          .map(normTrackName),
-      );
-      if (!lines.size) continue;
-      const hit = names.filter((n) => lines.has(n)).length;
-      if (!best || hit > best.hit) best = { v, hit };
-    }
-    // 절반 이상 겹쳐야 같은 영상으로 본다 (곡 재사용이 잦아 한두 곡 겹침은 우연)
-    if (!best || best.hit < Math.max(2, Math.ceil(names.length / 2))) {
-      return res.json({ ok: true, match: null, trackCount: names.length });
+    const titles = (tracks || []).map((t) => t.title?.title_en);
+    const best = matchYoutubeVideo(titles, await ytRecentVideosCached());
+    if (!best) {
+      const trackCount = new Set(titles.map(normTrackName).filter(Boolean)).size;
+      return res.json({ ok: true, match: null, ...(trackCount ? { trackCount } : {}) });
     }
     const v = best.v;
     const title = v.localizations?.en?.title || v.title;
@@ -2331,7 +2359,7 @@ app.get('/api/videos/:id/youtube-title', async (req, res) => {
       ok: true,
       match: {
         videoId: v.id, title, privacyStatus: v.privacyStatus, publishAt: v.publishAt,
-        matchedTracks: best.hit, trackCount: names.length,
+        matchedTracks: best.hit, trackCount: best.trackCount,
       },
     });
   } catch (e) {
