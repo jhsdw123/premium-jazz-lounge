@@ -1,0 +1,4 @@
+# 맥에서 실행하는 스크립트는 항상 LF (CRLF 면 맥 bash 가 못 읽는다)
+*.command text eol=lf
+*.sh text eol=lf
+*.py text eol=lf
