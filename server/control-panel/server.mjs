@@ -797,30 +797,60 @@ app.get('/api/tracks/autocomplete', async (req, res) => {
   }
 });
 
-// ─── Tracks: 가장 최근 사용 영상의 곡 list (Phase 5-B) ───────────────────
-//   GET /api/tracks/:id/last-video
-//   - 이 곡의 가장 최근 used_at 의 video_id 조회.
-//   - 그 video_id 의 모든 pjl_track_usage row + 트랙/제목/길이 조회.
-//   - 누적 시간 계산해 timecode 부여.
-//   - 응답: { ok, video_id, used_at, track_count, tracks: [{ position, title, track_id, length_sec, start_sec, timecode }] }
+// ─── Tracks: 이 곡으로 시작한 영상의 곡 list (Phase 5-B) ──────────────────
+//   GET /api/tracks/:id/last-video[?video=<video_id>]
+//   - Uploader 는 "첫 곡" 으로 찾는다 → 이 곡이 1번 자리였던 export 중 가장 최근 것.
+//     (자리 무시하고 최근 사용을 고르면, 그 곡을 다음 영상 중간에 재사용했을 때
+//      다음 영상 목록이 딸려 온다 — 2026-10-15 Chicago Hot Jazz 설명란 사고)
+//   - 1번 자리로 쓴 적이 없으면 가장 최근 사용으로 fallback + as_first=false.
+//   - ?video= 로 특정 export 지정 가능 (같은 곡으로 시작한 영상이 여럿일 때 화면에서 고름).
+//   - 그 video_id 의 모든 pjl_track_usage row + 트랙/제목/길이 조회 → 누적 시간으로 timecode.
+//   - 응답: { ok, video_id, used_at, as_first, track_count, tracks: [...],
+//            candidates: [{ video_id, used_at, track_count, preview }] }  ← 1번 자리 export 들(최신순)
 //   - 사용 이력 없으면 404 + { fallback: 'manual' }.
 app.get('/api/tracks/:id/last-video', async (req, res) => {
   const trackId = parseIntOrNull(req.params.id);
   if (!trackId) return res.status(400).json({ ok: false, error: 'invalid track id' });
 
   try {
-    // 1) 가장 최근 사용
-    const { data: last, error: e1 } = await supabase
+    // 1) 이 곡의 사용 이력 (최신순)
+    const { data: uses, error: e1 } = await supabase
       .from('pjl_track_usage')
       .select('video_id, used_at, track_position')
       .eq('track_id', trackId)
       .order('used_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
+      .limit(200);
     if (e1) throw e1;
-    if (!last) {
+    if (!uses?.length) {
       return res.status(404).json({ ok: false, error: '이 곡의 사용 이력 없음', fallback: 'manual' });
     }
+    const firstUses = uses.filter((u) => u.track_position === 1);
+    const wanted = typeof req.query.video === 'string' ? req.query.video : null;
+    const last = (wanted && uses.find((u) => u.video_id === wanted)) || firstUses[0] || uses[0];
+    const asFirst = last.track_position === 1;
+
+    // 후보 목록 — 같은 곡으로 시작한 export 가 여럿이면 화면에서 고를 수 있게. 곡 수 + 앞 3곡 제목.
+    const candVideos = firstUses.slice(0, 10).map((u) => u.video_id);
+    const candRows = new Map(candVideos.map((v) => [v, []]));
+    if (candVideos.length > 1) {
+      const { data: rows, error: ec } = await supabase
+        .from('pjl_track_usage')
+        .select('video_id, track_position, track:pjl_tracks ( title:pjl_titles ( title_en ) )')
+        .in('video_id', candVideos);
+      if (ec) throw ec;
+      for (const r of rows || []) candRows.get(r.video_id)?.push(r);
+    }
+    const candidates = candVideos.length > 1
+      ? firstUses.slice(0, 10).map((u) => {
+        const rows = (candRows.get(u.video_id) || []).sort((a, b) => a.track_position - b.track_position);
+        return {
+          video_id: u.video_id,
+          used_at: u.used_at,
+          track_count: rows.length,
+          preview: rows.slice(1, 3).map((r) => r.track?.title?.title_en || '').filter(Boolean),
+        };
+      })
+      : [];
 
     // 2) 그 video_id 의 모든 곡 (position 순). 트랙/제목/길이 join.
     //    pjl_track_usage → pjl_tracks → pjl_titles 2단 nested embed.
@@ -861,8 +891,10 @@ app.get('/api/tracks/:id/last-video', async (req, res) => {
       ok: true,
       video_id: last.video_id,
       used_at: last.used_at,
+      as_first: asFirst,
       track_count: tracks.length,
       tracks,
+      candidates,
     });
   } catch (e) {
     console.error('[last-video] 실패:', e);

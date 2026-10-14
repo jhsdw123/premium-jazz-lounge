@@ -591,6 +591,7 @@ function ensureMetaPanel() {
         <span style="color:var(--text-muted);font-size:11px;">📅 <span id="metaMatchDate"></span></span>
         <button id="metaUseTracksBtn" type="button" class="te-btn gold" style="padding:6px 12px;font-size:12px;">이 곡들 사용</button>
       </div>
+      <div id="metaMatchNote" style="display:none;margin-bottom:10px;font-size:12px;line-height:1.5;"></div>
       <div id="metaTrackList" style="background:#0e0e0e;border:1px solid #2a2a2a;border-radius:6px;"></div>
     </div>
 
@@ -746,16 +747,18 @@ function formatLastUsedLocal(iso) {
 }
 
 // ─── 곡 선택 → 매칭 영상 fetch ─────────────────────────────────
-async function selectTrack(trackId) {
+async function selectTrack(trackId, videoId = null) {
   const input = document.getElementById('metaFirstTrackInput');
   const ac = document.getElementById('metaAutocomplete');
   const found = uploader.acResults.find((t) => t.id === trackId);
   if (found && input) input.value = found.title;
   if (ac) ac.style.display = 'none';
+  uploader._matchTrackId = trackId;
 
   let data;
   try {
-    const r = await fetch(`/api/tracks/${trackId}/last-video`);
+    const q = videoId ? `?video=${encodeURIComponent(videoId)}` : '';
+    const r = await fetch(`/api/tracks/${trackId}/last-video${q}`);
     data = await r.json();
   } catch (e) {
     alert(`매칭 fetch 실패: ${e.message}`);
@@ -780,6 +783,28 @@ function renderMatchedTracks(matchData) {
   const matchDate = document.getElementById('metaMatchDate');
 
   matchDate.textContent = `${fmtDateLocal(matchData.used_at)} 사용 · 영상 ID ${matchData.video_id} · ${matchData.track_count}곡`;
+
+  // 이 곡이 첫 곡이 아니었던 영상을 가져왔으면 경고, 같은 곡으로 시작한 영상이 여럿이면 고르기.
+  const note = document.getElementById('metaMatchNote');
+  const cands = matchData.candidates || [];
+  let noteHtml = '';
+  if (matchData.as_first === false) {
+    noteHtml += `<div style="padding:8px 10px;background:#2a1a0a;border:1px solid #a86b1f;border-radius:4px;color:#ffb35c;">
+      ⚠ 이 곡을 <b>첫 곡</b>으로 쓴 영상이 없습니다. 아래는 이 곡이 ${matchData.tracks.find((t) => t.track_id === uploader._matchTrackId)?.position ?? '?'}번째로 들어간 영상의 목록이에요.
+      올릴 영상의 곡 목록이 맞는지 꼭 확인하세요.</div>`;
+  }
+  if (cands.length > 1) {
+    noteHtml += `<label style="display:block;color:var(--text-muted);margin-top:${noteHtml ? 8 : 0}px;">
+      이 곡으로 시작한 영상이 ${cands.length}개 있어요 — 올릴 영상을 고르세요
+      <select id="metaCandSelect" style="width:100%;margin-top:4px;padding:6px 8px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
+        ${cands.map((c) => `<option value="${escapeHtml(c.video_id)}"${c.video_id === matchData.video_id ? ' selected' : ''}>
+          ${escapeHtml(fmtDateTime(c.used_at))} 뽑음 · ${c.track_count}곡 · ${escapeHtml(c.preview.join(' → '))} …</option>`).join('')}
+      </select></label>`;
+  }
+  note.innerHTML = noteHtml;
+  note.style.display = noteHtml ? 'block' : 'none';
+  const candSel = document.getElementById('metaCandSelect');
+  if (candSel) candSel.onchange = () => selectTrack(uploader._matchTrackId, candSel.value);
 
   trackList.innerHTML = matchData.tracks.map((t, i) => `
     <div style="display:flex;gap:12px;padding:8px 12px;border-bottom:1px solid #1f1f1f;font-size:13px;align-items:baseline;">
