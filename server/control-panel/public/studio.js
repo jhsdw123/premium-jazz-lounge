@@ -1260,6 +1260,7 @@ async function startRecording(opts = {}) {
   studio._writeChain = Promise.resolve();
   studio._writeError = null;
   studio._recTrackErrors = [];
+  studio._manualSave = !opts.sink;   // 저장 창으로 저장 → 끝나면 3시간 연장 여부를 묻는다 (예약 렌더는 시작 전에 이미 물음)
   if (opts.sink) {
     studio._writable = opts.sink;
     studio._saveHandle = { name: opts.sink.name };
@@ -1706,6 +1707,81 @@ function downloadBlobFallback(blob) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 120000);
+  return a.download;
+}
+
+// ─── 수동 녹화 끝 → 3시간으로 늘릴지 묻기 ─────────────────────────────
+// 예약 렌더는 시작 전에 묻고 서버가 늘린다. 수동 녹화(저장 창)도 같은 도구(PNL-3D-Studio loop-video.py
+// --intro pjl-title)를 같은 서버 경로로 탄다 — 저장 창은 경로를 안 알려 주므로 서버가 이름·크기로 파일을 찾는다.
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+async function askManualExtend(info, session) {
+  let q;
+  try { q = await (await fetch('/api/render-queue')).json(); } catch { return; }
+  const hours = q?.extendHours || 3;
+  const modal = $('#manualExtModal');
+  if (!modal) return;
+  // index.html 에선 Builder 탭 안에 있다 → Studio 탭에서도 보이게 body 로 옮긴다.
+  if (modal.parentElement !== document.body) document.body.appendChild(modal);
+  if (!q?.extendReady) {
+    setRecStatus(`${$('#studioRecStatus')?.innerHTML || ''}<br>⚠ 3시간 늘리기 도구(PNL-3D-Studio)가 없어 연장은 못 합니다`);
+    return;
+  }
+  $('#manualExtFile').innerHTML = `📁 ${esc(info.name)} (${(info.bytes / 1048576).toFixed(0)} MB)`;
+  $('#manualExtNote').innerHTML =
+    `[늘리기] 를 누르면 바퀴 사이 디졸브 + 맨 앞 PJL 인트로를 넣어 <b>약 ${hours}시간</b> 본을 같은 폴더에 따로 만듭니다 (원래 영상도 그대로 남습니다).` +
+    (info.download ? '<br>⚠ 브라우저 자동 다운로드로 저장됐습니다 — 다운로드가 다 끝난 뒤에 누르세요.' : '') +
+    '<br>늘리는 동안(10분 안팎) 다음 녹화는 시작하지 마세요.';
+  const go = $('#manualExtGo');
+  go.textContent = `⏩ ${hours}시간으로 늘리기`;
+  go.disabled = false;
+  modal.hidden = false;
+  const answer = await new Promise((resolve) => {
+    go.onclick = () => resolve(true);
+    $('#manualExtNo').onclick = () => resolve(false);
+  });
+  modal.hidden = true;
+  if (!answer) return;
+
+  const tracks = session?.tracks || [];
+  const first = tracks[0];
+  let item;
+  try {
+    const r = await fetch('/api/render-queue/manual-extend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: info.name, bytes: info.bytes,
+        trackIds: tracks.map((t) => t.id),
+        templateName: session?.template?.name ? `${session.template.name} (수동 녹화)` : '수동 녹화',
+        firstTitle: typeof first?.title === 'string' ? first.title : '',
+        durationSec: tracks.reduce((s, t) => s + (Number(t.durationSec) || 0), 0),
+      }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || r.statusText);
+    item = j.item;
+  } catch (e) {
+    setRecStatus(`⚠ ${hours}시간 늘리기 시작 실패: ${esc(e.message || String(e))}`);
+    return;
+  }
+  // 끝날 때까지 상태 줄에 진행을 보여 준다 (예약 렌더 목록에도 같은 항목이 뜬다).
+  for (;;) {
+    const ext = item?.ext || {};
+    if (ext.status === 'done') {
+      setRecStatus(`✅ ${hours}시간 본 완성 — ${esc((ext.file || '').split(/[\\/]/).pop())}${ext.warn ? `<br>⚠ ${esc(ext.warn)}` : ''}`);
+      return;
+    }
+    if (ext.status === 'failed') {
+      setRecStatus(`⚠ ${hours}시간 늘리기 실패: ${esc(ext.error || '')} (30분 원본은 그대로 있습니다)`);
+      return;
+    }
+    setRecStatus(`⏩ ${hours}시간으로 늘리는 중… ${esc(ext.line || '')}`);
+    await new Promise((r) => setTimeout(r, 4000));
+    try {
+      const j = await (await fetch('/api/render-queue')).json();
+      item = (j.items || []).find((x) => x.id === item.id) || item;
+    } catch {}
+  }
 }
 
 // mp4 저장 성공 직후 — DB 프로젝트 상태를 'done'(export 완료)으로 전환.
@@ -1753,6 +1829,7 @@ async function finishRecording() {
   // 예약 렌더가 결과를 읽는다 (studio._lastResult). saved = 파일이 디스크에 온전히 마감됨.
   let saved = false;
   let failMsg = null;
+  let extAsk = null;   // 수동 녹화가 온전히 끝났을 때만 { name, bytes } — finally 뒤에 3시간 연장 여부를 묻는다
   try {
     // Phase 4-D-7: 죽은 인코더에 flush() 를 걸면 reject 된다.
     //   예전엔 그게 catch 로 튀어 _writable.abort() → **녹화분 전체 삭제**로 이어졌다.
@@ -1786,6 +1863,7 @@ async function finishRecording() {
       } else {
         const partial = studio.recCancelled ? ' (정지 — 부분 저장)' : '';
         setRecStatus(`✅ 저장 완료${partial} — ${fname} (${mb} MB)${fbNote}`);
+        if (studio._manualSave && !studio.recCancelled) extAsk = { name: fname, bytes: enc.getMuxerMaxEnd() };
       }
     } else {
       // ── 폴백: in-memory Blob + 자동 다운로드 (File System Access 미지원/취소 시) ──
@@ -1817,7 +1895,7 @@ async function finishRecording() {
         return;
       }
       // 정지여도 지금까지 걸 다운로드 (부분 저장).
-      downloadBlobFallback(blob);
+      const dlName = downloadBlobFallback(blob);
       saved = true;
       const mb2 = (blob.size / 1024 / 1024).toFixed(1);
       if (studio._encError) {
@@ -1825,6 +1903,7 @@ async function finishRecording() {
       } else {
         const partial = studio.recCancelled ? ' (정지 — 부분 저장)' : '';
         setRecStatus(`✅ 저장 완료${partial} (${mb2} MB)${fbNote}`);
+        if (studio._manualSave && !studio.recCancelled) extAsk = { name: dlName, bytes: blob.size, download: true };
       }
     }
 
@@ -1833,6 +1912,7 @@ async function finishRecording() {
     //   status=done 이 되면 유령 draft 와 구분이 안 된다 → 둘 다 건너뛴다.
     if (studio._encError) {
       console.warn('[REC] 인코더 사망 — 사용 이력/done 처리 건너뜀 (재렌더 필요)');
+      extAsk = null;
       return;
     }
 
@@ -1848,6 +1928,7 @@ async function finishRecording() {
   } catch (e) {
     console.error('finalize 실패:', e);
     saved = false;
+    extAsk = null;
     failMsg = e?.message || String(e);
     // Phase 4-D-7: abort() 는 swap 파일을 폐기해 **녹화분 전체를 날린다**.
     //   먼저 close() 로 디스크에 남기고, 그것마저 실패할 때만 abort.
@@ -1893,8 +1974,11 @@ async function finishRecording() {
     studio._writeChain = null;
     studio._writeError = null;
     studio._encError = null;
+    const session = studio.session;
     studio._saveHandle = null;
+    studio._manualSave = false;
     studio._finishing = false;
+    if (extAsk) askManualExtend(extAsk, session);   // 기다리지 않는다 — 녹화 마감과 별개
     releaseWakeLock();
     unpinRecordingWindow(); // fire-and-forget — 실패해도 저장엔 영향 없음
     // unpin 은 첫 await 전에 document.title 을 동기적으로 되돌린다 → 그 직후에 마커를 얹어야
@@ -1921,6 +2005,8 @@ window.pjlKillEncoder = (reason = '수동 테스트 강제 사망') => {
   markEncoderDead('VideoEncoder', new Error(reason));
 };
 window.pjlStudio = studio;
+// 수동 녹화 뒤 연장 질문 창을 녹화 없이 띄워 보는 시험용: pjlAskManualExtend({ name, bytes }, session)
+window.pjlAskManualExtend = askManualExtend;
 
 // ─── 예약 렌더 진입점 (render-queue.js) ───────────────────────────────
 // 세션을 Studio 에 올리고 → 저장 창 없이 sink 로 녹화 → 결과(studio._lastResult)를 돌려준다.

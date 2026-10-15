@@ -1950,6 +1950,20 @@
           </div>
         </div>
       </div>
+      <!-- 수동 녹화(저장 창) 끝난 뒤: 3시간으로 늘릴지 (studio.js askManualExtend) -->
+      <div id="manualExtModal" class="recent-modal" hidden>
+        <div class="recent-dialog" style="max-width:560px;">
+          <div class="recent-head">
+            <strong>✅ 녹화 저장 완료 — 3시간으로 늘릴까요?</strong>
+          </div>
+          <div class="recent-hint" id="manualExtFile"></div>
+          <div class="recent-hint" id="manualExtNote"></div>
+          <div class="rq-ask-btns">
+            <button class="bulk-btn" id="manualExtNo" type="button">아니요, 30분 그대로</button>
+            <button class="primary" id="manualExtGo" type="button" style="height:42px;padding:0 22px;font-size:13px;background:var(--jazz-gold-dim);color:#000;border:1px solid var(--jazz-gold);font-weight:600;border-radius:4px;cursor:pointer;">⏩ 3시간으로 늘리기</button>
+          </div>
+        </div>
+      </div>
       <!-- Task 2-b: 최근 영상 불러오기 모달 -->
       <div id="recentModal" class="recent-modal" hidden>
         <div class="recent-dialog">

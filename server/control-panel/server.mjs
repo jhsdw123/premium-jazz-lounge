@@ -35,7 +35,7 @@ import { callGemini, parseTitlesJson } from '../../lib/llm.mjs';
 import { processBackground } from '../../lib/template-bg.mjs';
 import { LOOP_DIR, listLoops, loopThumbPath, prepareLoop, proxyFilePath, deleteLoops } from '../../lib/loop-videos.mjs';
 import {
-  listQueue, addJob, patchJob, removeJob, clearFinished, openFile, writeAt, closeFile, startExtend,
+  listQueue, addJob, patchJob, removeJob, clearFinished, openFile, writeAt, closeFile, startExtend, addManualExtend,
 } from '../../lib/render-queue.mjs';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -4170,6 +4170,8 @@ const rqRoute = (fn) => async (req, res) => {
 app.get('/api/render-queue', rqRoute(() => listQueue()));
 app.post('/api/render-queue', rqRoute((req) => ({ item: addJob(req.body) })));
 app.post('/api/render-queue/clear-finished', rqRoute(() => { clearFinished(); return listQueue(); }));
+// 수동 녹화(저장 창)로 저장한 영상 → 3시간 연장. 파일 이름·크기로 찾는다. '/:id' 보다 먼저 있어야 한다.
+app.post('/api/render-queue/manual-extend', rqRoute((req) => ({ item: addManualExtend(req.body) })));
 app.post('/api/render-queue/:id', rqRoute((req) => ({ item: patchJob(req.params.id, req.body) })));
 app.delete('/api/render-queue/:id', rqRoute((req) => { removeJob(req.params.id); return listQueue(); }));
 app.post('/api/render-queue/:id/file/open', rqRoute((req) => openFile(req.params.id)));
