@@ -3,7 +3,7 @@
 #
 # 렌더(Studio)는 브라우저 안에서 실시간으로 녹화한다 → 서버 + "안 졸게 켠 브라우저" 가 조건.
 #   - 서버: localhost:4001 (이미 켜져 있으면 건드리지 않는다 — 재시작하면 진행 중 작업이 끊긴다)
-#   - 브라우저: Comet (없으면 Chrome) + 백그라운드 절전 끄는 옵션 3개.
+#   - 브라우저: ego lite (없으면 Comet → Chrome) + 백그라운드 절전 끄는 옵션 3개.
 #     이 옵션은 브라우저가 "꺼져 있다가 새로 켜질 때만" 먹는다.
 cd "$(dirname "$0")" || exit 1
 ROOT="$(pwd)"
@@ -54,9 +54,10 @@ open_browser() {   # $1 = 앱 이름
     echo "   - $1 을 렌더용 옵션(백그라운드 절전 끔)으로 켰습니다"
   fi
 }
-if [ -d "/Applications/Comet.app" ] || [ -d "$HOME/Applications/Comet.app" ]; then open_browser Comet
+if [ -d "/Applications/ego lite.app" ] || [ -d "$HOME/Applications/ego lite.app" ]; then open_browser "ego lite"
+elif [ -d "/Applications/Comet.app" ] || [ -d "$HOME/Applications/Comet.app" ]; then open_browser Comet
 elif [ -d "/Applications/Google Chrome.app" ]; then open_browser "Google Chrome"
-else echo "   ! Comet·Chrome 을 못 찾아 기본 브라우저로 엽니다 (렌더용 옵션 없음)"; open "$URL"; fi
+else echo "   ! ego lite·Comet·Chrome 을 못 찾아 기본 브라우저로 엽니다 (렌더용 옵션 없음)"; open "$URL"; fi
 
 echo ""
 echo "완료! 컨트롤 패널 = $URL"
