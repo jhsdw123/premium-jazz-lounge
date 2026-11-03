@@ -10,6 +10,7 @@ const $ = (sel) => document.querySelector(sel);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const FPS_KEY = 'pjl.renderQueue.fps';
+const gb = (b) => `${(b / 1024 ** 3).toFixed(1)}GB`;
 
 const rq = {
   items: [],
@@ -196,9 +197,35 @@ function askBeforeStart(jobs) {
     modal.hidden = false;
 
     const boxes = () => [...modal.querySelectorAll('#rqAskList input[type=checkbox]')];
-    const onAll = () => boxes().forEach((b) => { if (!b.disabled) b.checked = $('#rqAskAll').checked; });
+    // 체크(연장 여부)가 바뀔 때마다 저장공간을 다시 잰다 — 3시간 본 하나가 ~17GB
+    let spaceSeq = 0;
+    const updateSpace = async () => {
+      const seq = ++spaceSeq;
+      const checked = Object.fromEntries(boxes().map((b) => [b.dataset.id, b.checked]));
+      const el = $('#rqAskSpace');
+      try {
+        const sc = await api('POST', '/api/render-queue/space-check', {
+          jobs: jobs.map((j) => ({ durationSec: j.durationSec, extend: !!checked[j.id] })),
+        });
+        if (seq !== spaceSeq) return;
+        el.classList.toggle('bad', !sc.enough);
+        el.innerHTML = sc.enough
+          ? `💾 저장공간: 남은 <b>${gb(sc.free)}</b> · 필요 약 <b>${gb(sc.need)}</b> — 충분합니다.`
+          : `⚠ <b>저장공간이 부족합니다.</b> 남은 ${gb(sc.free)}, 필요 약 <b>${gb(sc.need)}</b> (<b>${gb(sc.need - sc.free)}</b> 더 비워야 함).<br>`
+            + `이대로 시작하면 <b>${sc.fail.index + 1}번 영상의 ${sc.fail.stage}</b>부터 실패합니다. 업로드 끝난 3시간 본을 지우고 다시 여세요.`;
+        $('#rqAskGo').textContent = sc.enough ? '▶ 시작' : '⚠ 그래도 시작';
+      } catch (e) {
+        if (seq !== spaceSeq) return;
+        el.classList.remove('bad');
+        el.textContent = `💾 저장공간을 확인하지 못했습니다 (${e.message})`;
+      }
+    };
+    const onAll = () => { boxes().forEach((b) => { if (!b.disabled) b.checked = $('#rqAskAll').checked; }); updateSpace(); };
+    const onBox = (ev) => { if (ev.target.closest('#rqAskList')) updateSpace(); };
     const done = (val) => {
       modal.hidden = true;
+      spaceSeq++;
+      modal.removeEventListener('change', onBox);
       $('#rqAskAll').removeEventListener('change', onAll);
       $('#rqAskGo').removeEventListener('click', onGo);
       $('#rqAskCancel').removeEventListener('click', onCancel);
@@ -209,6 +236,11 @@ function askBeforeStart(jobs) {
       extend: Object.fromEntries(boxes().map((b) => [b.dataset.id, b.checked])),
     });
     const onCancel = () => done(null);
+    $('#rqAskSpace').textContent = '💾 저장공간 확인 중…';
+    $('#rqAskSpace').classList.remove('bad');
+    $('#rqAskGo').textContent = '▶ 시작';
+    updateSpace();
+    modal.addEventListener('change', onBox);
     $('#rqAskAll').addEventListener('change', onAll);
     $('#rqAskGo').addEventListener('click', onGo);
     $('#rqAskCancel').addEventListener('click', onCancel);

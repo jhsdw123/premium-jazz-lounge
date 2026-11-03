@@ -780,6 +780,10 @@
     .rq-ask-all { background: none; border-style: dashed; }
     .rq-ask-text { flex: 1; font-size: 13px; color: var(--text); }
     .rq-ask-q { font-size: 12px; color: var(--jazz-gold); white-space: nowrap; }
+    .rq-ask-space { font-size: 12px; line-height: 1.55; padding: 8px 12px; border-radius: 8px; margin: 10px 16px 0; color: var(--text-dim); background: rgba(255,255,255,0.04); }
+    .rq-ask-space:empty { display: none; }
+    .rq-ask-space.bad { color: #ffb4a8; background: rgba(229,83,61,0.14); border: 1px solid rgba(229,83,61,0.55); }
+    .rq-ask-space.bad b { color: #ffd3cb; }
     #rqAskList { overflow-y: auto; }
     .rq-ask-opts { display: flex; align-items: center; gap: 12px; padding: 12px 16px 0; font-size: 12px; color: var(--text-dim); }
     .rq-ask-opts select { background: var(--bg-input); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 5px 8px; margin-left: 6px; }
@@ -1944,6 +1948,7 @@
             <span class="rq-sub" style="flex:1;">인코더는 Studio 탭에서 고른 것을 그대로 씁니다.</span>
           </div>
           <div class="recent-hint" id="rqAskTime"></div>
+          <div class="rq-ask-space" id="rqAskSpace"></div>
           <div class="rq-ask-btns">
             <button class="bulk-btn" id="rqAskCancel" type="button">취소</button>
             <button class="primary" id="rqAskGo" type="button" style="height:42px;padding:0 22px;font-size:13px;">▶ 시작</button>
