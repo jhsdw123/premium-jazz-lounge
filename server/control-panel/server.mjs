@@ -3427,6 +3427,70 @@ ja (3-4 文, Vol 言及):
 Generate now. Return JSON only — all ${allLangs.length} languages.`;
 }
 
+// 미리 번역해 둔 제목용 프롬프트 (2026-11-15) — 제목은 17개 언어 모두 확정, Vol 번호 없음.
+//  Gemini 는 설명(body·tagline)·해시태그만 새로 쓰고, title 칸은 받은 문자열을 그대로 복사한다.
+//  (서버가 buildPathBMeta 에서 제목을 다시 덮어쓰므로 Gemini 가 틀려도 결과는 고정 제목)
+function buildPathBPromptFixed(inputs) {
+  const { mood, scenarios, era, notes, fixedTitles } = inputs;
+  const allLangs = ['en', ...PATH_B_LANGUAGES];
+  const titleLines = allLangs.map((l) => `- ${l}: ${fixedTitles[l] || fixedTitles.en}`).join('\n');
+  return `You are a YouTube SEO expert for "Premium Jazz Lounge" — a 24/7 instrumental jazz channel (upbeat New Orleans, Dixieland, big band and bright swing — no vocals) for an international audience (especially Japan, US, France, Italy, Korea).
+
+Write the video description text and hashtags in ${allLangs.length} languages: ${allLangs.join(', ')}.
+
+## The titles are ALREADY DECIDED — copy each one EXACTLY into its "title" field (no changes, no volume number, no emojis added)
+${titleLines}
+
+## Video Info
+- Title idea (English): ${fixedTitles.en}
+- Mood: ${mood || 'bright, cheerful swing'}
+- Use Scenarios: ${scenarios || 'work, housework, cooking, everyday listening'}
+- Era/Genre: ${era || ''}
+- Additional Notes: ${notes || ''}
+- Important: This video is Midroll-Ad-Free (no ads in the middle)
+- This is NOT part of a numbered series: never write "Vol.", "Volume", "第N弾", "N번째" or any episode number anywhere.
+
+## Output Format (STRICT JSON ONLY — no markdown, no commentary)
+{
+  "en": {
+    "title": "(copy the en title above exactly)",
+    "body": "(1-2 English sentences with 2-3 emojis, matching the title's scene/mood, mention Midroll-Ad-Free)",
+    "hashtags_top": "#tag1 #tag2 ... (15 hashtags, single line, space-separated, lowercase, ENGLISH keywords)",
+    "hashtags_bottom": "#tag1 #tag2 #tag3 #tag4 #tag5 #neworleansjazz, #swingjazz, ... (24 hashtags total — first 5 space-separated, rest comma-separated, lowercase, ENGLISH)"
+  },
+  "ko": {
+    "title": "(위 ko 제목 그대로 복사)",
+    "tagline": "(한국어 1줄 hook 문장 + 1-2 이모지 옵션)",
+    "body": "(한국어 3-4 문장, 제목의 장면·분위기·시나리오 언급, 1-2 이모지)",
+    "hashtags_top": "#태그1 #태그2 (한국어 해시태그 2-3개, 한 줄)",
+    "hashtags_bottom": "#태그1 #태그2 ... (한국어 해시태그 15개, 공백 구분)"
+  },
+  "ja": { /* same schema as ko — 日本語, polite and warm (です・ます), nostalgic tone welcome */ },
+  "zh": { /* 简体中文, same schema as ko */ },
+  "zh-Hant": { /* 繁體中文 */ },
+  "es": { /* Español */ },
+  "fr": { /* Français */ },
+  "de": { /* Deutsch */ },
+  "it": { /* Italiano */ },
+  "pt": { /* Português */ },
+  "ru": { /* Русский */ },
+  "nl": { /* Nederlands */ },
+  "th": { /* ไทย */ },
+  "vi": { /* Tiếng Việt */ },
+  "id": { /* Bahasa Indonesia */ },
+  "ms": { /* Bahasa Melayu */ },
+  "tl": { /* Filipino */ }
+}
+
+## Rules
+1. "title" = the decided title for that language, copied character for character.
+2. Non-English languages: tagline = ONE catchy hook sentence (different from body); body = 3-4 natural native sentences that fit the title's scene; hashtags_top = 2-3 native hashtags; hashtags_bottom = 15 native hashtags.
+3. Write natively — not stiff translations of the English.
+4. No volume/episode numbers anywhere.
+
+Generate now. Return JSON only — all ${allLangs.length} languages.`;
+}
+
 // Path B 전용 Gemini 모델 — pro 가 maxOutputTokens 65536 지원 (flash 는 8192 한계로 17개 언어 잘림).
 //   .env.local 에서 PATH_B_GEMINI_MODEL 로 override 가능 (예: gemini-3-pro-preview).
 const PATH_B_MODEL = process.env.PATH_B_GEMINI_MODEL || 'gemini-2.5-pro';
@@ -3540,12 +3604,20 @@ async function generatePathBWithRetry(prompt, maxRetries = 2) {
 //  영어: buildEnglishDescription (풀 형식 — Path A 영어 영상과 동일)
 //  16개 언어: buildLocalizedDescription (단순 형식 — native 해시태그 + tagline + [[제목]] + 짧은 영어 푸터)
 function buildPathBMeta(parsed, inputs, newTracks) {
-  const { seriesName, volNumber, baseTitle } = inputs;
+  const { seriesName, volNumber, baseTitle, fixedTitles } = inputs;
   const timeline = generatePathBTimeline(newTracks);
 
-  // baseTitle (360 라이브러리 선택) 있으면 영어 제목을 서버측에서 정확히 고정 —
-  // Gemini 가 본문을 바꿔치기/이모지 누락하는 케이스 방지. description 헤더도 같은 제목 쓰도록 parsed.en 보정.
-  if (baseTitle && baseTitle.trim()) {
+  // 미리 번역해 둔 제목: 17개 언어 제목을 서버에서 그대로 덮어씀 (Gemini 가 뭘 쓰든 무시).
+  //  description 의 [[제목]] 헤더도 같은 제목이 되도록 parsed 를 먼저 고친다.
+  if (fixedTitles) {
+    for (const [lang, t] of Object.entries(fixedTitles)) {
+      if (!t) continue;
+      if (parsed[lang]) parsed[lang] = { ...parsed[lang], title: t };
+    }
+    if (!parsed.en) parsed.en = { title: fixedTitles.en };
+  } else if (baseTitle && baseTitle.trim()) {
+    // baseTitle (옛 360 라이브러리 선택) 있으면 영어 제목을 서버측에서 정확히 고정 —
+    // Gemini 가 본문을 바꿔치기/이모지 누락하는 케이스 방지. description 헤더도 같은 제목 쓰도록 parsed.en 보정.
     const enTitle = `[${seriesName}] ${baseTitle} [Vol.${volNumber}]`;
     parsed.en = { ...parsed.en, title: enTitle };
   }
@@ -3559,6 +3631,7 @@ function buildPathBMeta(parsed, inputs, newTracks) {
     localizations: {},
     missingLanguages: [],
     pathBInputs: { seriesName, volNumber, baseTitle: (baseTitle || '') },
+    fixedTitles: !!fixedTitles,
   };
 
   for (const lang of PATH_B_LANGUAGES) {
@@ -3601,9 +3674,18 @@ function loadTitleLibrary() {
   const raw = JSON.parse(fs.readFileSync(p, 'utf-8'));
   const months = Array.isArray(raw.result) ? raw.result : [];
   const laneSet = new Set();
-  for (const m of months) for (const t of (m.titles || [])) if (t.lane) laneSet.add(t.lane);
-  _titleLibraryCache = { months, lanes: [...laneSet].sort() };
+  const byTitle = new Map();
+  for (const m of months) for (const t of (m.titles || [])) {
+    if (t.lane) laneSet.add(t.lane);
+    byTitle.set(String(t.title).trim().toLowerCase(), t);
+  }
+  _titleLibraryCache = { months, lanes: [...laneSet].sort(), byTitle };
   return _titleLibraryCache;
+}
+// 라이브러리 제목 → 항목 (2026-11-15 새 240개는 i18n 16개 언어 번역이 미리 들어 있음)
+function findLibraryEntry(title) {
+  if (!title) return null;
+  try { return loadTitleLibrary().byTitle.get(String(title).trim().toLowerCase()) || null; } catch { return null; }
 }
 app.get('/api/titles/library', (_req, res) => {
   try {
@@ -3634,29 +3716,39 @@ app.post('/api/uploader/path-b/generate', async (req, res) => {
   }
 
   const { seriesName, volNumber, mood, scenarios, era, notes, baseTitle, newTracks } = req.body || {};
-  if (!seriesName || typeof seriesName !== 'string' || !seriesName.trim()) {
-    return res.status(400).json({ ok: false, error: 'seriesName 필요' });
-  }
-  if (!Number.isFinite(volNumber) || volNumber < 1) {
-    return res.status(400).json({ ok: false, error: '유효한 volNumber 필요' });
+  // 미리 번역해 둔 라이브러리 제목(2026-11-15 새 240개)이면: 제목 17개 언어 전부 고정, Vol 번호 없음,
+  //  시리즈명 = 제목 앞 [대괄호] 문구. Gemini 는 설명·해시태그만 만든다.
+  const libEntry = (typeof baseTitle === 'string' && baseTitle.trim()) ? findLibraryEntry(baseTitle) : null;
+  const fixedTitles = (libEntry && libEntry.i18n && Object.keys(libEntry.i18n).length)
+    ? { en: libEntry.title, ...libEntry.i18n } : null;
+  if (!fixedTitles) {
+    if (!seriesName || typeof seriesName !== 'string' || !seriesName.trim()) {
+      return res.status(400).json({ ok: false, error: 'seriesName 필요' });
+    }
+    if (!Number.isFinite(volNumber) || volNumber < 1) {
+      return res.status(400).json({ ok: false, error: '유효한 volNumber 필요' });
+    }
   }
   if (!Array.isArray(newTracks) || !newTracks.length) {
     return res.status(400).json({ ok: false, error: 'newTracks 배열 필요' });
   }
 
   const inputs = {
-    seriesName: seriesName.trim(),
-    volNumber,
+    seriesName: fixedTitles ? String(libEntry.lane || '').trim() : seriesName.trim(),
+    volNumber: fixedTitles ? null : volNumber,
     mood: (mood || '').trim(),
     scenarios: (scenarios || '').trim(),
     era: (era || '').trim(),
     notes: (notes || '').trim(),
-    baseTitle: (typeof baseTitle === 'string' ? baseTitle : '').trim(),
+    baseTitle: fixedTitles ? libEntry.title : (typeof baseTitle === 'string' ? baseTitle : '').trim(),
+    fixedTitles,
   };
 
   try {
-    const prompt = buildPathBPrompt(inputs);
-    console.log(`[Path B] 시작 — 시리즈: "${inputs.seriesName}", Vol.${inputs.volNumber}`);
+    const prompt = fixedTitles ? buildPathBPromptFixed(inputs) : buildPathBPrompt(inputs);
+    console.log(fixedTitles
+      ? `[Path B] 시작 — 고정 제목 ${libEntry.id || ''} "${inputs.baseTitle}" (Vol 없음, 16개 언어 미리 번역)`
+      : `[Path B] 시작 — 시리즈: "${inputs.seriesName}", Vol.${inputs.volNumber}`);
 
     const { parsed, elapsed, attemptCount } = await generatePathBWithRetry(prompt, 2);
 

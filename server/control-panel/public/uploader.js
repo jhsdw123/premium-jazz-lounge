@@ -877,18 +877,21 @@ function renderPathSelector() {
 let pathBMode = 'picker';
 let pathBLibraryCache = null;       // { months:[{month,titles:[{n,title,lane}]}], lanes:[] }
 let pathBSelectedTitle = '';        // picker 모드에서 고른 base 영어 제목
+let pathBSelectedFixed = null;      // 고른 제목이 16개 언어 미리 번역된 새 제목이면 그 항목 (Vol 없음, 시리즈 = [대괄호])
+let pathBUsedTitles = null;         // 채널에 이미 올린 영어 제목 (소문자) — '사용함' 표시용
 
 function showPathBInputForm() {
   const container = document.getElementById('metaNextStep');
   if (!container) return;
 
   pathBSelectedTitle = '';
+  pathBSelectedFixed = null;
 
   container.innerHTML = `
     <h3 style="color:var(--jazz-gold);margin:0 0 12px;font-size:13px;font-weight:600;">✨ Path B: 새 메타 생성</h3>
 
     <div style="display:flex;gap:6px;margin-bottom:12px;">
-      <button id="pathBModePicker" type="button" class="te-btn" style="flex:1;padding:8px;font-size:11px;">🎵 360 제목에서 선택</button>
+      <button id="pathBModePicker" type="button" class="te-btn" style="flex:1;padding:8px;font-size:11px;">🎵 새 제목 239개에서 선택</button>
       <button id="pathBModeSeries" type="button" class="te-btn" style="flex:1;padding:8px;font-size:11px;">✏️ 시리즈명 직접 입력</button>
     </div>
 
@@ -905,7 +908,7 @@ function showPathBInputForm() {
       <div id="pathBTitlePreview" style="font-size:11px;color:#4c4;margin-top:6px;font-family:ui-monospace,Menlo,monospace;line-height:1.5;"></div>
     </div>
 
-    <div style="margin-bottom:12px;display:flex;gap:10px;align-items:center;">
+    <div id="pathBVolRow" style="margin-bottom:12px;display:flex;gap:10px;align-items:center;">
       <label style="color:var(--text-muted);font-size:11px;">Vol 번호:</label>
       <input type="number" id="pathBVolNumber" value="1" min="1" max="9999"
         style="width:80px;padding:6px 8px;background:#0a0a0a;color:var(--text);border:1px solid #444;border-radius:4px;font-size:13px;font-family:ui-monospace,Menlo,monospace;">
@@ -913,12 +916,12 @@ function showPathBInputForm() {
     </div>
 
     <div id="pathBPickerBlock" style="margin-bottom:14px;border:1px solid #2a2a2a;border-radius:4px;padding:10px;background:#121212;">
-      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:6px;">base 영어 제목 선택 <span style="color:#f55;">*</span> (방금 만든 360개 — 영상 음악 분위기에 맞춰 고르기)</label>
+      <label style="display:block;color:var(--text-muted);font-size:11px;margin-bottom:6px;">제목 선택 <span style="color:#f55;">*</span> (16개 언어 번역이 미리 돼 있음 — 영상 음악에 맞는 장르·장면인지 확인하고 고르기)</label>
       <div style="display:flex;gap:6px;margin-bottom:8px;">
-        <select id="pathBFilterMonth" style="flex:0 0 auto;padding:6px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:11px;"><option value="">월 전체</option></select>
-        <select id="pathBFilterLane" style="flex:1;padding:6px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:11px;"><option value="">분위기(lane) 전체</option></select>
+        <select id="pathBFilterMonth" style="flex:0 0 auto;padding:6px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:11px;"><option value="">분류 전체</option></select>
+        <select id="pathBFilterLane" style="flex:1;padding:6px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:11px;"><option value="">대괄호 문구 전체</option></select>
       </div>
-      <input type="text" id="pathBFilterSearch" placeholder="🔎 제목 검색 (예: swing, whiskey, autumn)"
+      <input type="text" id="pathBFilterSearch" placeholder="🔎 제목 검색 (예: kitchen, dixieland, morning)"
         autocomplete="off" spellcheck="false"
         style="width:100%;padding:7px 9px;margin-bottom:8px;background:#161616;color:var(--text);border:1px solid #2a2a2a;border-radius:4px;font-size:12px;">
       <div id="pathBTitleList" style="max-height:260px;overflow-y:auto;border:1px solid #222;border-radius:4px;background:#0d0d0d;font-size:12px;">
@@ -1022,11 +1025,12 @@ function setPathBMode(mode) {
   };
   on(pickerBtn, pathBMode === 'picker');
   on(seriesBtn, pathBMode === 'series');
+  applyPathBFixedLock(pathBMode === 'picker' ? pathBSelectedFixed : null);
 
   if (pathBMode === 'picker') {
     pickerBlock.style.display = '';
     if (moodReq) moodReq.style.display = 'none';
-    if (hint) hint.innerHTML = '360개 제목 중 하나를 base 영어 제목으로 선택 → Gemini 가 각 언어로 <b>자연 번역</b> + description/해시태그 생성.<br>최종: <span style="color:var(--jazz-gold);">[시리즈] (고른 제목) [Vol.N]</span>. 응답 ~10–60초.';
+    if (hint) hint.innerHTML = '새 제목 239개 중 하나를 고르면 <b>17개 언어 제목이 미리 검토한 번역 그대로</b> 들어가요. Vol 번호는 붙지 않고, 시리즈명은 제목 앞 [대괄호] 문구가 자동으로 들어가요.<br>Gemini 는 설명·해시태그만 만들어요. 응답 ~10–60초.';
   } else {
     pickerBlock.style.display = 'none';
     if (moodReq) moodReq.style.display = 'none';
@@ -1043,8 +1047,13 @@ function updatePathBPreview() {
   if (!previewEl || !seriesInput || !volInput) return;
   const series = sanitizeSeriesName(seriesInput.value);
   const vol = parseInt(volInput.value, 10) || 1;
-  if (!series) { previewEl.innerHTML = ''; return; }
+  if (!series && !(pathBMode === 'picker' && pathBSelectedFixed)) { previewEl.innerHTML = ''; return; }
 
+  if (pathBMode === 'picker' && pathBSelectedFixed) {
+    previewEl.innerHTML = `최종 제목: <span style="color:var(--jazz-gold);">${escapeHtml(pathBSelectedFixed.title)}</span><br>` +
+      `Vol 없음 · 16개 언어 제목 미리 번역됨 (${Object.keys(pathBSelectedFixed.i18n || {}).length}개)`;
+    return;
+  }
   if (pathBMode === 'picker') {
     if (!pathBSelectedTitle) {
       previewEl.innerHTML = `예상: <span style="color:var(--jazz-gold);">[${escapeHtml(series)}] (제목 선택 필요) [Vol.${vol}]</span>`;
@@ -1092,6 +1101,7 @@ async function loadPathBLibrary() {
       }
     }
     renderPathBTitleList();
+    loadPathBUsedTitles();
   } catch (e) {
     if (listEl) listEl.innerHTML = `<div style="padding:14px;text-align:center;color:#f55;">제목 로드 실패: ${escapeHtml(e.message)}</div>`;
   }
@@ -1112,10 +1122,11 @@ function renderPathBTitleList() {
       if (fLane && t.lane !== fLane) continue;
       if (fSearch && !t.title.toLowerCase().includes(fSearch)) continue;
       const sel = t.title === pathBSelectedTitle;
+      const used = pathBUsedTitles && pathBUsedTitles.has(String(t.title).trim().toLowerCase());
       rows.push(
         `<div data-m="${escapeHtml(m.month)}" data-n="${t.n}" style="padding:7px 9px;border-bottom:1px solid #1c1c1c;cursor:pointer;${sel ? 'background:#2a2410;border-left:3px solid var(--jazz-gold);' : ''}">` +
-        `<div style="color:${sel ? 'var(--jazz-gold)' : 'var(--text)'};">${escapeHtml(t.title)}</div>` +
-        `<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${escapeHtml(m.month)} · ${escapeHtml(t.lane || '')}</div>` +
+        `<div style="color:${sel ? 'var(--jazz-gold)' : used ? 'var(--text-muted)' : 'var(--text)'};">${escapeHtml(t.title)}${used ? ' <span style="font-size:10px;color:#e88;border:1px solid #844;border-radius:3px;padding:0 4px;margin-left:4px;">✓ 이미 올림</span>' : ''}</div>` +
+        `<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">${t.id ? escapeHtml(t.id) + ' · ' : ''}${escapeHtml(m.month)} · ${escapeHtml(t.lane || '')}</div>` +
         `</div>`
       );
     }
@@ -1128,10 +1139,45 @@ function renderPathBTitleList() {
 // 제목 선택 → 상태 갱신 + 표시 + preview + 리스트 하이라이트
 function selectPathBTitle(title) {
   pathBSelectedTitle = title;
+  pathBSelectedFixed = findPathBLibraryEntry(title);
+  applyPathBFixedLock(pathBMode === 'picker' ? pathBSelectedFixed : null);
   const disp = document.getElementById('pathBSelectedDisplay');
   if (disp) disp.innerHTML = `✓ 선택됨: <span style="color:var(--jazz-gold);">${escapeHtml(title)}</span>`;
   renderPathBTitleList();
   updatePathBPreview();
+}
+
+// 라이브러리에서 제목으로 항목 찾기 — i18n(16개 언어 번역) 이 있으면 '고정 제목'
+function findPathBLibraryEntry(title) {
+  if (!pathBLibraryCache || !title) return null;
+  const key = String(title).trim().toLowerCase();
+  for (const m of pathBLibraryCache.months) for (const t of m.titles) {
+    if (String(t.title).trim().toLowerCase() === key) return (t.i18n && Object.keys(t.i18n).length) ? t : null;
+  }
+  return null;
+}
+
+// 고정 제목을 고르면: 시리즈명 = [대괄호] 문구(잠금), Vol 줄 숨김. 아니면 원래대로.
+function applyPathBFixedLock(entry) {
+  const seriesInput = document.getElementById('pathBSeriesName');
+  const volRow = document.getElementById('pathBVolRow');
+  if (seriesInput) {
+    if (entry) { seriesInput.value = entry.lane || ''; seriesInput.readOnly = true; seriesInput.style.opacity = '0.6'; }
+    else if (seriesInput.readOnly) { seriesInput.readOnly = false; seriesInput.style.opacity = '1'; seriesInput.value = ''; }
+  }
+  if (volRow) volRow.style.display = entry ? 'none' : 'flex';
+}
+
+// 채널에 이미 올린 제목 — 목록에 '이미 올림' 표시 (실패해도 조용히 넘어감)
+async function loadPathBUsedTitles() {
+  if (pathBUsedTitles) return;
+  try {
+    const r = await fetch('/api/youtube/videos?max=50');
+    const d = await r.json();
+    if (!d.ok) return;
+    pathBUsedTitles = new Set((d.videos || []).map((v) => String(v.title || '').trim().toLowerCase()));
+    renderPathBTitleList();
+  } catch {}
 }
 
 // 시리즈명 cleanse — 대괄호 제거 + 공백 collapse + trim
@@ -1177,29 +1223,30 @@ async function generatePathBMeta() {
   const era = document.getElementById('pathBEra').value.trim();
   const notes = document.getElementById('pathBNotes').value.trim();
 
-  if (!seriesName || seriesName.length < 2) {
+  const fixedPick = (pathBMode === 'picker' && pathBSelectedFixed) ? pathBSelectedFixed : null;
+  if (!fixedPick && (!seriesName || seriesName.length < 2)) {
     alert('시리즈명 필수 (2자 이상, 대괄호 자동 제거됨)');
     return;
   }
-  if (seriesName.length > 30) {
+  if (!fixedPick && seriesName.length > 30) {
     alert('시리즈명 30자 이내 (현재 ' + seriesName.length + '자)');
     return;
   }
-  if (!Number.isFinite(volNumber) || volNumber < 1) {
+  if (!fixedPick && (!Number.isFinite(volNumber) || volNumber < 1)) {
     alert('유효한 Vol 번호 필요 (≥1)');
     return;
   }
   // picker 모드면 360 라이브러리에서 고른 base 영어 제목 필요
   const baseTitle = (pathBMode === 'picker') ? pathBSelectedTitle : '';
   if (pathBMode === 'picker' && !baseTitle) {
-    alert('360 제목 중 하나를 선택하거나, "✏️ 시리즈명 직접 입력" 모드로 전환하세요.');
+    alert('제목 목록에서 하나를 선택하거나, "✏️ 시리즈명 직접 입력" 모드로 전환하세요.');
     return;
   }
   // cleanse 한 결과를 input 에 반영 (사용자에게 보이게)
   document.getElementById('pathBSeriesName').value = seriesName;
 
-  // 중복 검증 (시리즈별)
-  try {
+  // 중복 검증 (시리즈별) — 고정 제목은 Vol 이 없으니 건너뜀
+  if (!fixedPick) try {
     const cr = await fetch(`/api/youtube/check-vol/${volNumber}?series=${encodeURIComponent(seriesName)}`);
     const cd = await cr.json();
     if (cd.ok && cd.hasDuplicate) {
@@ -1274,7 +1321,7 @@ function showPathBPreview(generated) {
       <div style="color:var(--text-muted);font-size:11px;margin-top:6px;line-height:1.7;">
         시리즈: <strong style="color:var(--text);">[${escapeHtml(inputs.seriesName || '')}]</strong>
         &nbsp;·&nbsp;
-        Vol: <strong style="color:var(--jazz-gold);">${generated.appliedVol ?? '?'}</strong>
+        ${generated.fixedTitles ? '<strong style="color:var(--jazz-gold);">Vol 없음 · 17개 언어 제목 고정</strong>' : `Vol: <strong style="color:var(--jazz-gold);">${generated.appliedVol ?? '?'}</strong>`}
         ${inputs.mood ? `<br>분위기: ${escapeHtml(inputs.mood)}` : ''}
         ${inputs.scenarios ? ` · 시나리오: ${escapeHtml(inputs.scenarios)}` : ''}
       </div>
